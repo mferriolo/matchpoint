@@ -1,0 +1,135 @@
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 220 13% 13%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 13% 13%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 13% 13%;
+
+    --primary: 6 92% 30%; /* Deep Red #911406 */
+    --primary-foreground: 0 0% 100%;
+
+
+    --secondary: 220 9% 46%; /* Grey */
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 220 13% 95%; /* Light grey */
+    --muted-foreground: 220 9% 46%;
+
+    --accent: 220 13% 91%; /* Light grey */
+    --accent-foreground: 220 9% 28%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 6 92% 30%; /* Deep Red focus ring */
+
+    --radius: 0.5rem;
+
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 220 13% 13%;
+    --sidebar-primary: 6 92% 30%; /* Deep Red */
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 13% 91%;
+    --sidebar-accent-foreground: 220 13% 13%;
+    --sidebar-border: 220 13% 88%;
+    --sidebar-ring: 6 92% 30%; /* Deep Red */
+
+  }
+
+  .dark {
+    --background: 220 13% 10%;
+    --foreground: 0 0% 95%;
+
+    --card: 220 13% 13%;
+    --card-foreground: 0 0% 95%;
+
+    --popover: 220 13% 13%;
+    --popover-foreground: 0 0% 95%;
+
+    --primary: 6 92% 35%; /* Deep Red in dark mode - slightly lighter */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 9% 46%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 220 13% 15%;
+    --muted-foreground: 220 9% 60%;
+
+    --accent: 220 13% 20%;
+    --accent-foreground: 0 0% 95%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 95%;
+
+    --border: 220 13% 25%;
+    --input: 220 13% 25%;
+    --ring: 6 92% 35%;
+
+    --sidebar-background: 220 13% 12%;
+    --sidebar-foreground: 0 0% 95%;
+    --sidebar-primary: 6 92% 35%; /* Deep Red */
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 13% 18%;
+    --sidebar-accent-foreground: 0 0% 95%;
+    --sidebar-border: 220 13% 18%;
+    --sidebar-ring: 6 92% 35%; /* Deep Red */
+
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans dark:bg-background dark:text-foreground;
+  }
+
+  pre, code {
+    @apply font-mono;
+  }
+}
+
+.markdown-editor {
+  @apply font-mono text-base leading-relaxed;
+}
+
+.markdown-preview {
+  @apply prose max-w-none prose-blue dark:prose-invert;
+}
+
+.markdown-preview pre {
+  @apply bg-secondary p-4 rounded-md overflow-x-auto;
+}
+
+.markdown-preview code {
+  @apply text-sm font-mono text-primary;
+}
+
+.markdown-preview h1,
+.markdown-preview h2,
+.markdown-preview h3,
+.markdown-preview h4,
+.markdown-preview h5,
+.markdown-preview h6 {
+  @apply font-sans font-semibold text-foreground;
+}
+
+.markdown-preview ul,
+.markdown-preview ol {
+  @apply my-4 ml-6;
+}

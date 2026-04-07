@@ -1,0 +1,98 @@
+import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
+
+  try {
+    const ZOOM_ACCOUNT_ID = Deno.env.get('ZOOM_ACCOUNT_ID');
+    const ZOOM_CLIENT_ID = Deno.env.get('ZOOM_CLIENT_ID');
+    const ZOOM_CLIENT_SECRET = Deno.env.get('ZOOM_CLIENT_SECRET');
+
+    if (!ZOOM_ACCOUNT_ID || !ZOOM_CLIENT_ID || !ZOOM_CLIENT_SECRET) {
+      throw new Error('Missing Zoom credentials');
+    }
+
+    console.log('Getting OAuth token...');
+    
+    const tokenResponse = await fetch('https://zoom.us/oauth/token', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${btoa(`${ZOOM_CLIENT_ID}:${ZOOM_CLIENT_SECRET}`)}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: `grant_type=account_credentials&account_id=${ZOOM_ACCOUNT_ID}`,
+    });
+
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text();
+      throw new Error(`OAuth failed: ${errorText}`);
+    }
+
+    const { access_token } = await tokenResponse.json();
+    console.log('OAuth token obtained');
+
+    const { topic = 'Interview Call', duration = 60 } = await req.json();
+    
+    const meetingResponse = await fetch('https://api.zoom.us/v2/users/me/meetings', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${access_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        topic: topic,
+        type: 2,
+        duration: duration,
+        settings: {
+          host_video: true,
+          participant_video: true,
+          join_before_host: true,
+          waiting_room: false,
+          audio: 'both',
+        },
+      }),
+    });
+
+    if (!meetingResponse.ok) {
+      const errorText = await meetingResponse.text();
+      throw new Error(`Meeting creation failed: ${errorText}`);
+    }
+
+    const meetingData = await meetingResponse.json();
+    console.log('Meeting created:', meetingData.id);
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        meeting_id: meetingData.id.toString(),
+        join_url: meetingData.join_url,
+        password: meetingData.password || '',
+        meetingNumber: meetingData.id.toString(),
+      }),
+      {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 200,
+      }
+    );
+
+  } catch (error) {
+    console.error('Error:', error);
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: error.message,
+      }),
+      {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 500,
+      }
+    );
+  }
+});

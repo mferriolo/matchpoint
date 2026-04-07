@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/jpeg" href="https://d64gsuwffb70l.cloudfront.net/688a62022b0804ff55b70568_1758724982188_02639b59.jpg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MedCentric Job Processor</title>
+    <script>
+      // Suppress Wake Lock errors from Zoom SDK
+      window.addEventListener('unhandledrejection', function(event) {
+        if (event.reason && event.reason.message && 
+            event.reason.message.includes('WakeLock')) {
+          event.preventDefault();
+        }
+      });
+      window.addEventListener('error', function(event) {
+        if (event.message && event.message.includes('WakeLock')) {
+          event.preventDefault();
+        }
+      });
+    </script>
+
+
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
