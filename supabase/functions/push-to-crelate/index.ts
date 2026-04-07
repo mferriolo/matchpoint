@@ -13,7 +13,7 @@ async function G(p:string,k:string,q:Record<string,string>={}){const u=new URL(`
 async function Po(p:string,k:string,e:any){for(let i=0;i<=2;i++){try{const r=await fetch(`${CB}${p}`,{method:'POST',headers:{'X-Api-Key':k,'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({entity:e})});if(r.status===429){await W(3000*(i+1));continue;}const t=await r.text();let d:any;try{d=JSON.parse(t);}catch{d=t;}return{ok:r.ok,data:d,status:r.status,err:r.ok?undefined:(d?.Errors?.[0]?.Message||`HTTP ${r.status}`),rawBody:t};}catch{await W(2000);}}return{ok:false,err:'retry',status:0,rawBody:''};}
 async function Pa(p:string,k:string,e:any){for(let i=0;i<=2;i++){try{const r=await fetch(`${CB}${p}`,{method:'PATCH',headers:{'X-Api-Key':k,'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({entity:e})});if(r.status===429){await W(3000*(i+1));continue;}if(!r.ok){await r.text();return{ok:false};}return{ok:true};}catch{await W(2000);}}return{ok:false};}
 const xI=(d:any)=>{if(!d)return'';if(typeof d==='string'&&ok(d))return d;if(typeof d.Data==='string'&&ok(d.Data))return d.Data;if(d.Data?.Id&&ok(d.Data.Id))return d.Data.Id;if(d.Id&&ok(d.Id))return d.Id;return'';};
-async function safeDbUpdate(table:string,updates:Record<string,any>,col:string,val:string){try{await sb.from(table).update(updates).eq(col,val);}catch(e){console.log(`[v53] DB update error (${table}): ${(e as Error).message}`);}}
+async function safeDbUpdate(table:string,updates:Record<string,any>,col:string,val:string){try{await sb.from(table).update(updates).eq(col,val);}catch(e){console.log(`[v54] DB update error (${table}): ${(e as Error).message}`);}}
 const CC:Record<string,string>={};
 let allCrelateCompanies:Array<{id:string;name:string;n:string}>=[];
 let companiesLoadedAt=0;
@@ -22,7 +22,7 @@ async function loadAllCrelateCompanies(k:string):Promise<void>{
   if(allCrelateCompanies.length>0&&(Date.now()-companiesLoadedAt)<COMPANY_CACHE_TTL)return;
   const seen=new Set<string>();const companies:typeof allCrelateCompanies=[];
   for(let skip=0;skip<2000;skip+=50){
-    const r=await G('/companies',k,{take:'50',skip:String(skip)});
+    const r=await G('/companies',k,{limit:'50',offset:String(skip)});
     await W(DL);
     if(!r?.Data||!Array.isArray(r.Data)||r.Data.length===0)break;
     let newInPage=0;
@@ -36,7 +36,7 @@ async function loadAllCrelateCompanies(k:string):Promise<void>{
   }
   allCrelateCompanies=companies;
   companiesLoadedAt=Date.now();
-  console.log(`[v53] Loaded ${allCrelateCompanies.length} Crelate companies into cache`);
+  console.log(`[v54] Loaded ${allCrelateCompanies.length} Crelate companies into cache`);
 }
 async function lCC(){const{data}=await sb.from('marketing_companies').select('company_name,crelate_id').not('crelate_id','is',null);if(data)for(const r of data)if(r.crelate_id&&ok(r.crelate_id)&&r.company_name)CC[r.company_name.toLowerCase().trim()]=r.crelate_id;}
 
@@ -44,7 +44,7 @@ async function rC(n:string,k:string):Promise<{id:string|null;log:string;error?:s
   if(!n||bad(n))return{id:null,log:'bad'};const c=n.toLowerCase().trim();
   if(CC[c])return{id:CC[c],log:'$'};
   for(const[x,v]of Object.entries(CC))if(sm(n,x)){CC[c]=v;return{id:v,log:'$f'};}
-  try{const r=await G('/companies',k,{search:n,take:'50'});await W(DL);if(r?.Data)for(const x of r.Data)if(x.Id&&ok(x.Id)&&x.Name&&sm(n,x.Name)){CC[c]=x.Id;await safeDbUpdate('marketing_companies',{crelate_id:x.Id},'company_name',n);return{id:x.Id,log:'s'};}}catch{}
+  try{const r=await G('/companies',k,{name:n,limit:'50'});await W(DL);if(r?.Data)for(const x of r.Data)if(x.Id&&ok(x.Id)&&x.Name&&sm(n,x.Name)){CC[c]=x.Id;await safeDbUpdate('marketing_companies',{crelate_id:x.Id},'company_name',n);return{id:x.Id,log:'s'};}}catch{}
   if(!n||!n.trim())return{id:null,log:'x:empty-name',error:'Company name is empty or undefined'};
   try{const r=await Po('/companies',k,{Name:n});await W(DL);
     if(r.ok){const id=xI(r.data);if(id){CC[c]=id;await safeDbUpdate('marketing_companies',{crelate_id:id},'company_name',n);return{id,log:'+'};}else return{id:null,log:'x:no-id',error:`POST OK but no ID. Body: ${(r.rawBody||'').substring(0,200)}`};}
@@ -60,7 +60,7 @@ async function rC(n:string,k:string):Promise<{id:string|null;log:string;error?:s
         }
         return{id:null,log:'x:409-nf',error:`409 duplicate but not found in full company cache (${allCrelateCompanies.length} companies loaded). Input="${n}"`};
       }
-      console.log(`[v53] COMPANY CREATE FAILED: Status=${r.status}, err=${r.err}`);return{id:null,log:`x:${r.status}`,error:`HTTP ${r.status} - ${r.err}`};}
+      console.log(`[v54] COMPANY CREATE FAILED: Status=${r.status}, err=${r.err}`);return{id:null,log:`x:${r.status}`,error:`HTTP ${r.status} - ${r.err}`};}
   }catch(e){return{id:null,log:'x:exc',error:`Exception: ${(e as Error).message}`};}
 }
 interface TitleMapping{tracker_title:string;crelate_title:string;crelate_title_id:string|null;}
@@ -68,9 +68,9 @@ let titleMappings:TitleMapping[]=[];let titleMappingsLoadedAt=0;const MAPPING_CA
 async function loadTitleMappings():Promise<void>{
   if(titleMappings.length>0&&(Date.now()-titleMappingsLoadedAt)<MAPPING_CACHE_TTL)return;
   const{data,error}=await sb.from('crelate_title_mappings').select('tracker_title,crelate_title,crelate_title_id');
-  if(error){console.error('[v53] Error loading title mappings:',error.message);return;}
+  if(error){console.error('[v54] Error loading title mappings:',error.message);return;}
   titleMappings=(data||[]).map((r:any)=>({tracker_title:(r.tracker_title||'').toLowerCase().trim(),crelate_title:r.crelate_title||'',crelate_title_id:r.crelate_title_id||null}));
-  titleMappingsLoadedAt=Date.now();console.log(`[v53] Loaded ${titleMappings.length} title mappings`);
+  titleMappingsLoadedAt=Date.now();console.log(`[v54] Loaded ${titleMappings.length} title mappings`);
 }
 function checkTitleMapping(title:string):{id:string|null;crelateTitle:string|null}{
   const nt=(title||'').toLowerCase().trim();if(!nt)return{id:null,crelateTitle:null};
@@ -83,9 +83,9 @@ let allTitles:CachedTitle[]=[];let titlesLoadedAt=0;let titleLoadApiCalls=0;cons
 async function loadAllJobTitles(k:string):Promise<void>{
   if(allTitles.length>0&&(Date.now()-titlesLoadedAt)<TITLE_CACHE_TTL)return;
   const startMs=Date.now();const seen=new Set<string>();const newTitles:CachedTitle[]=[];let apiCalls=0;let noNewCount=0;
-  for(let skip=0;skip<200;skip+=50){const r=await G('/jobtitles',k,{take:'500',skip:String(skip)});apiCalls++;await W(DL);if(!r?.Data||!Array.isArray(r.Data)||r.Data.length===0)break;let newInPage=0;for(const j of r.Data){if(!j.Id||!ok(j.Id)||!j.Title||seen.has(j.Id))continue;seen.add(j.Id);const n=N(j.Title);const words=new Set(n.split(/\s+/).filter((w:string)=>w.length>1));newTitles.push({id:j.Id,title:j.Title,n,words});newInPage++;}if(newInPage===0){noNewCount++;if(noNewCount>=1)break;}else{noNewCount=0;}}
+  for(let skip=0;skip<200;skip+=50){const r=await G('/jobtitles',k,{limit:'100',offset:String(skip)});apiCalls++;await W(DL);if(!r?.Data||!Array.isArray(r.Data)||r.Data.length===0)break;let newInPage=0;for(const j of r.Data){if(!j.Id||!ok(j.Id)||!j.Title||seen.has(j.Id))continue;seen.add(j.Id);const n=N(j.Title);const words=new Set(n.split(/\s+/).filter((w:string)=>w.length>1));newTitles.push({id:j.Id,title:j.Title,n,words});newInPage++;}if(newInPage===0){noNewCount++;if(noNewCount>=1)break;}else{noNewCount=0;}}
   allTitles=newTitles;titlesLoadedAt=Date.now();titleLoadApiCalls=apiCalls;
-  console.log(`[v53] Loaded ${allTitles.length} titles in ${Date.now()-startMs}ms (${apiCalls} calls)`);
+  console.log(`[v54] Loaded ${allTitles.length} titles in ${Date.now()-startMs}ms (${apiCalls} calls)`);
 }
 const JC:Record<string,string>={};
 const RL=['nurse practitioner','registered nurse','licensed practical nurse','certified nursing assistant','medical assistant','physician assistant','physical therapist','occupational therapist','speech language pathologist','respiratory therapist','radiologic technologist','pharmacy technician','pharmacist','medical director','physician','surgeon','psychiatrist','psychologist','social worker','counselor','therapist','dietitian','paramedic','sonographer','lab technician','phlebotomist','medical coder','case manager','care coordinator','clinical director','director of nursing','nurse manager','staff nurse','travel nurse','home health aide','hospice nurse','icu nurse','oncology nurse','pediatric nurse','practice manager','office manager','clinic manager','administrator','receptionist','billing specialist','health educator','behavioral health','mental health','lcsw','lpc','cna','rn','lpn','lvn','np','pa','pt','ot','slp','rt','aprn','crna','fnp','pmhnp','dnp','technician','technologist','specialist','coordinator','manager','director','supervisor','analyst','aide','assistant'];
@@ -118,12 +118,12 @@ async function rJ(t:string,k:string):Promise<{id:string|null;log:string;mt?:stri
   if(bestTitle&&bestScore>=0.35){JC[c]=bestTitle.ct.id;return{id:bestTitle.ct.id,log:`s(${bestScore.toFixed(2)})`,mt:bestTitle.ct.title};}
   return{id:null,log:bestTitle?`lo(${bestScore.toFixed(2)})`:'0match',bestScore,bestCandidate:bestTitle?.ct.title,simplified:si,baseRole:br||undefined,top3};
 }
-async function fJ(t:string,co:string,k:string){try{const r=await G('/jobs',k,{search:co?`${co} ${t}`:t,take:'30'});await W(DL);if(!r?.Data)return null;const nt=N(t),nc=N(co);for(const j of r.Data){if(!j.Id||!ok(j.Id))continue;const jn=N(j.Name||'');if(nc&&nt&&jn.includes(nt)&&jn.includes(nc))return{id:j.Id,name:j.Name};}return null;}catch{return null;}}
+async function fJ(t:string,co:string,k:string){try{const r=await G('/jobs',k,{name:co?`${co} ${t}`:t,limit:'30'});await W(DL);if(!r?.Data)return null;const nt=N(t),nc=N(co);for(const j of r.Data){if(!j.Id||!ok(j.Id))continue;const jn=N(j.Name||'');if(nc&&nt&&jn.includes(nt)&&jn.includes(nc))return{id:j.Id,name:j.Name};}return null;}catch{return null;}}
 const vN=(v:any)=>{if(!v)return false;const t=v.trim();return t.length>0&&t.length<=80&&/[a-zA-Z]/.test(t);};
-async function fCt(fn:string,ln:string,k:string){try{const r=await G('/contacts',k,{search:`${fn} ${ln}`,take:'10'});for(const i of(r?.Data||[]))if((i.FirstName||'').toLowerCase().trim()===fn.toLowerCase().trim()&&(i.LastName||'').toLowerCase().trim()===ln.toLowerCase().trim())return i.Id;return null;}catch{return null;}}
+async function fCt(fn:string,ln:string,k:string){try{const r=await G('/contacts',k,{name:`${fn} ${ln}`,limit:'10'});for(const i of(r?.Data||[]))if((i.FirstName||'').toLowerCase().trim()===fn.toLowerCase().trim()&&(i.LastName||'').toLowerCase().trim()===ln.toLowerCase().trim())return i.Id;return null;}catch{return null;}}
 
 Deno.serve(async(req)=>{
-  console.log('[v53] Function invoked, method:', req.method, 'url:', req.url);
+  console.log('[v54] Function invoked, method:', req.method, 'url:', req.url);
   if(req.method==='OPTIONS')return new Response('ok',{headers:corsHeaders});
   try{
     const st=Date.now();
@@ -133,7 +133,7 @@ Deno.serve(async(req)=>{
     let b:any;
     try{b=await req.json();}catch(jsonErr){return R({error:"JSON parse failed",success:false,v:'51',detail:(jsonErr as Error).message});}
     const{action:a,records:recs,skipDuplicateCheck:sd}=b;
-    console.log('[v53] action:', a, 'records:', recs?.length);
+    console.log('[v54] action:', a, 'records:', recs?.length);
 
 if(a==='get_sync_status'){const{data:x}=await sb.from('marketing_companies').select('id,crelate_id');const{data:y}=await sb.from('marketing_contacts').select('id,crelate_contact_id');const{data:z}=await sb.from('marketing_jobs').select('id,crelate_id');return R({success:true,counts:{companies:{total:(x||[]).length,synced:(x||[]).filter(i=>i.crelate_id).length},contacts:{total:(y||[]).length,synced:(y||[]).filter(i=>i.crelate_contact_id).length},jobs:{total:(z||[]).length,synced:(z||[]).filter(i=>i.crelate_id).length}}});}
 
@@ -177,7 +177,7 @@ if(a==='push_companies'){for(const rec of recs){try{if(Date.now()-st>45000){resu
 else if(a==='push_contacts'){for(const rec of recs){try{if(Date.now()-st>45000){results.push({id:rec.id,status:'error',message:'TO'});continue;}const fn=vN(rec.first_name)?rec.first_name.trim():'',ln=vN(rec.last_name)?rec.last_name.trim():'';if(!fn&&!ln){results.push({id:rec.id,status:'skipped'});continue;}const dn=`${fn} ${ln}`.trim();if(rec.crelate_contact_id){results.push({id:rec.id,name:dn,status:'skipped'});continue;}if(!sd&&fn&&ln){const e=await fCt(fn,ln,k);if(e){results.push({id:rec.id,name:dn,status:'skipped',crelateId:e});await safeDbUpdate('marketing_contacts',{crelate_contact_id:e},'id',rec.id);await W(DL);continue;}}const ent:any={};if(fn)ent.FirstName=fn;if(ln)ent.LastName=ln;if(fn&&!ln){ent.LastName=fn;delete ent.FirstName;}if(rec.email)ent.EmailAddresses_Work={Value:rec.email,IsPrimary:true};if(rec.title)ent.CurrentPosition={JobTitle:rec.title,IsPrimary:true};const cn=rec.company_name||'';if(cn&&!bad(cn)){const cr=await rC(cn,k);if(cr.id){if(!ent.CurrentPosition)ent.CurrentPosition={IsPrimary:true};ent.CurrentPosition.CompanyId={Id:cr.id};}}const res=await Po('/contacts',k,ent);await W(DL);if(res.ok){const cid=xI(res.data);results.push({id:rec.id,name:dn,status:'success',crelateId:cid});if(cid)await safeDbUpdate('marketing_contacts',{crelate_contact_id:cid},'id',rec.id);}else results.push({id:rec.id,name:dn,status:'error',message:res.err});}catch(e){results.push({id:rec.id,status:'error',message:(e as Error).message});}}}
 
 else if(a==='push_jobs'){
-  console.log('[v53] push_jobs:', recs.length, 'records');
+  console.log('[v54] push_jobs:', recs.length, 'records');
   const unmatchedDuringPush:Record<string,{title:string;count:number;companies:string[];bestScore:number;bestCandidate:string;simplified:string;baseRole:string;top3:Top3Candidate[]}>={};
   for(let ri=0;ri<recs.length;ri++){const rec=recs[ri];try{if(Date.now()-st>45000){results.push({id:rec.id,status:'error',message:'TO'});continue;}
   const title=(rec.job_title||rec.title||rec.Name||'').trim();
@@ -223,7 +223,7 @@ else return R({error:`Unk:${a}`,success:false});
 return R({success:true,v:'51',summary:{total:recs.length,ok:results.filter(r=>r.status==='success').length,skip:results.filter(r=>r.status==='skipped').length,err:results.filter(r=>r.status==='error').length},results,ms:`${Date.now()-st}`});
 
   }catch(topErr){
-    console.error('[v53] TOP-LEVEL ERROR:', (topErr as Error).message, (topErr as Error).stack);
+    console.error('[v54] TOP-LEVEL ERROR:', (topErr as Error).message, (topErr as Error).stack);
     return new Response(JSON.stringify({success:false,v:'51',error:(topErr as Error).message,stack:((topErr as Error).stack||'').substring(0,500),note:'Top-level catch triggered'}),{headers:{'Content-Type':'application/json',...corsHeaders}});
   }
 });
