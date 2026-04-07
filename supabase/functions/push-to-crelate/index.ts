@@ -13,8 +13,31 @@ async function G(p:string,k:string,q:Record<string,string>={}){const u=new URL(`
 async function Po(p:string,k:string,e:any){for(let i=0;i<=2;i++){try{const r=await fetch(`${CB}${p}`,{method:'POST',headers:{'X-Api-Key':k,'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({entity:e})});if(r.status===429){await W(3000*(i+1));continue;}const t=await r.text();let d:any;try{d=JSON.parse(t);}catch{d=t;}return{ok:r.ok,data:d,status:r.status,err:r.ok?undefined:(d?.Errors?.[0]?.Message||`HTTP ${r.status}`),rawBody:t};}catch{await W(2000);}}return{ok:false,err:'retry',status:0,rawBody:''};}
 async function Pa(p:string,k:string,e:any){for(let i=0;i<=2;i++){try{const r=await fetch(`${CB}${p}`,{method:'PATCH',headers:{'X-Api-Key':k,'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({entity:e})});if(r.status===429){await W(3000*(i+1));continue;}if(!r.ok){await r.text();return{ok:false};}return{ok:true};}catch{await W(2000);}}return{ok:false};}
 const xI=(d:any)=>{if(!d)return'';if(typeof d==='string'&&ok(d))return d;if(typeof d.Data==='string'&&ok(d.Data))return d.Data;if(d.Data?.Id&&ok(d.Data.Id))return d.Data.Id;if(d.Id&&ok(d.Id))return d.Id;return'';};
-async function safeDbUpdate(table:string,updates:Record<string,any>,col:string,val:string){try{await sb.from(table).update(updates).eq(col,val);}catch(e){console.log(`[v52] DB update error (${table}): ${(e as Error).message}`);}}
+async function safeDbUpdate(table:string,updates:Record<string,any>,col:string,val:string){try{await sb.from(table).update(updates).eq(col,val);}catch(e){console.log(`[v53] DB update error (${table}): ${(e as Error).message}`);}}
 const CC:Record<string,string>={};
+let allCrelateCompanies:Array<{id:string;name:string;n:string}>=[];
+let companiesLoadedAt=0;
+const COMPANY_CACHE_TTL=10*60*1000;
+async function loadAllCrelateCompanies(k:string):Promise<void>{
+  if(allCrelateCompanies.length>0&&(Date.now()-companiesLoadedAt)<COMPANY_CACHE_TTL)return;
+  const seen=new Set<string>();const companies:typeof allCrelateCompanies=[];
+  for(let skip=0;skip<2000;skip+=50){
+    const r=await G('/companies',k,{take:'50',skip:String(skip)});
+    await W(DL);
+    if(!r?.Data||!Array.isArray(r.Data)||r.Data.length===0)break;
+    let newInPage=0;
+    for(const c of r.Data){
+      if(!c.Id||!ok(c.Id)||!c.Name||seen.has(c.Id))continue;
+      seen.add(c.Id);
+      companies.push({id:c.Id,name:c.Name,n:N(c.Name)});
+      newInPage++;
+    }
+    if(newInPage===0)break;
+  }
+  allCrelateCompanies=companies;
+  companiesLoadedAt=Date.now();
+  console.log(`[v53] Loaded ${allCrelateCompanies.length} Crelate companies into cache`);
+}
 async function lCC(){const{data}=await sb.from('marketing_companies').select('company_name,crelate_id').not('crelate_id','is',null);if(data)for(const r of data)if(r.crelate_id&&ok(r.crelate_id)&&r.company_name)CC[r.company_name.toLowerCase().trim()]=r.crelate_id;}
 
 async function rC(n:string,k:string):Promise<{id:string|null;log:string;error?:string;_409Debug?:any}>{
@@ -27,110 +50,17 @@ async function rC(n:string,k:string):Promise<{id:string|null;log:string;error?:s
     if(r.ok){const id=xI(r.data);if(id){CC[c]=id;await safeDbUpdate('marketing_companies',{crelate_id:id},'company_name',n);return{id,log:'+'};}else return{id:null,log:'x:no-id',error:`POST OK but no ID. Body: ${(r.rawBody||'').substring(0,200)}`};}
     else{
       if(r.status===409){
-        // --- 409 DETAILED DEBUG LOGGING ---
-        const debugInfo:any = {
-          inputCompanyName: n,
-          inputCompanyNameLower: n.toLowerCase().trim(),
-          inputCompanyNameNormalized: N(n),
-          timestamp: new Date().toISOString(),
-          searches: [] as any[]
-        };
-
-        console.log(`[v52] 409 for company "${n}", starting detailed debug search...`);
-
-        // Search 1: Full name search
-        try{
-          const searchQuery = n;
-          const searchUrl = new URL(`${CB}/companies`);
-          searchUrl.searchParams.set('search', searchQuery);
-          searchUrl.searchParams.set('take', '50');
-          const fullUrl = searchUrl.toString();
-
-          console.log(`[v52] 409 Search 1 - URL: ${fullUrl}`);
-
-          const rawResp = await fetch(fullUrl, {method:'GET',headers:{'X-Api-Key':k,'Accept':'application/json'}});
-          const rawBody = await rawResp.text();
-          await W(DL);
-
-          let parsed:any = null;
-          try { parsed = JSON.parse(rawBody); } catch {}
-
-          const resultCount = parsed?.Data?.length || 0;
-          const resultNames = (parsed?.Data||[]).map((x:any)=>({name:x.Name, id:x.Id})).slice(0,20);
-
-          const search1Debug = {
-            searchNumber: 1,
-            searchQuery,
-            fullUrl,
-            httpStatus: rawResp.status,
-            rawBodyLength: rawBody.length,
-            rawBodyPreview: rawBody.substring(0, 500),
-            resultCount,
-            resultNames,
-            comparisonResults: resultNames.map((r:any)=>({
-              crName: r.name,
-              crNameLower: (r.name||'').toLowerCase().trim(),
-              crNameNormalized: N(r.name||''),
-              inputLower: n.toLowerCase().trim(),
-              inputNormalized: N(n),
-              exactLowerMatch: (r.name||'').toLowerCase().trim() === n.toLowerCase().trim(),
-              smMatch: sm(n, r.name||''),
-              includesInput: (r.name||'').toLowerCase().includes(n.toLowerCase().trim()),
-              inputIncludesCr: n.toLowerCase().trim().includes((r.name||'').toLowerCase().trim())
-            }))
-          };
-          debugInfo.searches.push(search1Debug);
-          console.log(`[v52] 409 Search 1 results: ${resultCount} companies, names: ${JSON.stringify(resultNames.map((r:any)=>r.name))}`);
-
-          // Try matching (same logic as before)
-          if(parsed?.Data){
-            for(const x of parsed.Data){
-              if(!x.Id||!ok(x.Id)||!x.Name)continue;
-              const xLower=x.Name.toLowerCase().trim();
-              const nLower=n.toLowerCase().trim();
-              if(xLower===nLower||sm(n,x.Name)){
-                CC[c]=x.Id;await safeDbUpdate('marketing_companies',{crelate_id:x.Id},'company_name',n);
-                debugInfo.outcome = 'MATCHED on search 1';
-                debugInfo.matchedName = x.Name;
-                debugInfo.matchedId = x.Id;
-                return{id:x.Id,log:'409+s',_409Debug:debugInfo};
-              }
-            }
+        await loadAllCrelateCompanies(k);
+        for(const co of allCrelateCompanies){
+          if(co.n===N(n)||sm(n,co.name)){
+            CC[c]=co.id;
+            await safeDbUpdate('marketing_companies',{crelate_id:co.id},'company_name',n);
+            return{id:co.id,log:'409+cache'};
           }
-          debugInfo.search1MatchResult = 'NO MATCH FOUND';
-        }catch(e){
-          debugInfo.searches.push({searchNumber:1,error:(e as Error).message});
-          console.log(`[v52] 409 Search 1 error: ${(e as Error).message}`);
         }
-
-        // Search 2: First word only
-const firstWord = n.trim().split(/\s+/)[0];
-if(firstWord && firstWord.length >= 4){
-  try{
-    const r2 = await G('/companies',k,{search:firstWord,take:'50'});
-    await W(DL);
-    if(r2?.Data){
-      for(const x of r2.Data){
-        if(!x.Id||!ok(x.Id)||!x.Name)continue;
-        const xLower=x.Name.toLowerCase().trim();
-        const nLower=n.toLowerCase().trim();
-        if(xLower===nLower||sm(n,x.Name)||xLower.includes(nLower)||nLower.includes(xLower)){
-          CC[c]=x.Id;
-          await safeDbUpdate('marketing_companies',{crelate_id:x.Id},'company_name',n);
-          return{id:x.Id,log:'409+s1w'};
-        }
+        return{id:null,log:'x:409-nf',error:`409 duplicate but not found in full company cache (${allCrelateCompanies.length} companies loaded). Input="${n}"`};
       }
-    }
-  }catch{}
-}
-
-        debugInfo.outcome = '409-nf: No match found in any search';
-        debugInfo.smFunctionExplained = 'sm() normalizes both strings (lowercase, strip punctuation, collapse spaces), then checks: exact match, prefix match, or substring containment (min 4 chars)';
-        console.log(`[v52] 409-nf FINAL for "${n}": ${JSON.stringify(debugInfo.searches.map((s:any)=>({num:s.searchNumber,query:s.searchQuery,results:s.resultCount,error:s.error})))}`);
-
-        return{id:null,log:'x:409-nf',error:`409 duplicate but search failed to find match. Input="${n}"`,_409Debug:debugInfo};
-      }
-      console.log(`[v52] COMPANY CREATE FAILED: Status=${r.status}, err=${r.err}`);return{id:null,log:`x:${r.status}`,error:`HTTP ${r.status} - ${r.err}`};}
+      console.log(`[v53] COMPANY CREATE FAILED: Status=${r.status}, err=${r.err}`);return{id:null,log:`x:${r.status}`,error:`HTTP ${r.status} - ${r.err}`};}
   }catch(e){return{id:null,log:'x:exc',error:`Exception: ${(e as Error).message}`};}
 }
 interface TitleMapping{tracker_title:string;crelate_title:string;crelate_title_id:string|null;}
@@ -138,9 +68,9 @@ let titleMappings:TitleMapping[]=[];let titleMappingsLoadedAt=0;const MAPPING_CA
 async function loadTitleMappings():Promise<void>{
   if(titleMappings.length>0&&(Date.now()-titleMappingsLoadedAt)<MAPPING_CACHE_TTL)return;
   const{data,error}=await sb.from('crelate_title_mappings').select('tracker_title,crelate_title,crelate_title_id');
-  if(error){console.error('[v52] Error loading title mappings:',error.message);return;}
+  if(error){console.error('[v53] Error loading title mappings:',error.message);return;}
   titleMappings=(data||[]).map((r:any)=>({tracker_title:(r.tracker_title||'').toLowerCase().trim(),crelate_title:r.crelate_title||'',crelate_title_id:r.crelate_title_id||null}));
-  titleMappingsLoadedAt=Date.now();console.log(`[v52] Loaded ${titleMappings.length} title mappings`);
+  titleMappingsLoadedAt=Date.now();console.log(`[v53] Loaded ${titleMappings.length} title mappings`);
 }
 function checkTitleMapping(title:string):{id:string|null;crelateTitle:string|null}{
   const nt=(title||'').toLowerCase().trim();if(!nt)return{id:null,crelateTitle:null};
@@ -155,7 +85,7 @@ async function loadAllJobTitles(k:string):Promise<void>{
   const startMs=Date.now();const seen=new Set<string>();const newTitles:CachedTitle[]=[];let apiCalls=0;let noNewCount=0;
   for(let skip=0;skip<200;skip+=50){const r=await G('/jobtitles',k,{take:'500',skip:String(skip)});apiCalls++;await W(DL);if(!r?.Data||!Array.isArray(r.Data)||r.Data.length===0)break;let newInPage=0;for(const j of r.Data){if(!j.Id||!ok(j.Id)||!j.Title||seen.has(j.Id))continue;seen.add(j.Id);const n=N(j.Title);const words=new Set(n.split(/\s+/).filter((w:string)=>w.length>1));newTitles.push({id:j.Id,title:j.Title,n,words});newInPage++;}if(newInPage===0){noNewCount++;if(noNewCount>=1)break;}else{noNewCount=0;}}
   allTitles=newTitles;titlesLoadedAt=Date.now();titleLoadApiCalls=apiCalls;
-  console.log(`[v52] Loaded ${allTitles.length} titles in ${Date.now()-startMs}ms (${apiCalls} calls)`);
+  console.log(`[v53] Loaded ${allTitles.length} titles in ${Date.now()-startMs}ms (${apiCalls} calls)`);
 }
 const JC:Record<string,string>={};
 const RL=['nurse practitioner','registered nurse','licensed practical nurse','certified nursing assistant','medical assistant','physician assistant','physical therapist','occupational therapist','speech language pathologist','respiratory therapist','radiologic technologist','pharmacy technician','pharmacist','medical director','physician','surgeon','psychiatrist','psychologist','social worker','counselor','therapist','dietitian','paramedic','sonographer','lab technician','phlebotomist','medical coder','case manager','care coordinator','clinical director','director of nursing','nurse manager','staff nurse','travel nurse','home health aide','hospice nurse','icu nurse','oncology nurse','pediatric nurse','practice manager','office manager','clinic manager','administrator','receptionist','billing specialist','health educator','behavioral health','mental health','lcsw','lpc','cna','rn','lpn','lvn','np','pa','pt','ot','slp','rt','aprn','crna','fnp','pmhnp','dnp','technician','technologist','specialist','coordinator','manager','director','supervisor','analyst','aide','assistant'];
@@ -193,7 +123,7 @@ const vN=(v:any)=>{if(!v)return false;const t=v.trim();return t.length>0&&t.leng
 async function fCt(fn:string,ln:string,k:string){try{const r=await G('/contacts',k,{search:`${fn} ${ln}`,take:'10'});for(const i of(r?.Data||[]))if((i.FirstName||'').toLowerCase().trim()===fn.toLowerCase().trim()&&(i.LastName||'').toLowerCase().trim()===ln.toLowerCase().trim())return i.Id;return null;}catch{return null;}}
 
 Deno.serve(async(req)=>{
-  console.log('[v52] Function invoked, method:', req.method, 'url:', req.url);
+  console.log('[v53] Function invoked, method:', req.method, 'url:', req.url);
   if(req.method==='OPTIONS')return new Response('ok',{headers:corsHeaders});
   try{
     const st=Date.now();
@@ -203,7 +133,7 @@ Deno.serve(async(req)=>{
     let b:any;
     try{b=await req.json();}catch(jsonErr){return R({error:"JSON parse failed",success:false,v:'51',detail:(jsonErr as Error).message});}
     const{action:a,records:recs,skipDuplicateCheck:sd}=b;
-    console.log('[v52] action:', a, 'records:', recs?.length);
+    console.log('[v53] action:', a, 'records:', recs?.length);
 
 if(a==='get_sync_status'){const{data:x}=await sb.from('marketing_companies').select('id,crelate_id');const{data:y}=await sb.from('marketing_contacts').select('id,crelate_contact_id');const{data:z}=await sb.from('marketing_jobs').select('id,crelate_id');return R({success:true,counts:{companies:{total:(x||[]).length,synced:(x||[]).filter(i=>i.crelate_id).length},contacts:{total:(y||[]).length,synced:(y||[]).filter(i=>i.crelate_contact_id).length},jobs:{total:(z||[]).length,synced:(z||[]).filter(i=>i.crelate_id).length}}});}
 
@@ -247,7 +177,7 @@ if(a==='push_companies'){for(const rec of recs){try{if(Date.now()-st>45000){resu
 else if(a==='push_contacts'){for(const rec of recs){try{if(Date.now()-st>45000){results.push({id:rec.id,status:'error',message:'TO'});continue;}const fn=vN(rec.first_name)?rec.first_name.trim():'',ln=vN(rec.last_name)?rec.last_name.trim():'';if(!fn&&!ln){results.push({id:rec.id,status:'skipped'});continue;}const dn=`${fn} ${ln}`.trim();if(rec.crelate_contact_id){results.push({id:rec.id,name:dn,status:'skipped'});continue;}if(!sd&&fn&&ln){const e=await fCt(fn,ln,k);if(e){results.push({id:rec.id,name:dn,status:'skipped',crelateId:e});await safeDbUpdate('marketing_contacts',{crelate_contact_id:e},'id',rec.id);await W(DL);continue;}}const ent:any={};if(fn)ent.FirstName=fn;if(ln)ent.LastName=ln;if(fn&&!ln){ent.LastName=fn;delete ent.FirstName;}if(rec.email)ent.EmailAddresses_Work={Value:rec.email,IsPrimary:true};if(rec.title)ent.CurrentPosition={JobTitle:rec.title,IsPrimary:true};const cn=rec.company_name||'';if(cn&&!bad(cn)){const cr=await rC(cn,k);if(cr.id){if(!ent.CurrentPosition)ent.CurrentPosition={IsPrimary:true};ent.CurrentPosition.CompanyId={Id:cr.id};}}const res=await Po('/contacts',k,ent);await W(DL);if(res.ok){const cid=xI(res.data);results.push({id:rec.id,name:dn,status:'success',crelateId:cid});if(cid)await safeDbUpdate('marketing_contacts',{crelate_contact_id:cid},'id',rec.id);}else results.push({id:rec.id,name:dn,status:'error',message:res.err});}catch(e){results.push({id:rec.id,status:'error',message:(e as Error).message});}}}
 
 else if(a==='push_jobs'){
-  console.log('[v52] push_jobs:', recs.length, 'records');
+  console.log('[v53] push_jobs:', recs.length, 'records');
   const unmatchedDuringPush:Record<string,{title:string;count:number;companies:string[];bestScore:number;bestCandidate:string;simplified:string;baseRole:string;top3:Top3Candidate[]}>={};
   for(let ri=0;ri<recs.length;ri++){const rec=recs[ri];try{if(Date.now()-st>45000){results.push({id:rec.id,status:'error',message:'TO'});continue;}
   const title=(rec.job_title||rec.title||rec.Name||'').trim();
@@ -293,7 +223,7 @@ else return R({error:`Unk:${a}`,success:false});
 return R({success:true,v:'51',summary:{total:recs.length,ok:results.filter(r=>r.status==='success').length,skip:results.filter(r=>r.status==='skipped').length,err:results.filter(r=>r.status==='error').length},results,ms:`${Date.now()-st}`});
 
   }catch(topErr){
-    console.error('[v52] TOP-LEVEL ERROR:', (topErr as Error).message, (topErr as Error).stack);
+    console.error('[v53] TOP-LEVEL ERROR:', (topErr as Error).message, (topErr as Error).stack);
     return new Response(JSON.stringify({success:false,v:'51',error:(topErr as Error).message,stack:((topErr as Error).stack||'').substring(0,500),note:'Top-level catch triggered'}),{headers:{'Content-Type':'application/json',...corsHeaders}});
   }
 });
