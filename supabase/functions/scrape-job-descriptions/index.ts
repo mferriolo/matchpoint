@@ -11,72 +11,145 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 const W = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-// Extract readable text from HTML, stripping tags and excessive whitespace
+function decodeEntities(s: string): string {
+  return s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ').replace(/&#x27;/g, "'").replace(/&#x2F;/g, '/').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+}
+
 function htmlToText(html: string): string {
-  // Remove script/style blocks entirely
   let text = html.replace(/<script[\s\S]*?<\/script>/gi, '');
   text = text.replace(/<style[\s\S]*?<\/style>/gi, '');
   text = text.replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
-  // Convert common block elements to newlines
-  text = text.replace(/<\/(p|div|h[1-6]|li|tr|br\s*\/?)>/gi, '\n');
+  text = text.replace(/<\/(p|div|h[1-6]|li|tr)>/gi, '\n');
   text = text.replace(/<br\s*\/?>/gi, '\n');
   text = text.replace(/<li[^>]*>/gi, '\n- ');
-  // Strip all remaining tags
   text = text.replace(/<[^>]+>/g, ' ');
-  // Decode common HTML entities
-  text = text.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ').replace(/&#x27;/g, "'").replace(/&#x2F;/g, '/');
-  // Collapse whitespace
+  text = decodeEntities(text);
   text = text.replace(/[ \t]+/g, ' ');
   text = text.replace(/\n\s*\n/g, '\n\n');
-  text = text.trim();
-  return text;
+  return text.trim();
 }
 
-// Try to extract just the job description section from full page text
-function extractJobDescription(text: string, url: string): string {
-  // Common section headers that signal job description content
+// Strategy 1: Extract from JSON-LD structured data (most reliable)
+function extractFromJsonLd(html: string): string | null {
+  const ldRegex = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let match;
+  while ((match = ldRegex.exec(html)) !== null) {
+    try {
+      const data = JSON.parse(match[1]);
+      // Could be a single object or array
+      const items = Array.isArray(data) ? data : [data];
+      for (const item of items) {
+        if (item['@type'] === 'JobPosting' || item['@type']?.includes?.('JobPosting')) {
+          const desc = item.description || item.jobDescription || '';
+          if (desc && desc.length > 50) {
+            // Description might be HTML, convert to text
+            return htmlToText(desc);
+          }
+        }
+        // Check nested @graph
+        if (item['@graph']) {
+          for (const g of item['@graph']) {
+            if (g['@type'] === 'JobPosting') {
+              const desc = g.description || g.jobDescription || '';
+              if (desc && desc.length > 50) return htmlToText(desc);
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+  return null;
+}
+
+// Strategy 2: Extract from known job board HTML patterns
+function extractFromJobBoardHtml(html: string, url: string): string | null {
+  const lower = url.toLowerCase();
+
+  // Greenhouse
+  if (lower.includes('greenhouse.io') || lower.includes('boards.greenhouse')) {
+    const m = html.match(/<div[^>]*id\s*=\s*["']content["'][^>]*>([\s\S]*?)<\/div>\s*<div[^>]*id\s*=\s*["']footer/i)
+      || html.match(/<div[^>]*class\s*=\s*["'][^"']*job[-_]?description[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)
+      || html.match(/<div[^>]*id\s*=\s*["']app_body["'][^>]*>([\s\S]*?)<\/div>\s*(?:<div[^>]*id|$)/i);
+    if (m) { const t = htmlToText(m[1]); if (t.length > 100) return t; }
+  }
+
+  // Lever
+  if (lower.includes('lever.co') || lower.includes('jobs.lever')) {
+    const m = html.match(/<div[^>]*class\s*=\s*["'][^"']*posting-page[^"']*["'][^>]*>([\s\S]*?)<div[^>]*class\s*=\s*["'][^"']*posting-btn/i)
+      || html.match(/<div[^>]*class\s*=\s*["'][^"']*section-wrapper[^"']*["'][^>]*>([\s\S]*?)<\/div>\s*<div[^>]*class\s*=\s*["'][^"']*posting-btn/i);
+    if (m) { const t = htmlToText(m[1]); if (t.length > 100) return t; }
+  }
+
+  // UltiPro / UKG
+  if (lower.includes('ultipro.com') || lower.includes('ukg.com')) {
+    const m = html.match(/<div[^>]*class\s*=\s*["'][^"']*job-description[^"']*["'][^>]*>([\s\S]*?)<\/div>/i);
+    if (m) { const t = htmlToText(m[1]); if (t.length > 100) return t; }
+  }
+
+  // Workday
+  if (lower.includes('myworkday') || lower.includes('workday.com')) {
+    const m = html.match(/<div[^>]*data-automation-id\s*=\s*["']jobPostingDescription["'][^>]*>([\s\S]*?)<\/div>/i);
+    if (m) { const t = htmlToText(m[1]); if (t.length > 100) return t; }
+  }
+
+  // iCIMS
+  if (lower.includes('icims.com')) {
+    const m = html.match(/<div[^>]*class\s*=\s*["'][^"']*iCIMS_JobContent[^"']*["'][^>]*>([\s\S]*?)<\/div>/i);
+    if (m) { const t = htmlToText(m[1]); if (t.length > 100) return t; }
+  }
+
+  // Generic: look for common job description container classes/ids
+  const genericPatterns = [
+    /<div[^>]*class\s*=\s*["'][^"']*job[-_]?desc(?:ription)?[^"']*["'][^>]*>([\s\S]*?)<\/div>\s*<(?:div|footer|section)/i,
+    /<div[^>]*id\s*=\s*["']job[-_]?desc(?:ription)?["'][^>]*>([\s\S]*?)<\/div>\s*<(?:div|footer|section)/i,
+    /<section[^>]*class\s*=\s*["'][^"']*job[-_]?desc(?:ription)?[^"']*["'][^>]*>([\s\S]*?)<\/section>/i,
+    /<article[^>]*class\s*=\s*["'][^"']*job[-_]?(?:detail|posting|content)[^"']*["'][^>]*>([\s\S]*?)<\/article>/i,
+  ];
+  for (const pat of genericPatterns) {
+    const m = html.match(pat);
+    if (m) { const t = htmlToText(m[1]); if (t.length > 100) return t; }
+  }
+
+  return null;
+}
+
+// Strategy 3: Extract from full page text using section headers
+function extractFromText(text: string): string | null {
   const startPatterns = [
-    /(?:job\s+description|about\s+the\s+(?:role|position|job|opportunity)|position\s+summary|role\s+summary|overview|what\s+you['']ll\s+do|responsibilities|the\s+role)\s*[:\n]/i,
+    /(?:job\s+description|about\s+the\s+(?:role|position|job|opportunity)|position\s+summary|role\s+summary|what\s+you[''\u2019]ll\s+do|key\s+responsibilities|responsibilities|the\s+role|the\s+opportunity|your\s+impact)\s*[:\-\n]/i,
   ];
   const endPatterns = [
-    /(?:apply\s+now|submit\s+(?:your\s+)?(?:application|resume)|how\s+to\s+apply|about\s+(?:us|the\s+company|our\s+company)|equal\s+opportunity|eeo\s+statement|we\s+are\s+an?\s+equal|©\s*\d{4}|copyright\s+\d{4}|privacy\s+policy|cookie\s+policy|sign\s+up\s+for\s+job\s+alerts)/i,
+    /(?:apply\s+now|submit\s+(?:your\s+)?(?:application|resume)|how\s+to\s+apply|about\s+(?:us|the\s+company|our\s+company)|equal\s+opportunity|eeo\s+statement|we\s+are\s+an?\s+equal|©\s*\d{4}|copyright\s+\d{4}|privacy\s+policy|cookie\s+policy|sign\s+up\s+for\s+job\s+alerts|similar\s+jobs|related\s+jobs|other\s+(?:jobs|positions|openings))/i,
   ];
 
-  let startIdx = 0;
+  let startIdx = -1;
   for (const pat of startPatterns) {
     const m = text.match(pat);
-    if (m && m.index !== undefined) {
-      startIdx = m.index;
-      break;
-    }
+    if (m && m.index !== undefined) { startIdx = m.index; break; }
   }
+  if (startIdx === -1) return null;
 
   let endIdx = text.length;
-  const searchFrom = text.substring(startIdx + 50); // skip past the header itself
+  const searchFrom = text.substring(startIdx + 30);
   for (const pat of endPatterns) {
     const m = searchFrom.match(pat);
-    if (m && m.index !== undefined) {
-      endIdx = startIdx + 50 + m.index;
-      break;
-    }
+    if (m && m.index !== undefined) { endIdx = startIdx + 30 + m.index; break; }
   }
 
-  let desc = text.substring(startIdx, endIdx).trim();
-
-  // If the extracted section is too short, fall back to a reasonable chunk of the full text
-  if (desc.length < 100) {
-    desc = text.substring(0, 8000);
-  }
-
-  // Cap at 10000 chars
-  if (desc.length > 10000) {
-    desc = desc.substring(0, 10000);
-  }
-
-  return desc;
+  const desc = text.substring(startIdx, endIdx).trim();
+  return desc.length >= 150 ? desc : null;
 }
 
-async function fetchPageText(url: string): Promise<{ text: string | null; error?: string }> {
+// Detect if text looks like a job listing page (multiple jobs) rather than a single job description
+function looksLikeJobListing(text: string): boolean {
+  // Count patterns that suggest multiple job listings
+  const jobLinkCount = (text.match(/(?:view\s+job|apply\s+now|learn\s+more|see\s+details)/gi) || []).length;
+  const locationRepeats = (text.match(/(?:remote|hybrid|on-?site)\s*[-|]\s*(?:full|part)/gi) || []).length;
+  if (jobLinkCount > 3 || locationRepeats > 3) return true;
+  return false;
+}
+
+async function scrapeJobDescription(url: string): Promise<{ text: string | null; method?: string; error?: string }> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
@@ -91,9 +164,7 @@ async function fetchPageText(url: string): Promise<{ text: string | null; error?
     });
     clearTimeout(timeout);
 
-    if (!resp.ok) {
-      return { text: null, error: `HTTP ${resp.status}` };
-    }
+    if (!resp.ok) return { text: null, error: `HTTP ${resp.status}` };
 
     const contentType = resp.headers.get('content-type') || '';
     if (!contentType.includes('text/html') && !contentType.includes('text/plain') && !contentType.includes('application/xhtml')) {
@@ -101,9 +172,28 @@ async function fetchPageText(url: string): Promise<{ text: string | null; error?
     }
 
     const html = await resp.text();
+
+    // Strategy 1: JSON-LD (most reliable - structured data embedded by job boards)
+    const jsonLd = extractFromJsonLd(html);
+    if (jsonLd && jsonLd.length >= 100 && !looksLikeJobListing(jsonLd)) {
+      return { text: jsonLd.substring(0, 10000), method: 'json-ld' };
+    }
+
+    // Strategy 2: Known job board HTML patterns
+    const boardHtml = extractFromJobBoardHtml(html, url);
+    if (boardHtml && boardHtml.length >= 100 && !looksLikeJobListing(boardHtml)) {
+      return { text: boardHtml.substring(0, 10000), method: 'html-pattern' };
+    }
+
+    // Strategy 3: Text section extraction
     const fullText = htmlToText(html);
-    const description = extractJobDescription(fullText, url);
-    return { text: description };
+    const textExtract = extractFromText(fullText);
+    if (textExtract && !looksLikeJobListing(textExtract)) {
+      return { text: textExtract.substring(0, 10000), method: 'text-section' };
+    }
+
+    // If all strategies fail, don't return garbage — return nothing
+    return { text: null, error: 'Could not extract job description from page (may be JS-rendered or a listing page)' };
   } catch (e) {
     return { text: null, error: (e as Error).message };
   }
@@ -123,8 +213,15 @@ Deno.serve(async (req) => {
     const limit = body.limit || 20;
     const jobIds: string[] | null = body.jobIds || null;
 
+    // Debug a single URL to see what extraction returns
+    if (action === 'debug') {
+      const url = body.url;
+      if (!url) return R({ success: false, error: 'url required' });
+      const result = await scrapeJobDescription(url);
+      return R({ success: true, url, ...result, textLength: result.text?.length || 0, preview: result.text?.substring(0, 500) });
+    }
+
     if (action === 'scrape') {
-      // Find jobs that have a URL but no description yet
       let query = supabase
         .from('marketing_jobs')
         .select('id, job_title, company_name, website_job_desc, job_url')
@@ -133,6 +230,17 @@ Deno.serve(async (req) => {
 
       if (jobIds && jobIds.length > 0) {
         query = query.in('id', jobIds);
+      }
+
+      // Allow re-scraping if requested
+      if (body.rescrape) {
+        query = supabase
+          .from('marketing_jobs')
+          .select('id, job_title, company_name, website_job_desc, job_url')
+          .order('created_at', { ascending: false });
+        if (jobIds && jobIds.length > 0) {
+          query = query.in('id', jobIds);
+        }
       }
 
       const { data: jobs, error } = await query.limit(limit);
@@ -156,8 +264,8 @@ Deno.serve(async (req) => {
           continue;
         }
 
-        const { text, error: fetchErr } = await fetchPageText(url);
-        await W(500); // rate limit between fetches
+        const { text, method, error: fetchErr } = await scrapeJobDescription(url);
+        await W(500);
 
         if (text && text.length >= 50) {
           const { error: updateErr } = await supabase
@@ -170,11 +278,11 @@ Deno.serve(async (req) => {
             results.push({ id: job.id, title: job.job_title, status: 'error', reason: `DB update: ${updateErr.message}` });
           } else {
             scraped++;
-            results.push({ id: job.id, title: job.job_title, company: job.company_name, status: 'success', descLength: text.length, preview: text.substring(0, 200) });
+            results.push({ id: job.id, title: job.job_title, company: job.company_name, status: 'success', method, descLength: text.length, preview: text.substring(0, 200) });
           }
         } else {
           failed++;
-          results.push({ id: job.id, title: job.job_title, url, status: 'error', reason: fetchErr || `Description too short (${text?.length || 0} chars)` });
+          results.push({ id: job.id, title: job.job_title, url, status: 'error', reason: fetchErr || `Extraction failed` });
         }
       }
 

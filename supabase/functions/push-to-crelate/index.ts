@@ -211,7 +211,9 @@ else if(a==='push_jobs'){
   let jl='n/a',mt:string|undefined;let titleDebug:any=undefined;
   try{const jt=await rJ(title,k);jl=jt.log;mt=jt.mt;if(jt.id)ent.JobTitleId={Id:jt.id};else{titleDebug={originalTitle:title,simplified:jt.simplified||sT(title),baseRole:jt.baseRole||gR(title)||'(none)',top3:jt.top3||[],matchLog:jt.log,bestScore:jt.bestScore,bestCandidate:jt.bestCandidate};const nk=N(title);if(unmatchedDuringPush[nk]){unmatchedDuringPush[nk].count++;if(company&&!unmatchedDuringPush[nk].companies.includes(company))unmatchedDuringPush[nk].companies.push(company);}else unmatchedDuringPush[nk]={title,count:1,companies:company?[company]:[],bestScore:jt.bestScore||0,bestCandidate:jt.bestCandidate||'',simplified:jt.simplified||sT(title),baseRole:jt.baseRole||gR(title)||'',top3:jt.top3||[]};}}catch{jl='x';}
   
+  console.log(`[v57] FULL ENTITY: ${JSON.stringify(Object.keys(ent))} desc=${!!ent.Description}(${ent.Description?.length||0}) web=${!!ent.Websites_Other}(${JSON.stringify(ent.Websites_Other)?.substring(0,100)})`);
   const res=await Po('/jobs',k,ent);await W(DL);
+  console.log(`[v57] POST RESULT: ok=${res.ok} status=${res.status} body=${(res.rawBody||'').substring(0,300)}`);
   if(res.ok){const cid=xI(res.data);const ro:any={id:rec.id,name:title,status:'success',message:`co:${cl} jt:${jl}${mt?' ['+mt+']':''}`,crelateId:cid,matchedTitle:mt,_companyDebug:companyDebug};if(cr409Debug)ro._409Debug=cr409Debug;if(titleDebug)ro._titleDebug=titleDebug;results.push(ro);if(cid)await safeDbUpdate('marketing_jobs',{crelate_id:cid,notes:`v52:${cid}`,updated_at:new Date().toISOString()},'id',rec.id);
   }else{const ro:any={id:rec.id,name:title,status:'error',message:`${res.err} co:${cl} jt:${jl}`,_companyDebug:companyDebug};if(cr409Debug)ro._409Debug=cr409Debug;if(titleDebug)ro._titleDebug=titleDebug;results.push(ro);}
   }catch(e){results.push({id:rec?.id,name:rec?.job_title||'?',status:'error',message:(e as Error).message.substring(0,200)});}}
