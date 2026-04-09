@@ -188,8 +188,9 @@ else if(a==='push_jobs'){
   const dn=company&&!bad(company)?`${title} - ${company}`:title;
   if(!sd){try{const ex=await fJ(title,company,k);if(ex){results.push({id:rec.id,name:title,status:'skipped',crelateId:ex.id});await safeDbUpdate('marketing_jobs',{crelate_id:ex.id},'id',rec.id);continue;}}catch{}}
   const ent:any={Name:dn,NumberOfOpenings:1,OpportunityTypeId:{Id:BO},SalesWorkflowItemStatusId:{Id:SL}};
-  if(rec.website_job_desc||rec.description)ent.Description=(rec.website_job_desc||rec.description).substring(0,10000);
-  if(rec.job_url)ent.Websites_Other={Value:rec.job_url,IsPrimary:true};
+  if(rec.description)ent.Description=rec.description.substring(0,10000);
+  const jobUrl=rec.website_job_desc||rec.job_url;
+  if(jobUrl)ent.Websites_Other={Value:jobUrl,IsPrimary:true};
   if(rec.salary_range)ent.PortalCompensation=rec.salary_range;
   let ci=rec.city||'',sa=rec.state||'';if(!ci&&!sa&&rec.location){const p=rec.location.split(',').map((s:string)=>s.trim());ci=p[0]||'';sa=p[1]||'';}
   if(ci||sa)ent.Locations_Business={City:ci||'',State:sa||'',IsPrimary:true};else ent.Locations_Business={City:'Various',State:'',IsPrimary:true};
