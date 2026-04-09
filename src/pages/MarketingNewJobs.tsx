@@ -397,16 +397,6 @@ const MarketingNewJobs: React.FC = () => {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => setShowTitleMapping(true)}
-            className="gap-1.5 text-violet-700 border-violet-300 hover:bg-violet-50"
-            title="Map tracker job titles to existing Crelate titles for better matching"
-          >
-            <ArrowRightLeft className="w-4 h-4" /> Title Mapping
-          </Button>
-
-          <Button
-            variant="outline"
-            size="sm"
             onClick={handleScrapeDescriptions}
             disabled={scrapingDescs}
             className="gap-1.5 text-emerald-700 border-emerald-300 hover:bg-emerald-50"
@@ -416,16 +406,6 @@ const MarketingNewJobs: React.FC = () => {
             {scrapingDescs ? 'Scraping...' : 'Scrape Descriptions'}
           </Button>
 
-          <Button
-
-            variant="outline"
-            size="sm"
-            onClick={() => setShowCleanup(true)}
-            className="gap-1.5 text-orange-700 border-orange-300 hover:bg-orange-50"
-            title="Remove unverified and dead jobs from previous tracker runs"
-          >
-            <ShieldAlert className="w-4 h-4" /> Cleanup
-          </Button>
           <Button
             variant="outline"
             size="sm"
