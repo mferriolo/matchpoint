@@ -70,7 +70,7 @@ const DEFAULT_CONTACT_MAPPINGS: Record<string, { crelateField: string; localFiel
 const DEFAULT_JOB_MAPPINGS: Record<string, { crelateField: string; localField: string; label: string; required?: boolean }> = {
   title: { crelateField: 'Name', localField: 'job_title', label: 'Job Title', required: true },
   company: { crelateField: 'AccountId (auto-create & link)', localField: 'company_name', label: 'Company Name', required: true },
-  description: { crelateField: 'Description', localField: 'website_job_desc', label: 'Description' },
+  description: { crelateField: 'Description', localField: 'description', label: 'Description' },
   compensation: { crelateField: 'Salary / PortalCompensation', localField: 'salary_range', label: 'Compensation' },
   location: { crelateField: 'PortalCity / PortalState / Locations_Business', localField: 'location', label: 'Location (used for dedup)', required: true },
   opportunityType: { crelateField: 'OpportunityTypeId (BDO)', localField: 'opportunity_type', label: 'Opportunity Type' },
@@ -283,6 +283,8 @@ const PushToCrelate: React.FC<PushToCrelateProps> = ({ companies = [], contacts 
     if (rec.city) stripped.city = rec.city;
     if (rec.state) stripped.state = rec.state;
     if (rec.opportunity_type) stripped.opportunity_type = rec.opportunity_type;
+    if (rec.description) stripped.description = typeof rec.description === 'string' ? rec.description.substring(0, 10000) : rec.description;
+    if (rec.website_job_desc) stripped.website_job_desc = rec.website_job_desc;
     if (rec.job_url) stripped.job_url = rec.job_url;
     if (rec.website_source) stripped.website_source = rec.website_source;
     if (rec.source) stripped.source = rec.source;
