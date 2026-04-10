@@ -18,9 +18,21 @@ type ViewType = 'home' | 'dashboard' | 'candidates' | 'job-details' | 'live-call
 
 
 const AppLayoutContent: React.FC = () => {
-  const [currentView, setCurrentView] = useState<ViewType>('home');
+  const navigate = useNavigate();
+  const [currentView, setCurrentViewState] = useState<ViewType>('home');
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const { startCall, endCall, currentCall } = useCallPrompt();
+
+  // Intercept the 'presentations' view so we use React Router navigation
+  // (client-side, no full reload) instead of window.location.href, which 404s
+  // on Vercel without an SPA rewrite. All other views remain in-component state.
+  const setCurrentView = (view: ViewType) => {
+    if (view === 'presentations') {
+      navigate('/presentations');
+      return;
+    }
+    setCurrentViewState(view);
+  };
 
   const handleJobSelect = (job: Job) => {
     setSelectedJob(job);
@@ -77,10 +89,9 @@ const AppLayoutContent: React.FC = () => {
         return <LiveCall onEndCall={handleEndCall} />;
       case 'call-summary':
         return <CallSummary />;
-      case 'presentations':
-        // Open presentations in a new window/tab
-        window.location.href = '/presentations';
-        return null;
+      // 'presentations' is handled by the setCurrentView wrapper above
+      // (it calls navigate('/presentations') instead of setting state),
+      // so this case is unreachable and intentionally omitted.
 
       default:
         return <HomePage 

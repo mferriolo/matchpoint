@@ -136,13 +136,26 @@ const Presentations = () => {
       setCurrentCandidate(candidateData);
       setCurrentJob(jobData);
       
+      // Normalize company names entered in ALL CAPS to title case so the
+      // presentation doesn't shout the company name. Only applies if every
+      // letter character in the string is uppercase — mixed-case names
+      // (e.g., "MedCentric", "iHealth") and acronyms inside longer names
+      // are preserved as-is.
+      const normalizeCompanyName = (name: string): string => {
+        if (!name) return name;
+        const letters = name.replace(/[^A-Za-z]/g, '');
+        if (letters.length === 0 || letters !== letters.toUpperCase()) return name;
+        // Title-case each word; preserve internal punctuation/whitespace.
+        return name.toLowerCase().replace(/(^|[\s\-/&'"(])([a-z])/g, (_m, pre, ch) => pre + ch.toUpperCase());
+      };
+
       const result = await callAI('generate_candidate_presentation', {
         CANDIDATE_NAME: `${candidateData.first_name} ${candidateData.last_name}`,
         CURRENT_TITLE: candidateData.current_job_title || 'Not specified',
         LOCATION: candidateData.location || 'Not specified',
         YEARS_EXPERIENCE: candidateData.years_experience || 'Not specified',
         JOB_TITLE: jobData.title || 'Not specified',
-        COMPANY: jobData.company || 'Not specified',
+        COMPANY: normalizeCompanyName(jobData.company) || 'Not specified',
         JOB_REQUIREMENTS: jobData.requirements || jobData.description || 'Not specified',
         CANDIDATE_BACKGROUND: candidateData.summary || 'Not specified',
         SKILLS: Array.isArray(candidateData.skills) ? candidateData.skills.join(', ') : 'Not specified',
