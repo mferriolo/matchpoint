@@ -309,7 +309,22 @@ async function cleanupStaleRuns() {
 // ============================================================
 // MAIN PROCESSING
 // ============================================================
-async function runTrackerProcess(rid: string, action: string, oa: string) {
+// Strips parenthetical bits like "(NP/PA)" or "(RNs)" from a job-type
+// label so it can be substring-matched against AI-returned titles.
+function _cleanRoleLabel(s: string): string {
+  return s.toLowerCase().replace(/\s*\([^)]*\)\s*/g, ' ').trim();
+}
+
+async function runTrackerProcess(rid: string, action: string, oa: string, jobTitles: string[] = []) {
+  // Effective roles list: if the caller (TrackerControls picklist) passed
+  // a non-empty jobTitles array, use it; otherwise fall back to the
+  // hardcoded clinical ROLES (the historical default).
+  const effectiveRoles: string[] = (jobTitles && jobTitles.length > 0) ? jobTitles : ROLES;
+  // In default mode the strict normalizeRole + ROLES.includes filter is
+  // used (preserves legacy behavior). In custom mode we keep the AI's
+  // raw title and accept any job whose title contains a selected type
+  // as a substring (case-insensitive, parenthetical bits stripped).
+  const useDefaultMode = effectiveRoles === ROLES;
   const logs: any[] = [];
   const log = (s: string, m: string) => { logs.push({ step: s, msg: m, ts: new Date().toISOString() }); };
   const upd = async (u: any) => { await supabase.from('tracker_runs').update({ ...u, execution_log: logs }).eq('id', rid); };
@@ -378,7 +393,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string) {
       await progress.updateStep('searching_sources', { items_total: totalPasses, items_processed: 0, sub_step: 'PASS 1: Broad job board search...' });
       log('searching_sources', 'PASS 1: Broad job board search'); searchPasses++;
       try {
-        const p1 = await aiCall(oa, `Healthcare recruiting intelligence. Search: ${JOB_BOARDS.join(', ')}\n\nFind ACTIVE postings for ONLY these roles:\n1. Medical Director\n2. Chief Medical Officer\n3. Primary Care Physician\n4. Nurse Practitioner\n5. Physician Assistant\n\nTarget: Medicare Advantage, VBC, PACE, health plans, health systems, hospitals, FQHCs.\nALREADY IN DB: ${existing}\n\nCRITICAL: ONLY return jobs you have HIGH CONFIDENCE are CURRENTLY ACTIVE. Do NOT fabricate.\njob_posting_url: Leave EMPTY.\nMap job_category to: ${CATS.join(' | ')}\nMap job_title to: ${ROLES.join(', ')}\n\nReturn JSON: {"jobs":[{"company":"","job_title":"","job_category":"","city":"","state":"","source_found":""}]}\nFind 40-60 jobs. ONLY valid JSON.`, 12000);
+        const p1 = await aiCall(oa, `Healthcare recruiting intelligence. Search: ${JOB_BOARDS.join(', ')}\n\nFind ACTIVE postings for ONLY these roles:\n${effectiveRoles.map((r, i) => `${i+1}. ${r}`).join('\n')}\n\nTarget: Medicare Advantage, VBC, PACE, health plans, health systems, hospitals, FQHCs.\nALREADY IN DB: ${existing}\n\nCRITICAL: ONLY return jobs you have HIGH CONFIDENCE are CURRENTLY ACTIVE. Do NOT fabricate.\njob_posting_url: Leave EMPTY.\nMap job_category to: ${CATS.join(' | ')}\nMap job_title to: ${effectiveRoles.join(', ')}\n\nReturn JSON: {"jobs":[{"company":"","job_title":"","job_category":"","city":"","state":"","source_found":""}]}\nFind 40-60 jobs. ONLY valid JSON.`, 12000);
         const d = parseJson(p1); if (d.jobs) { allFound.push(...d.jobs); log('searching_sources', `Pass 1: ${d.jobs.length} jobs`); }
       } catch (e) { log('searching_sources', `Pass 1 error: ${(e as Error).message}`); }
       passesCompleted++;
@@ -389,7 +404,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string) {
         const chunk = PRIORITY_ORGS.slice(ci, ci + 40);
         await progress.updateStep('searching_sources', { items_processed: passesCompleted, sub_step: `PASS 2: Priority orgs chunk ${Math.floor(ci/40)+1}/${pass2Chunks}...` });
         try {
-          const p2 = await aiCall(oa, `Search for CURRENT job openings at these healthcare organizations:\n${chunk.map((o,i)=>`${i+1}. ${o}`).join('\n')}\n\nRoles: Medical Director, Chief Medical Officer, Primary Care Physician, Nurse Practitioner, Physician Assistant\nALREADY FOUND: ${allFound.slice(-30).map(j=>`${j.company}-${j.job_title}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000);
+          const p2 = await aiCall(oa, `Search for CURRENT job openings at these healthcare organizations:\n${chunk.map((o,i)=>`${i+1}. ${o}`).join('\n')}\n\nRoles: ${effectiveRoles.join(', ')}\nALREADY FOUND: ${allFound.slice(-30).map(j=>`${j.company}-${j.job_title}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000);
           const d = parseJson(p2); if (d.jobs) { allFound.push(...d.jobs); log('searching_sources', `Pass 2 chunk: ${d.jobs.length} jobs`); }
         } catch (e) { log('searching_sources', `Pass 2 error: ${(e as Error).message}`); }
         passesCompleted++;
@@ -405,7 +420,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string) {
           await progress.updateStep('searching_sources', { items_processed: passesCompleted, sub_step: `PASS 3: Career pages chunk ${Math.floor(ci/40)+1}/${pass3Chunks}...` });
           const srcList = chunk.map((s,i) => `${i+1}. ${s.company_name}${s.careers_url ? ` (${s.careers_url})` : ''}`).join('\n');
           try {
-            const p3 = await aiCall(oa, `Check these employer career pages for openings:\n${srcList}\nRoles: Medical Director, Chief Medical Officer, Primary Care Physician, Nurse Practitioner, Physician Assistant\nALREADY FOUND: ${allFound.slice(-40).map(j=>`${j.company}-${j.job_title}-${j.city||''}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000);
+            const p3 = await aiCall(oa, `Check these employer career pages for openings:\n${srcList}\nRoles: ${effectiveRoles.join(', ')}\nALREADY FOUND: ${allFound.slice(-40).map(j=>`${j.company}-${j.job_title}-${j.city||''}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000);
             const d = parseJson(p3); if (d.jobs) { allFound.push(...d.jobs); log('searching_sources', `Pass 3 chunk ${Math.floor(ci/40)+1}: ${d.jobs.length} jobs`); }
           } catch (e) { log('searching_sources', `Pass 3 chunk error: ${(e as Error).message}`); }
           passesCompleted++;
@@ -421,7 +436,22 @@ async function runTrackerProcess(rid: string, action: string, oa: string) {
       const candidateJobs: any[] = [];
       for (const j of allFound) {
         if (!j.company || !j.job_title) continue;
-        const nt = normalizeRole(j.job_title); if (!ROLES.includes(nt)) continue;
+        let nt: string;
+        if (useDefaultMode) {
+          // Legacy clinical-roles path: normalize then strict-include.
+          nt = normalizeRole(j.job_title);
+          if (!ROLES.includes(nt)) continue;
+        } else {
+          // Custom job-titles path: keep the AI's raw title and accept any
+          // job whose title contains a selected type as a substring.
+          nt = j.job_title;
+          const titleLower = nt.toLowerCase();
+          const passes = effectiveRoles.some(r => {
+            const clean = _cleanRoleLabel(r);
+            return clean && titleLower.includes(clean);
+          });
+          if (!passes) continue;
+        }
         const dk = `${j.company.toLowerCase().trim()}|${nt.toLowerCase().trim()}|${(j.city||'').toLowerCase().trim()}|${(j.state||'').toLowerCase().trim()}`;
         if (jKeys.has(dk)) { dupes++; continue; }
         candidateJobs.push({ ...j, _normalizedTitle: nt, _dedupKey: dk });
@@ -489,11 +519,24 @@ async function runTrackerProcess(rid: string, action: string, oa: string) {
       if (newCos.length > 0 && serpKey) {
         log('searching_sources', `PASS 4: Searching ${newCos.length} new companies for additional roles`); searchPasses++;
         try {
-          const p4 = await aiCall(oa, `Search these NEW companies for additional openings:\n${newCos.map((c,i)=>`${i+1}. ${c}`).join('\n')}\nRoles: Medical Director, Chief Medical Officer, Primary Care Physician, Nurse Practitioner, Physician Assistant\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 6000);
+          const p4 = await aiCall(oa, `Search these NEW companies for additional openings:\n${newCos.map((c,i)=>`${i+1}. ${c}`).join('\n')}\nRoles: ${effectiveRoles.join(', ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 6000);
           const d = parseJson(p4);
           const pass4Candidates: any[] = [];
           for (const j of (d.jobs||[])) {
-            if (!j.company || !j.job_title) continue; const nt = normalizeRole(j.job_title); if (!ROLES.includes(nt)) continue;
+            if (!j.company || !j.job_title) continue;
+            let nt: string;
+            if (useDefaultMode) {
+              nt = normalizeRole(j.job_title);
+              if (!ROLES.includes(nt)) continue;
+            } else {
+              nt = j.job_title;
+              const titleLower = nt.toLowerCase();
+              const passes = effectiveRoles.some(r => {
+                const clean = _cleanRoleLabel(r);
+                return clean && titleLower.includes(clean);
+              });
+              if (!passes) continue;
+            }
             const dk = `${j.company.toLowerCase().trim()}|${nt.toLowerCase().trim()}|${(j.city||'').toLowerCase().trim()}|${(j.state||'').toLowerCase().trim()}`;
             if (jKeys.has(dk)) { dupes++; continue; }
             pass4Candidates.push({ ...j, _normalizedTitle: nt, _dedupKey: dk });
@@ -627,7 +670,10 @@ Deno.serve(async (req) => {
   try {
     await cleanupStaleRuns();
     const body = await req.json().catch(() => ({}));
-    const { action = 'full' } = body;
+    const { action = 'full', jobTitles = [] } = body;
+    const safeJobTitles: string[] = Array.isArray(jobTitles)
+      ? jobTitles.filter((s: unknown): s is string => typeof s === 'string' && s.trim().length > 0)
+      : [];
     const oa = Deno.env.get("OPENAI_API_KEY");
     if (!oa) throw new Error("OPENAI_API_KEY missing");
 
@@ -638,7 +684,7 @@ Deno.serve(async (req) => {
     if (runErr || !run) throw new Error(`Failed to create tracker run: ${runErr?.message || 'unknown'}`);
 
     const rid = run.id;
-    runTrackerProcess(rid, action, oa).catch(err => {
+    runTrackerProcess(rid, action, oa, safeJobTitles).catch(err => {
       console.error('Background process crashed:', err);
       supabase.from('tracker_runs').update({ status: 'failed', current_step: 'error', completed_at: new Date().toISOString(), error_message: `Background crash: ${err.message}` }).eq('id', rid);
     });

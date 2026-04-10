@@ -221,6 +221,67 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
   const [elapsedTime, setElapsedTime] = useState(0);
   const [historicalStepDurations, setHistoricalStepDurations] = useState<Record<string, number>>({});
   const [nowMs, setNowMs] = useState(Date.now());
+
+  // Job-title picklist state. Sourced from the job_types Supabase table
+  // (the same table that backs Admin > Job Types). Default selection on
+  // first load is whatever rows have is_active=true; subsequent visits
+  // restore the user's last selection from localStorage.
+  interface JobTypeRow { id: string; name: string; is_active: boolean }
+  const [allJobTypes, setAllJobTypes] = useState<JobTypeRow[]>([]);
+  const [selectedJobTitles, setSelectedJobTitles] = useState<string[]>([]);
+  const [jobTypePickerOpen, setJobTypePickerOpen] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from('job_types')
+        .select('id,name,is_active')
+        .order('name');
+      if (cancelled || error || !data) return;
+      setAllJobTypes(data);
+      const stored = localStorage.getItem('trackerSelectedJobTitles');
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored) as string[];
+          // Drop any names that no longer exist in job_types so the
+          // selection doesn't get stale across schema changes.
+          const valid = parsed.filter(n => data.some((jt: JobTypeRow) => jt.name === n));
+          if (valid.length > 0) {
+            setSelectedJobTitles(valid);
+            return;
+          }
+        } catch { /* fall through to defaults */ }
+      }
+      setSelectedJobTitles(data.filter((jt: JobTypeRow) => jt.is_active).map((jt: JobTypeRow) => jt.name));
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const toggleJobTitle = (name: string) => {
+    setSelectedJobTitles(prev => {
+      const next = prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name];
+      localStorage.setItem('trackerSelectedJobTitles', JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const selectAllJobTitles = () => {
+    const next = allJobTypes.map(jt => jt.name);
+    setSelectedJobTitles(next);
+    localStorage.setItem('trackerSelectedJobTitles', JSON.stringify(next));
+  };
+
+  const clearAllJobTitles = () => {
+    setSelectedJobTitles([]);
+    localStorage.setItem('trackerSelectedJobTitles', JSON.stringify([]));
+  };
+
+  const resetJobTitlesToActive = () => {
+    const next = allJobTypes.filter(jt => jt.is_active).map(jt => jt.name);
+    setSelectedJobTitles(next);
+    localStorage.setItem('trackerSelectedJobTitles', JSON.stringify(next));
+  };
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -574,9 +635,11 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
     }, 1000);
 
     try {
-      // The edge function now returns immediately with the run_id
+      // The edge function now returns immediately with the run_id.
+      // jobTitles is the user's selection from the picklist; the scraper
+      // falls back to its hardcoded clinical roles if the array is empty.
       const { data, error } = await supabase.functions.invoke('scrape-healthcare-jobs', {
-        body: { action }
+        body: { action, jobTitles: selectedJobTitles }
       });
 
       if (finishedRef.current) return;
@@ -743,6 +806,78 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
 
   return (
     <div className="space-y-4">
+      {/* Job Title Picklist - controls which job types the scraper searches for */}
+      <div className="bg-white rounded-xl border shadow-sm">
+        <button
+          type="button"
+          onClick={() => setJobTypePickerOpen(o => !o)}
+          className="w-full flex items-center justify-between px-5 py-3 text-left hover:bg-gray-50 rounded-t-xl"
+        >
+          <div className="flex items-center gap-2">
+            <Briefcase className="w-4 h-4 text-[#911406]" />
+            <span className="text-sm font-semibold text-gray-800">Job Titles to Search</span>
+            <span className="text-xs text-gray-500">
+              {selectedJobTitles.length} of {allJobTypes.length} selected
+            </span>
+          </div>
+          {jobTypePickerOpen ? <ChevronUp className="w-4 h-4 text-gray-500" /> : <ChevronDown className="w-4 h-4 text-gray-500" />}
+        </button>
+        {jobTypePickerOpen && (
+          <div className="px-5 pb-4 border-t border-gray-100">
+            <div className="flex items-center gap-2 pt-3 pb-3 text-xs">
+              <button
+                type="button"
+                onClick={selectAllJobTitles}
+                className="px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 text-gray-700"
+              >
+                Select all
+              </button>
+              <button
+                type="button"
+                onClick={clearAllJobTitles}
+                className="px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 text-gray-700"
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                onClick={resetJobTitlesToActive}
+                className="px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 text-gray-700"
+              >
+                Reset to defaults (Admin → Active)
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1.5 max-h-80 overflow-y-auto pr-1">
+              {allJobTypes.map(jt => {
+                const checked = selectedJobTitles.includes(jt.name);
+                return (
+                  <label
+                    key={jt.id}
+                    className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleJobTitle(jt.name)}
+                      className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]"
+                    />
+                    <span className={checked ? 'font-medium text-gray-900' : ''}>{jt.name}</span>
+                    {jt.is_active && (
+                      <span className="text-[10px] text-green-600 font-semibold">●</span>
+                    )}
+                  </label>
+                );
+              })}
+            </div>
+            {allJobTypes.length === 0 && (
+              <div className="text-xs text-gray-500 py-4 text-center">
+                Loading job types from Admin → Job Types…
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* Primary Action Bar */}
       <div className="bg-white rounded-xl border shadow-sm p-5">
         <div className="flex items-center justify-between flex-wrap gap-3">
