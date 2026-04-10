@@ -316,53 +316,116 @@ export const CallPromptProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         'Who is the final decision maker?'
       ];
       
-      // For now, skip ChatGPT analysis to avoid the hook issue
-      // Just create a basic structure with unanswered questions
-      console.log('Creating basic job order structure...');
-      
-      const basicJobOrderData = {
-        timingQuestions: {},
-        jobQuestions: {},
-        companyQuestions: {},
-        hiringQuestions: {},
-        timingNotes: '',
-        jobNotes: '',
-        companyNotes: '',
-        hiringNotes: '',
-        unansweredQuestions: {
-          timing: timingQuestionsList,
-          job: jobQuestionsList,
-          company: companyQuestionsList,
-          hiring: hiringQuestionsList,
-          insightful: []
+      // Build the same JSON-shaped prompt that JobOrder.tsx uses for its manual "Generate"
+      // button, then call the chatgpt-integration edge function directly (avoiding the
+      // useChatGPT hook so this works from a non-component context).
+      const prompt = `Analyze this job and provide structured answers in JSON format.
+
+Job Title: ${job.title}
+Company: ${job.company}
+Description: ${job.description || 'Not provided'}
+Location: ${job.location || 'Not specified'}
+
+Please analyze this job information and provide answers to the following questions in JSON format:
+
+{
+  "jobQuestions": {
+${jobQuestionsList.map(q => `    "${q.replace(/"/g, '\\"')}": "answer here or Not Specified"`).join(',\n')}
+  },
+  "timingQuestions": {
+${timingQuestionsList.map(q => `    "${q.replace(/"/g, '\\"')}": "Not Specified"`).join(',\n')}
+  },
+  "companyQuestions": {
+${companyQuestionsList.map(q => `    "${q.replace(/"/g, '\\"')}": "answer here or Not Specified"`).join(',\n')}
+  },
+  "hiringQuestions": {
+${hiringQuestionsList.map(q => `    "${q.replace(/"/g, '\\"')}": "Not Specified"`).join(',\n')}
+  },
+  "timingNotes": "",
+  "jobNotes": "Additional notes about the job",
+  "companyNotes": "Additional notes about the company",
+  "hiringNotes": "Additional notes about the hiring process"
+}
+
+Provide only the JSON response with actual answers based on the job information provided. Use "Not Specified" for questions that cannot be answered from the available information.`;
+
+      let jobOrderData: any = null;
+
+      try {
+        console.log('Calling chatgpt-integration to analyze job...');
+        const { data: aiResult, error: aiError } = await supabase.functions.invoke('chatgpt-integration', {
+          body: { action: 'analyze_job', prompt }
+        });
+
+        if (aiError) throw new Error(aiError.message || 'Edge function error');
+        if (!aiResult?.success) throw new Error(aiResult?.error || 'AI generation failed');
+
+        // Strip markdown fences and extract the JSON object
+        let cleanContent = (aiResult.content || '').trim().replace(/```json\s*/g, '').replace(/```\s*/g, '');
+        const jsonStart = cleanContent.indexOf('{');
+        const jsonEnd = cleanContent.lastIndexOf('}') + 1;
+        if (jsonStart !== -1 && jsonEnd > jsonStart) {
+          cleanContent = cleanContent.substring(jsonStart, jsonEnd);
         }
-      };
-      
-      // Initialize with "Not Specified" for all questions
-      timingQuestionsList.forEach(q => {
-        if (q !== 'NOTES') {
-          basicJobOrderData.timingQuestions[q] = 'Not Specified';
-        }
-      });
-      jobQuestionsList.forEach(q => {
-        if (q !== 'NOTES') {
-          basicJobOrderData.jobQuestions[q] = 'Not Specified';
-        }
-      });
-      companyQuestionsList.forEach(q => {
-        if (q !== 'NOTES') {
-          basicJobOrderData.companyQuestions[q] = 'Not Specified';
-        }
-      });
-      hiringQuestionsList.forEach(q => {
-        if (q !== 'NOTES') {
-          basicJobOrderData.hiringQuestions[q] = 'Not Specified';
-        }
-      });
-      
-      localStorage.setItem(`jobOrder_${job.id}`, JSON.stringify(basicJobOrderData));
-      console.log('Basic job order structure saved to localStorage');
-      
+
+        const parsed = JSON.parse(cleanContent);
+
+        // Compute unanswered question lists the same way JobOrder.tsx does
+        const isUnanswered = (val: any) =>
+          !val || (typeof val === 'string' && (val.trim() === '' || val.trim() === 'Not Specified'));
+        const jobUnanswered = jobQuestionsList.filter(q => isUnanswered(parsed.jobQuestions?.[q]));
+        const companyUnanswered = companyQuestionsList.filter(q => isUnanswered(parsed.companyQuestions?.[q]));
+        const hiringUnanswered = hiringQuestionsList.filter(q => isUnanswered(parsed.hiringQuestions?.[q]));
+
+        jobOrderData = {
+          timingQuestions: {},
+          jobQuestions: parsed.jobQuestions || {},
+          companyQuestions: parsed.companyQuestions || {},
+          hiringQuestions: parsed.hiringQuestions || {},
+          timingNotes: '',
+          jobNotes: parsed.jobNotes || '',
+          companyNotes: parsed.companyNotes || '',
+          hiringNotes: parsed.hiringNotes || '',
+          unansweredQuestions: {
+            timing: timingQuestionsList,
+            job: jobUnanswered,
+            company: companyUnanswered,
+            hiring: hiringUnanswered,
+            insightful: []
+          }
+        };
+        console.log('AI job order analysis complete');
+      } catch (aiError) {
+        // If the AI call fails for any reason, fall back to the empty structure so the
+        // add-job flow never blocks. The user can still click "Generate" in the Job Order
+        // tab to retry the analysis.
+        console.error('AI job order analysis failed, falling back to empty structure:', aiError);
+        jobOrderData = {
+          timingQuestions: {},
+          jobQuestions: {},
+          companyQuestions: {},
+          hiringQuestions: {},
+          timingNotes: '',
+          jobNotes: '',
+          companyNotes: '',
+          hiringNotes: '',
+          unansweredQuestions: {
+            timing: timingQuestionsList,
+            job: jobQuestionsList,
+            company: companyQuestionsList,
+            hiring: hiringQuestionsList,
+            insightful: []
+          }
+        };
+        timingQuestionsList.forEach(q => { if (q !== 'NOTES') jobOrderData.timingQuestions[q] = 'Not Specified'; });
+        jobQuestionsList.forEach(q => { if (q !== 'NOTES') jobOrderData.jobQuestions[q] = 'Not Specified'; });
+        companyQuestionsList.forEach(q => { if (q !== 'NOTES') jobOrderData.companyQuestions[q] = 'Not Specified'; });
+        hiringQuestionsList.forEach(q => { if (q !== 'NOTES') jobOrderData.hiringQuestions[q] = 'Not Specified'; });
+      }
+
+      localStorage.setItem(`jobOrder_${job.id}`, JSON.stringify(jobOrderData));
+      console.log('Job order data saved to localStorage');
+
       // Remove the generation flag
       localStorage.removeItem(`jobOrderGenerating_${job.id}`);
       

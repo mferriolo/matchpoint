@@ -1247,7 +1247,7 @@ We offer competitive compensation, benefits, and a collaborative work environmen
   return (
     <TooltipProvider>
       <div className="w-full">
-        <Tabs defaultValue="summary" className="w-full">
+        <Tabs defaultValue="job-order" className="w-full">
           <TabsList className="grid w-full grid-cols-4 grid-rows-2 gap-1 h-auto p-2 border border-gray-200 rounded-lg bg-white shadow-sm">
             <TabsTrigger value="summary" className="border border-gray-200 rounded text-sm font-medium data-[state=active]:bg-medcentric-50 data-[state=active]:text-medcentric-800">Summary</TabsTrigger>
             <TabsTrigger value="job-order" className="border border-gray-200 rounded text-sm font-medium data-[state=active]:bg-medcentric-50 data-[state=active]:text-medcentric-800">Job Order</TabsTrigger>
