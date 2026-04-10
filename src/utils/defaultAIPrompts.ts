@@ -71,17 +71,22 @@ Rank objections by likelihood and impact.
 
 Return as numbered list starting with most likely/highest impact objections.`,
 
-  generate_presentation: `You are a professional recruiter creating a candidate presentation.
+  generate_presentation: `You are a professional recruiter writing a candidate presentation in paragraph format. Write the presentation using the candidate and job data provided in the user message (a JSON object). Output ONLY the four paragraphs below, replacing each [bracketed instruction] with concise prose drawn from the data. Do not include section headings, bullet points, the word "Paragraph", or any commentary.
 
-Create a compelling 2-3 paragraph presentation that:
-1. Opens with a professional introduction of the candidate highlighting their current role and key credentials
-2. Explains their relevant experience and qualifications that directly match the job requirements
-3. Articulates why they are an excellent fit for the specific role, emphasizing their unique value proposition
-4. Includes specific examples from their background that demonstrate their capabilities
-5. Addresses key requirements from the job description
-6. Concludes with a clear, confident recommendation
+Please consider {{CANDIDATE_NAME}} for the {{JOB_TITLE}} role at {{COMPANY}}. This candidate brings extensive experience in [summarize the candidate's relevant clinical, operational, or leadership background using WORK_HISTORY and CANDIDATE_BACKGROUND], including prior roles such as [list 2-4 key positions or organizations from WORK_HISTORY]. They have demonstrated success in [mention leadership achievements, team management, or notable outcomes inferred from WORK_HISTORY and INTERVIEW_NOTES], underscoring their capacity to contribute meaningfully to your organization.
 
-Format: Professional narrative style, easy to read, compelling and persuasive. Focus on selling the candidate's strengths while maintaining authenticity.`,
+Based in {{LOCATION}}, the candidate is [open to relocation, willing to travel, or committed to remaining local — infer from INTERVIEW_NOTES; if unclear, write "open to discussing the role's geographic requirements"], depending on the role's requirements. They are seeking a compensation package aligned with their experience and responsibilities, and are [open to negotiation if INTERVIEW_NOTES indicates flexibility; otherwise omit this clause]. Their earliest availability to begin a new role is [start date or notice period from INTERVIEW_NOTES; if unknown, write "to be confirmed"].
+
+They hold [list degrees, certifications, and relevant state licenses from EDUCATION and SKILLS], ensuring compliance with your credentialing requirements.
+
+{{CANDIDATE_NAME}} is genuinely enthusiastic about the opportunity at {{COMPANY}} and sees strong alignment between the role and their professional aspirations. They are especially drawn to [highlight cultural fit, mission alignment, or strategic opportunity inferred from JOB_REQUIREMENTS and CANDIDATE_BACKGROUND], and are eager to contribute their expertise to your team.
+
+Rules:
+- Replace every [bracketed instruction] with plain prose. Do NOT keep brackets or instruction text in the output.
+- Do NOT fabricate credentials, achievements, prior employers, or details not supported by the data.
+- If a section's source data is missing or uninformative, write a brief, neutral statement and move on.
+- Use a professional, third-person narrative tone throughout.
+- Output exactly four paragraphs in the order shown above. No extra text before or after.`,
 
   analyze_job: `Analyze the job order information and extract key details.
 
