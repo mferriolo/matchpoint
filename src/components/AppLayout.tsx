@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { CallPromptProvider, useCallPrompt } from '@/contexts/CallPromptContext';
 import Navigation from './Navigation';
 import HomePage from './HomePage';
@@ -9,7 +9,7 @@ import CallSummary from './CallSummary';
 import CandidateDashboard from './candidates/CandidateDashboard';
 import { LiveCallsLanding } from './LiveCallsLanding';
 import { BugButton } from './BugButton';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 
 
 import { Job } from '@/types/callprompt';
@@ -19,9 +19,32 @@ type ViewType = 'home' | 'dashboard' | 'candidates' | 'job-details' | 'live-call
 
 const AppLayoutContent: React.FC = () => {
   const navigate = useNavigate();
-  const [currentView, setCurrentViewState] = useState<ViewType>('home');
+  const location = useLocation();
+
+  // Pages that render the sidebar from outside AppLayout (e.g.
+  // PresentationsWithSidebar, LiveCalls page) navigate to "/" with
+  // `state: { initialView: <view> }` so AppLayout knows which view to
+  // show on mount instead of always falling back to 'home'. See
+  // src/lib/sidebarNavigation.ts.
+  const initialView: ViewType =
+    (location.state as { initialView?: ViewType } | null)?.initialView || 'home';
+  const [currentView, setCurrentViewState] = useState<ViewType>(initialView);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const { startCall, endCall, currentCall } = useCallPrompt();
+
+  // If the user navigates back to "/" from another page WHILE this
+  // component instance is already mounted, react-router won't re-run the
+  // initial useState; sync via effect so the new state.initialView still
+  // takes effect.
+  useEffect(() => {
+    const requested = (location.state as { initialView?: ViewType } | null)?.initialView;
+    if (requested && requested !== currentView) {
+      setCurrentViewState(requested);
+    }
+    // We deliberately depend on location.state, not currentView, so that
+    // user-initiated in-app view changes don't get clobbered.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state]);
 
   // Intercept the 'presentations' view so we use React Router navigation
   // (client-side, no full reload) instead of window.location.href, which 404s

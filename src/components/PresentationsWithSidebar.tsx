@@ -1,21 +1,18 @@
-import React, { useState } from 'react';
+import React from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import Navigation from './Navigation';
 import Presentations from '@/pages/Presentations';
+import { navigateToSidebarView, type SidebarViewId } from '@/lib/sidebarNavigation';
 
 const PresentationsWithSidebar: React.FC = () => {
-  const [currentView, setCurrentView] = useState('presentations');
+  const navigate = useNavigate();
+  const location = useLocation();
 
   return (
     <div className="flex h-screen bg-gray-100">
-      <Navigation 
-        currentView={currentView} 
-        onViewChange={(view) => {
-          if (view === 'home' || view === 'dashboard' || view === 'candidates' || view === 'live-call-landing') {
-            window.location.href = '/';
-          } else if (view === 'presentations') {
-            // Already on presentations page
-          }
-        }}
+      <Navigation
+        currentView="presentations"
+        onViewChange={(view) => navigateToSidebarView(navigate, view as SidebarViewId, location.pathname)}
         showVideoInSidebar={false}
       />
       <div className="flex-1 overflow-auto">
