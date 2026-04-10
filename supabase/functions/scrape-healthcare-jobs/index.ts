@@ -57,12 +57,23 @@ function isDirectJobUrl(url: string): boolean {
   try { const u = new URL(url); return u.pathname.length > 5; } catch { return false; }
 }
 
+// Calls OpenAI directly (no fastrouter.io middleman, no Gemini). Uses
+// gpt-4o-mini to match the rest of the codebase (chatgpt-integration's
+// default). The function signature is unchanged so all call sites still
+// work; the `key` parameter is now an OpenAI API key.
 async function aiCall(key: string, prompt: string, maxTok = 8000): Promise<string> {
-  const r = await fetch('https://ai.gateway.fastrouter.io/api/v1/chat/completions', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
-    body: JSON.stringify({ model: 'google/gemini-2.5-flash', messages: [{ role: 'user', content: prompt }], temperature: 0.15, max_tokens: maxTok })
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.15,
+      max_tokens: maxTok,
+    }),
   });
-  const d = await r.json(); return d.choices?.[0]?.message?.content || '';
+  const d = await r.json();
+  return d.choices?.[0]?.message?.content || '';
 }
 
 function parseJson(text: string): any { try { const m = text.match(/\{[\s\S]*\}/); if (m) return JSON.parse(m[0]); } catch {} return {}; }
@@ -298,7 +309,7 @@ async function cleanupStaleRuns() {
 // ============================================================
 // MAIN PROCESSING
 // ============================================================
-async function runTrackerProcess(rid: string, action: string, gk: string) {
+async function runTrackerProcess(rid: string, action: string, oa: string) {
   const logs: any[] = [];
   const log = (s: string, m: string) => { logs.push({ step: s, msg: m, ts: new Date().toISOString() }); };
   const upd = async (u: any) => { await supabase.from('tracker_runs').update({ ...u, execution_log: logs }).eq('id', rid); };
@@ -341,7 +352,7 @@ async function runTrackerProcess(rid: string, action: string, gk: string) {
         await progress.updateStep('validating_urls', { items_processed: i, sub_step: `Validating batch ${Math.floor(i/20)+1}/${Math.ceil(openJ.length/20)} (${Math.min(i+20, openJ.length)}/${openJ.length})...` });
         const list = batch.map((j, x) => `${x+1}. "${j.job_title}" at "${j.company_name}" in ${j.city||'?'}, ${j.state||'?'}`).join('\n');
         try {
-          const c = await aiCall(gk, `Healthcare job validation. For each job, is the company CURRENTLY hiring for this role?\nMark CLOSED only with strong evidence. Default to OPEN if uncertain.\nJobs:\n${list}\nReturn JSON: [{"index":1,"status":"OPEN"|"CLOSED","reason":"brief"}]\nOnly JSON.`, 3000);
+          const c = await aiCall(oa, `Healthcare job validation. For each job, is the company CURRENTLY hiring for this role?\nMark CLOSED only with strong evidence. Default to OPEN if uncertain.\nJobs:\n${list}\nReturn JSON: [{"index":1,"status":"OPEN"|"CLOSED","reason":"brief"}]\nOnly JSON.`, 3000);
           const res = parseArr(c);
           for (const r of res) { const idx = (r.index||0)-1; if (idx < 0 || idx >= batch.length) continue; validated++; if (r.status === 'CLOSED') { closed++; await supabase.from('marketing_jobs').update({ is_closed: true, status: 'Closed', url_status: 'closed', url_check_result: r.reason||'Closed', closed_reason: r.reason, closed_at: new Date().toISOString(), last_url_check: new Date().toISOString() }).eq('id', batch[idx].id); } else { stillOpen++; await supabase.from('marketing_jobs').update({ url_status: 'active', url_check_result: 'Verified active', last_url_check: new Date().toISOString() }).eq('id', batch[idx].id); } }
         } catch (e) { log('validating_urls', `Batch error: ${(e as Error).message}`); }
@@ -366,7 +377,7 @@ async function runTrackerProcess(rid: string, action: string, gk: string) {
       await progress.updateStep('searching_sources', { items_total: totalPasses, items_processed: 0, sub_step: 'PASS 1: Broad job board search...' });
       log('searching_sources', 'PASS 1: Broad job board search'); searchPasses++;
       try {
-        const p1 = await aiCall(gk, `Healthcare recruiting intelligence. Search: ${JOB_BOARDS.join(', ')}\n\nFind ACTIVE postings for ONLY these roles:\n1. Medical Director\n2. Chief Medical Officer\n3. Primary Care Physician\n4. Nurse Practitioner\n5. Physician Assistant\n\nTarget: Medicare Advantage, VBC, PACE, health plans, health systems, hospitals, FQHCs.\nALREADY IN DB: ${existing}\n\nCRITICAL: ONLY return jobs you have HIGH CONFIDENCE are CURRENTLY ACTIVE. Do NOT fabricate.\njob_posting_url: Leave EMPTY.\nMap job_category to: ${CATS.join(' | ')}\nMap job_title to: ${ROLES.join(', ')}\n\nReturn JSON: {"jobs":[{"company":"","job_title":"","job_category":"","city":"","state":"","source_found":""}]}\nFind 40-60 jobs. ONLY valid JSON.`, 12000);
+        const p1 = await aiCall(oa, `Healthcare recruiting intelligence. Search: ${JOB_BOARDS.join(', ')}\n\nFind ACTIVE postings for ONLY these roles:\n1. Medical Director\n2. Chief Medical Officer\n3. Primary Care Physician\n4. Nurse Practitioner\n5. Physician Assistant\n\nTarget: Medicare Advantage, VBC, PACE, health plans, health systems, hospitals, FQHCs.\nALREADY IN DB: ${existing}\n\nCRITICAL: ONLY return jobs you have HIGH CONFIDENCE are CURRENTLY ACTIVE. Do NOT fabricate.\njob_posting_url: Leave EMPTY.\nMap job_category to: ${CATS.join(' | ')}\nMap job_title to: ${ROLES.join(', ')}\n\nReturn JSON: {"jobs":[{"company":"","job_title":"","job_category":"","city":"","state":"","source_found":""}]}\nFind 40-60 jobs. ONLY valid JSON.`, 12000);
         const d = parseJson(p1); if (d.jobs) { allFound.push(...d.jobs); log('searching_sources', `Pass 1: ${d.jobs.length} jobs`); }
       } catch (e) { log('searching_sources', `Pass 1 error: ${(e as Error).message}`); }
       passesCompleted++;
@@ -377,7 +388,7 @@ async function runTrackerProcess(rid: string, action: string, gk: string) {
         const chunk = PRIORITY_ORGS.slice(ci, ci + 40);
         await progress.updateStep('searching_sources', { items_processed: passesCompleted, sub_step: `PASS 2: Priority orgs chunk ${Math.floor(ci/40)+1}/${pass2Chunks}...` });
         try {
-          const p2 = await aiCall(gk, `Search for CURRENT job openings at these healthcare organizations:\n${chunk.map((o,i)=>`${i+1}. ${o}`).join('\n')}\n\nRoles: Medical Director, Chief Medical Officer, Primary Care Physician, Nurse Practitioner, Physician Assistant\nALREADY FOUND: ${allFound.slice(-30).map(j=>`${j.company}-${j.job_title}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000);
+          const p2 = await aiCall(oa, `Search for CURRENT job openings at these healthcare organizations:\n${chunk.map((o,i)=>`${i+1}. ${o}`).join('\n')}\n\nRoles: Medical Director, Chief Medical Officer, Primary Care Physician, Nurse Practitioner, Physician Assistant\nALREADY FOUND: ${allFound.slice(-30).map(j=>`${j.company}-${j.job_title}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000);
           const d = parseJson(p2); if (d.jobs) { allFound.push(...d.jobs); log('searching_sources', `Pass 2 chunk: ${d.jobs.length} jobs`); }
         } catch (e) { log('searching_sources', `Pass 2 error: ${(e as Error).message}`); }
         passesCompleted++;
@@ -389,7 +400,7 @@ async function runTrackerProcess(rid: string, action: string, gk: string) {
         await progress.updateStep('searching_sources', { items_processed: passesCompleted, sub_step: `PASS 3: Checking ${recSrc.length} recurring career pages...` });
         const srcList = recSrc.slice(0, 50).map((s,i) => `${i+1}. ${s.company_name}${s.careers_url ? ` (${s.careers_url})` : ''}`).join('\n');
         try {
-          const p3 = await aiCall(gk, `Check these employer career pages for openings:\n${srcList}\nRoles: Medical Director, Chief Medical Officer, Primary Care Physician, Nurse Practitioner, Physician Assistant\nALREADY FOUND: ${allFound.slice(-40).map(j=>`${j.company}-${j.job_title}-${j.city||''}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000);
+          const p3 = await aiCall(oa, `Check these employer career pages for openings:\n${srcList}\nRoles: Medical Director, Chief Medical Officer, Primary Care Physician, Nurse Practitioner, Physician Assistant\nALREADY FOUND: ${allFound.slice(-40).map(j=>`${j.company}-${j.job_title}-${j.city||''}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000);
           const d = parseJson(p3); if (d.jobs) { allFound.push(...d.jobs); log('searching_sources', `Pass 3: ${d.jobs.length} jobs`); }
         } catch (e) { log('searching_sources', `Pass 3 error: ${(e as Error).message}`); }
         for (const s of recSrc) await supabase.from('marketing_companies').update({ last_searched_at: new Date().toISOString() }).eq('id', s.id);
@@ -472,7 +483,7 @@ async function runTrackerProcess(rid: string, action: string, gk: string) {
       if (newCos.length > 0 && serpKey) {
         log('searching_sources', `PASS 4: Searching ${newCos.length} new companies for additional roles`); searchPasses++;
         try {
-          const p4 = await aiCall(gk, `Search these NEW companies for additional openings:\n${newCos.map((c,i)=>`${i+1}. ${c}`).join('\n')}\nRoles: Medical Director, Chief Medical Officer, Primary Care Physician, Nurse Practitioner, Physician Assistant\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 6000);
+          const p4 = await aiCall(oa, `Search these NEW companies for additional openings:\n${newCos.map((c,i)=>`${i+1}. ${c}`).join('\n')}\nRoles: Medical Director, Chief Medical Officer, Primary Care Physician, Nurse Practitioner, Physician Assistant\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 6000);
           const d = parseJson(p4);
           const pass4Candidates: any[] = [];
           for (const j of (d.jobs||[])) {
@@ -524,7 +535,7 @@ async function runTrackerProcess(rid: string, action: string, gk: string) {
           const batch = needCt.slice(i, i + 25);
           await progress.updateStep('enriching_contacts', { items_processed: i, sub_step: `Enriching batch ${Math.floor(i/25)+1}/${Math.ceil(needCt.length/25)}...` });
           try {
-            const cr = await aiCall(gk, `Find hiring contacts for:\n${batch.map((c,i)=>`${i+1}. ${c}`).join('\n')}\nFind: Talent Acquisition, Recruiters, HR Directors, Medical Directors, CMOs.\nONLY real verifiable info. No guessed emails.\nReturn JSON: [{"company":"","first_name":"","last_name":"","email":"","phone_work":"","phone_cell":"","phone_home":"","title":"","source":"","source_url":""}]\nOnly JSON.`, 5000);
+            const cr = await aiCall(oa, `Find hiring contacts for:\n${batch.map((c,i)=>`${i+1}. ${c}`).join('\n')}\nFind: Talent Acquisition, Recruiters, HR Directors, Medical Directors, CMOs.\nONLY real verifiable info. No guessed emails.\nReturn JSON: [{"company":"","first_name":"","last_name":"","email":"","phone_work":"","phone_cell":"","phone_home":"","title":"","source":"","source_url":""}]\nOnly JSON.`, 5000);
             for (const c of parseArr(cr)) {
               if (!c.company || (!c.first_name && !c.last_name)) continue;
               const dk = `${(c.first_name||'').toLowerCase().trim()}|${(c.last_name||'').toLowerCase().trim()}|${(c.company||'').toLowerCase().trim()}`;
@@ -611,8 +622,8 @@ Deno.serve(async (req) => {
     await cleanupStaleRuns();
     const body = await req.json().catch(() => ({}));
     const { action = 'full' } = body;
-    const gk = Deno.env.get("GATEWAY_API_KEY");
-    if (!gk) throw new Error("Gateway key missing");
+    const oa = Deno.env.get("OPENAI_API_KEY");
+    if (!oa) throw new Error("OPENAI_API_KEY missing");
 
     const { data: run, error: runErr } = await supabase.from('tracker_runs').insert({
       run_type: action, status: 'running', current_step: 'loading', started_at: new Date().toISOString(),
@@ -621,7 +632,7 @@ Deno.serve(async (req) => {
     if (runErr || !run) throw new Error(`Failed to create tracker run: ${runErr?.message || 'unknown'}`);
 
     const rid = run.id;
-    runTrackerProcess(rid, action, gk).catch(err => {
+    runTrackerProcess(rid, action, oa).catch(err => {
       console.error('Background process crashed:', err);
       supabase.from('tracker_runs').update({ status: 'failed', current_step: 'error', completed_at: new Date().toISOString(), error_message: `Background crash: ${err.message}` }).eq('id', rid);
     });
