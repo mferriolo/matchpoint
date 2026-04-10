@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState } from 'react';
 import { INITIAL_ACTIVE_JOBS, SPECIAL_JOB_TYPES } from '@/utils/jobTypesData';
 
 interface JobTypesContextType {
@@ -53,10 +53,6 @@ export const JobTypesProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const getAllJobTypes = () => {
     return [...SPECIAL_JOB_TYPES];
   };
-
-  useEffect(() => {
-    localStorage.setItem('activeJobTypes', JSON.stringify(activeJobTypes));
-  }, [activeJobTypes]);
 
   return (
     <JobTypesContext.Provider value={{

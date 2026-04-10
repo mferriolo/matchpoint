@@ -56,18 +56,6 @@ const ZoomIntegration: React.FC<ZoomIntegrationProps> = ({
 
 
 
-  // Verify refs are passed correctly
-  useEffect(() => {
-    console.log('📍 ZoomIntegration: Refs initialized:', {
-      hasLocalRef: !!localVideoRef,
-      hasLocalRefCurrent: !!localVideoRef?.current,
-      hasParticipantRef: !!participantVideoRef,
-      hasParticipantRefCurrent: !!participantVideoRef?.current,
-      localRefType: localVideoRef?.current?.tagName,
-      participantRefType: participantVideoRef?.current?.tagName,
-    });
-  }, [localVideoRef, participantVideoRef]);
-
   useEffect(() => {
     createAndJoinSession();
     

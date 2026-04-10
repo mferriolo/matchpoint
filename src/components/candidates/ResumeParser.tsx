@@ -10,6 +10,15 @@ import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/lib/supabase';
 import * as pdfjsLib from 'pdfjs-dist';
 import { JOB_CATEGORIES } from '@/utils/jobTypesData';
+
+// Static list of all job types (excluding the "Active Jobs" pseudo-category),
+// computed once at module load. Previously this lived in a useState + useEffect
+// inside the component, but the source data never changes at runtime.
+const ALL_JOB_TYPES: string[] = [...new Set(
+  Object.entries(JOB_CATEGORIES)
+    .filter(([category]) => category !== 'Active Jobs')
+    .flatMap(([, jobs]) => jobs)
+)].sort();
 import { useJobTypes } from '@/contexts/JobTypesContext';
 
 // Set up PDF.js worker
@@ -58,31 +67,7 @@ export const ResumeParser: React.FC<{ onParsed: (data: any) => void; onCancel?: 
   const [loading, setLoading] = useState(false);
   const [parsedData, setParsedData] = useState<ParsedData | null>(null);
   const [error, setError] = useState('');
-  const [allJobTypes, setAllJobTypes] = useState<string[]>([]);
   const { activeJobTypes } = useJobTypes();
-
-  useEffect(() => {
-    console.log('=== JOB TYPES DEBUG ===');
-    console.log('Active job types:', activeJobTypes);
-    console.log('Active job types (stringified):', JSON.stringify(activeJobTypes));
-    activeJobTypes.forEach((jobType, index) => {
-      console.log(`  [${index}] "${jobType}" (length: ${jobType.length})`);
-    });
-    console.log('======================');
-  }, [activeJobTypes]);
-
-  useEffect(() => {
-    // Compile all job types from categories
-    const types: string[] = [];
-    Object.entries(JOB_CATEGORIES).forEach(([category, jobs]) => {
-      if (category !== 'Active Jobs') {
-        types.push(...jobs);
-      }
-    });
-    // Sort alphabetically and remove duplicates
-    const uniqueTypes = [...new Set(types)].sort();
-    setAllJobTypes(uniqueTypes);
-  }, []);
 
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -674,7 +659,7 @@ export const ResumeParser: React.FC<{ onParsed: (data: any) => void; onCancel?: 
                   <div className="px-2 py-1.5 text-sm font-semibold text-gray-700 pointer-events-none">
                     All Job Types
                   </div>
-                  {allJobTypes.map((jobType) => (
+                  {ALL_JOB_TYPES.map((jobType) => (
                     <SelectItem key={`all-${jobType}`} value={jobType}>
                       {jobType}
                     </SelectItem>

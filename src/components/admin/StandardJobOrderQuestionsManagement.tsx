@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Save, RotateCcw, FileText } from 'lucide-react';
@@ -11,21 +11,18 @@ const STORAGE_KEY = 'standardJobOrderQuestions';
 
 export const StandardJobOrderQuestionsManagement: React.FC = () => {
   const { toast } = useToast();
-  const [sections, setSections] = useState<QuestionSection[]>([]);
-  const [hasChanges, setHasChanges] = useState(false);
-
-  useEffect(() => {
+  const [sections, setSections] = useState<QuestionSection[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
-        setSections(JSON.parse(saved));
+        return JSON.parse(saved);
       } catch {
-        setSections([...DEFAULT_SECTIONS, COMPANY_SECTION, HIRING_SECTION]);
+        return [...DEFAULT_SECTIONS, COMPANY_SECTION, HIRING_SECTION];
       }
-    } else {
-      setSections([...DEFAULT_SECTIONS, COMPANY_SECTION, HIRING_SECTION]);
     }
-  }, []);
+    return [...DEFAULT_SECTIONS, COMPANY_SECTION, HIRING_SECTION];
+  });
+  const [hasChanges, setHasChanges] = useState(false);
 
   const handleUpdateQuestions = (key: string, questions: string[]) => {
     setSections(prev => prev.map(s => s.key === key ? { ...s, questions } : s));

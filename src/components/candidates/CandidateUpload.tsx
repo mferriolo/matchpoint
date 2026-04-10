@@ -13,6 +13,15 @@ import { ResumeParser } from './ResumeParser';
 import { supabase } from '@/lib/supabase';
 import { useToast } from '@/hooks/use-toast';
 import { JOB_CATEGORIES } from '@/utils/jobTypesData';
+
+// Static list of all job types (excluding the "Active Jobs" pseudo-category),
+// computed once at module load. Previously this lived in a useState + useEffect
+// inside the component, but the source data never changes at runtime.
+const ALL_JOB_TYPES: string[] = [...new Set(
+  Object.entries(JOB_CATEGORIES)
+    .filter(([category]) => category !== 'Active Jobs')
+    .flatMap(([, jobs]) => jobs)
+)].sort();
 import { useJobTypes } from '@/contexts/JobTypesContext';
 
 interface CandidateUploadProps {
@@ -30,34 +39,9 @@ const CandidateUpload: React.FC<CandidateUploadProps> = ({ onClose, onCandidateA
     experience: '',
     jobType: ''
   });
-  const [allJobTypes, setAllJobTypes] = useState<string[]>([]);
   const { activeJobTypes } = useJobTypes();
   const { toast } = useToast();
 
-  useEffect(() => {
-    console.log('=== JOB TYPES DEBUG ===');
-    console.log('Active job types from context:', activeJobTypes);
-    console.log('First active job type:', activeJobTypes[0]);
-    console.log('Number of active job types:', activeJobTypes.length);
-    activeJobTypes.forEach((jobType, index) => {
-      console.log(`  [${index}] "${jobType}" (length: ${jobType.length})`);
-    });
-    console.log('======================');
-  }, [activeJobTypes]);
-
-
-  useEffect(() => {
-    // Compile all job types from categories
-    const types: string[] = [];
-    Object.entries(JOB_CATEGORIES).forEach(([category, jobs]) => {
-      if (category !== 'Active Jobs') {
-        types.push(...jobs);
-      }
-    });
-    // Sort alphabetically and remove duplicates
-    const uniqueTypes = [...new Set(types)].sort();
-    setAllJobTypes(uniqueTypes);
-  }, []);
   const handleParsedResume = async (parsedCandidate: any) => {
     console.log('=== SAVING PARSED CANDIDATE TO DATABASE ===');
     console.log('Full parsed candidate data:', JSON.stringify(parsedCandidate, null, 2));
@@ -379,7 +363,7 @@ const CandidateUpload: React.FC<CandidateUploadProps> = ({ onClose, onCandidateA
                     <div className="px-2 py-1.5 text-sm font-semibold text-gray-700 pointer-events-none">
                       All Job Types
                     </div>
-                    {allJobTypes.map((jobType) => (
+                    {ALL_JOB_TYPES.map((jobType) => (
                       <CleanSelectItem 
                         key={`all-${jobType}`} 
                         value={jobType}

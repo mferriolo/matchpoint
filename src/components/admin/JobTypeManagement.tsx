@@ -116,27 +116,13 @@ export const JobTypeManagement: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    console.log('=== useEffect TRIGGERED ===');
-    console.log('selectedJobType:', selectedJobType?.name);
-    console.log('selectedInactiveJobName:', selectedInactiveJobName);
-    console.log('Current questions state length:', questions.length);
-    console.log('Current showQuestionsPopup state:', showQuestionsPopup);
-    
     if (selectedJobType) {
-      console.log('Branch: Active job type selected');
-      console.log('Fetching questions for active job type:', selectedJobType.name);
       fetchQuestions(selectedJobType.id);
       setShowQuestionsPopup(true);
     } else if (selectedInactiveJobName) {
-      console.log('Branch: Inactive job type selected');
-      console.log('Looking for predefined questions for:', selectedInactiveJobName);
-      
       // Show predefined questions for inactive job type
       const predefinedQs = allPredefinedQuestions[selectedInactiveJobName as keyof typeof allPredefinedQuestions] || [];
-      console.log('Raw predefined questions found:', predefinedQs);
-      console.log('Number of questions found:', predefinedQs.length);
-      console.log('Questions array:', JSON.stringify(predefinedQs, null, 2));
-      
+
       if (predefinedQs.length > 0) {
         const mockQuestions: Question[] = predefinedQs.map((q, index) => ({
           id: `predefined-${index}`,
@@ -145,33 +131,17 @@ export const JobTypeManagement: React.FC = () => {
           sort_order: index + 1,
           is_active: true
         }));
-        console.log('Created mock questions:', mockQuestions.length);
-        console.log('Mock questions array:', JSON.stringify(mockQuestions, null, 2));
-        console.log('ABOUT TO SET QUESTIONS - Current state:', questions.length);
         setQuestions(mockQuestions);
-        console.log('ABOUT TO SET POPUP TO TRUE - Current state:', showQuestionsPopup);
         setShowQuestionsPopup(true);
-        console.log('Set questions and popup to true');
-        
-        // Add a timeout to check if state persists
-        setTimeout(() => {
-          console.log('=== 100ms LATER CHECK ===');
-          console.log('Questions length after timeout:', questions.length);
-          console.log('ShowQuestionsPopup after timeout:', showQuestionsPopup);
-          console.log('selectedInactiveJobName after timeout:', selectedInactiveJobName);
-        }, 100);
       } else {
-        console.log('No predefined questions found - setting empty array');
         setQuestions([]);
         setShowQuestionsPopup(false);
       }
     } else {
-      console.log('Branch: No job type selected - clearing');
       // Clear questions when no job type is selected
       setQuestions([]);
       setShowQuestionsPopup(false);
     }
-    console.log('=== useEffect END ===');
   }, [selectedJobType, selectedInactiveJobName]);
 
   // Check if job type has questions
