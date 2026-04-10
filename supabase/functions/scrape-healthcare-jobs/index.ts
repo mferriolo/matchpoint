@@ -12,7 +12,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const CATS = ["Value Based Care (VBC)","PACE Medical Groups","Health Plans","Health Systems","Hospitals","FQHC","All Others"];
 const ROLES = ["Medical Director","Chief Medical Officer","Primary Care Physician","Nurse Practitioner","Physician Assistant"];
 const JOB_BOARDS = ["Indeed","LinkedIn Jobs","ZipRecruiter","Google Jobs","Glassdoor","DocCafe","Health eCareers","PracticeLink","Monster","CareerBuilder","SimplyHired"];
-const PRIORITY_ORGS = ["Agilon Health","Oak Street Health","ChenMed","Iora Health","Aledade","Cityblock Health","Cano Health","Privia Health","Signify Health","Curana Health","VillageMD","Hopscotch Health","Cohere Health","CINQCARE","CenterWell","HarmonyCares","CareMax","P3 Health Partners","Wellvana","Bloom Healthcare","Pair Team","Firefly Health","Vera Whole Health","Everside Health","Marathon Health","Alignment Healthcare","Devoted Health","Clover Health","Bright Health","Carelon","Optum","UnitedHealth Group","InnovAge","Trinity Health PACE","myPlace Health","Element Care","Humana","CVS Health","Aetna","Elevance Health","Cigna","Molina Healthcare","Centene","SCAN Health Plan","Oscar Health","Point32Health","CommonSpirit Health","HCA Healthcare","Ascension","Providence","Trinity Health","Intermountain Health","Kaiser Permanente","Advocate Aurora Health","Atrium Health","Geisinger","Tenet Healthcare","Landmark Health","DispatchHealth","BrightSpring Health","Enhabit Home Health","Compassus"];
+const PRIORITY_ORGS = ["Agilon Health","Oak Street Health","ChenMed","Iora Health","Aledade","Cityblock Health","Cano Health","Privia Health","Signify Health","Curana Health","VillageMD","Hopscotch Health","Cohere Health","CINQCARE","CenterWell","HarmonyCares","CareMax","P3 Health Partners","Wellvana","Bloom Healthcare","Pair Team","Firefly Health","Vera Whole Health","Everside Health","Marathon Health","Alignment Healthcare","Devoted Health","Clover Health","Bright Health","Carelon","Optum","UnitedHealth Group","InnovAge","Trinity Health PACE","myPlace Health","Element Care","Humana","CVS Health","Aetna","Elevance Health","Cigna","Molina Healthcare","Centene","SCAN Health Plan","Oscar Health","Point32Health","CommonSpirit Health","HCA Healthcare","Ascension","Providence","Trinity Health","Intermountain Health","Kaiser Permanente","Advocate Aurora Health","Atrium Health","Geisinger","Tenet Healthcare","Landmark Health","DispatchHealth","BrightSpring Health","Enhabit Home Health","Compassus","Main Street Health","Strive Health","Crossover Health","Pearl Health","Rush University System for Health","Evolent Health","Lumeris"];
 
 const STEP_WEIGHTS: Record<string, number> = { loading: 3, validating_urls: 15, searching_sources: 30, verifying_new_jobs: 22, deduplicating: 8, enriching_contacts: 10, updating_summaries: 6, generating_alerts: 3, completed: 3 };
 const STEP_ORDER = ['loading','validating_urls','searching_sources','verifying_new_jobs','deduplicating','enriching_contacts','updating_summaries','generating_alerts','completed'];
@@ -370,7 +370,8 @@ async function runTrackerProcess(rid: string, action: string, oa: string) {
       const allFound: any[] = [];
       const newCos: string[] = [];
       const pass2Chunks = Math.ceil(PRIORITY_ORGS.length / 40);
-      const totalPasses = 1 + pass2Chunks + (recSrc.length > 0 ? 1 : 0);
+      const pass3Chunks = recSrc.length > 0 ? Math.ceil(recSrc.length / 40) : 0;
+      const totalPasses = 1 + pass2Chunks + pass3Chunks;
       let passesCompleted = 0;
 
       // PASS 1
@@ -394,17 +395,22 @@ async function runTrackerProcess(rid: string, action: string, oa: string) {
         passesCompleted++;
       }
 
-      // PASS 3
+      // PASS 3 - chunk through ALL recurring career sources (was previously
+      // capped at .slice(0, 50), which silently dropped any recurring source
+      // beyond the first 50). Mirrors Pass 2's chunked iteration.
       if (recSrc.length > 0) {
-        log('searching_sources', `PASS 3: ${recSrc.length} recurring career pages`); searchPasses++;
-        await progress.updateStep('searching_sources', { items_processed: passesCompleted, sub_step: `PASS 3: Checking ${recSrc.length} recurring career pages...` });
-        const srcList = recSrc.slice(0, 50).map((s,i) => `${i+1}. ${s.company_name}${s.careers_url ? ` (${s.careers_url})` : ''}`).join('\n');
-        try {
-          const p3 = await aiCall(oa, `Check these employer career pages for openings:\n${srcList}\nRoles: Medical Director, Chief Medical Officer, Primary Care Physician, Nurse Practitioner, Physician Assistant\nALREADY FOUND: ${allFound.slice(-40).map(j=>`${j.company}-${j.job_title}-${j.city||''}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000);
-          const d = parseJson(p3); if (d.jobs) { allFound.push(...d.jobs); log('searching_sources', `Pass 3: ${d.jobs.length} jobs`); }
-        } catch (e) { log('searching_sources', `Pass 3 error: ${(e as Error).message}`); }
+        log('searching_sources', `PASS 3: ${recSrc.length} recurring career pages (${pass3Chunks} chunks)`); searchPasses++;
+        for (let ci = 0; ci < recSrc.length; ci += 40) {
+          const chunk = recSrc.slice(ci, ci + 40);
+          await progress.updateStep('searching_sources', { items_processed: passesCompleted, sub_step: `PASS 3: Career pages chunk ${Math.floor(ci/40)+1}/${pass3Chunks}...` });
+          const srcList = chunk.map((s,i) => `${i+1}. ${s.company_name}${s.careers_url ? ` (${s.careers_url})` : ''}`).join('\n');
+          try {
+            const p3 = await aiCall(oa, `Check these employer career pages for openings:\n${srcList}\nRoles: Medical Director, Chief Medical Officer, Primary Care Physician, Nurse Practitioner, Physician Assistant\nALREADY FOUND: ${allFound.slice(-40).map(j=>`${j.company}-${j.job_title}-${j.city||''}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000);
+            const d = parseJson(p3); if (d.jobs) { allFound.push(...d.jobs); log('searching_sources', `Pass 3 chunk ${Math.floor(ci/40)+1}: ${d.jobs.length} jobs`); }
+          } catch (e) { log('searching_sources', `Pass 3 chunk error: ${(e as Error).message}`); }
+          passesCompleted++;
+        }
         for (const s of recSrc) await supabase.from('marketing_companies').update({ last_searched_at: new Date().toISOString() }).eq('id', s.id);
-        passesCompleted++;
       }
 
       log('searching_sources', `Total raw: ${allFound.length} jobs across ${searchPasses} passes`);
