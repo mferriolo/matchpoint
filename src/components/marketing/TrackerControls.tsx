@@ -847,13 +847,16 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
                 Reset to defaults (Admin → Active)
               </button>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1.5 max-h-80 overflow-y-auto pr-1">
+            {/* CSS multi-column layout (not grid) so items flow top-to-bottom
+                in column 1, then top-to-bottom in column 2, etc. — alphabetical
+                order is easier to read down a column than across a row. */}
+            <div className="columns-1 sm:columns-2 md:columns-3 gap-x-4 max-h-80 overflow-y-auto pr-1">
               {allJobTypes.map(jt => {
                 const checked = selectedJobTitles.includes(jt.name);
                 return (
                   <label
                     key={jt.id}
-                    className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5"
+                    className="break-inside-avoid flex items-center gap-2 text-xs text-gray-700 cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5 mb-1"
                   >
                     <input
                       type="checkbox"
