@@ -331,36 +331,154 @@ async function scrapeWorkdayBoard(url: string): Promise<CareerPageScrapeResult> 
   } catch (e) { clearTimeout(timeout); return { jobs: [], ats: 'workday', error: (e as Error).message }; }
 }
 
+// v82: smarter generic HTML scrape. Tries 3 strategies in order:
+//   1. JSON-LD <script type="application/ld+json"> with @type:"JobPosting"
+//      (the highest-precision source — many modern career pages embed
+//      this for SEO and Google Jobs indexing)
+//   2. Anchor tag with a heading child (<a>...<h3>Medical Director</h3></a>)
+//   3. Anchor tag with non-generic text, OR a nearby heading just before
+//      the anchor in the source order (typical "card" layout)
+// Filters out generic UI text ("Apply", "View", "Search", "Open Positions"
+// etc.) so the upstream role-match filter has real titles to compare.
+
+const STRIP_HTML = (s: string): string =>
+  s.replace(/<[^>]+>/g, ' ')
+   .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<')
+   .replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+   .replace(/\s+/g, ' ').trim();
+
+const GENERIC_LABELS = new RegExp([
+  '^(apply|apply now|apply here|view|view job|view jobs|view all|view all jobs',
+  'view position|view positions|view opening|view openings|view career|view careers',
+  'learn more|read more|see details|details|click here|search|search jobs|search now',
+  'filter|filters|home|about|contact|login|sign in|sign up|menu|skip|skip to',
+  'toggle|show more|show less|next|previous|back|continue',
+  'jobs|careers|all jobs|all positions|browse jobs|browse careers',
+  'open positions|open jobs|open opportunities|open roles|opportunities',
+  'positions|requisition|requisitions|find jobs|find a job|find your role',
+  'available positions|available jobs|current openings|current jobs',
+  'no jobs|no openings|see all|see more|share|email|tweet|facebook|linkedin',
+  'newsletter|subscribe|sitemap|terms|privacy|policy|cookies|copyright',
+  'page \\d+|previous page|next page|first|last)$',
+].join('|'), 'i');
+
+const isGenericLabel = (s: string): boolean => GENERIC_LABELS.test(s.trim());
+
+function formatJsonLdLocation(jl: any): string {
+  if (!jl) return '';
+  if (typeof jl === 'string') return jl;
+  if (Array.isArray(jl)) return formatJsonLdLocation(jl[0]);
+  const addr = jl.address || jl;
+  if (typeof addr === 'string') return addr;
+  const parts = [addr.addressLocality, addr.addressRegion].filter(Boolean);
+  return parts.join(', ');
+}
+
+function extractJsonLdJobs(html: string, baseUrl: URL): { title: string; location: string; url: string }[] {
+  const jobs: { title: string; location: string; url: string }[] = [];
+  const ldRegex = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = ldRegex.exec(html)) !== null) {
+    let parsed: any;
+    try { parsed = JSON.parse(m[1].trim()); } catch { continue; }
+    const visit = (node: any) => {
+      if (!node || typeof node !== 'object') return;
+      const t = node['@type'];
+      const isJobPosting = t === 'JobPosting' || (Array.isArray(t) && t.includes('JobPosting'));
+      if (isJobPosting) {
+        const title = (node.title || '').trim();
+        let url = node.url || '';
+        if (typeof url === 'object') url = url['@id'] || '';
+        if (title && url) {
+          let abs: string;
+          try { abs = url.startsWith('http') ? url : new URL(url, baseUrl).toString(); } catch { return; }
+          jobs.push({ title, location: formatJsonLdLocation(node.jobLocation), url: abs });
+        }
+        return;
+      }
+      for (const v of Object.values(node)) {
+        if (Array.isArray(v)) v.forEach(visit);
+        else if (typeof v === 'object' && v !== null) visit(v);
+      }
+    };
+    visit(parsed);
+  }
+  return jobs;
+}
+
 async function scrapeGenericCareersPage(url: string): Promise<CareerPageScrapeResult> {
-  // Heuristic HTML scrape: fetch the page and pull anchor tags whose
-  // hrefs look like job postings. Lots of false positives at this stage;
-  // role-match filtering downstream will discard non-job titles.
   const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 10000);
   try {
     const r = await fetch(url, { signal: controller.signal, headers: { 'Accept': 'text/html', 'User-Agent': 'Mozilla/5.0 (compatible; MatchPointBot/1.0; +https://matchpoint-nu-dun.vercel.app)' } });
     clearTimeout(timeout);
     if (!r.ok) return { jobs: [], ats: 'generic', error: `HTTP ${r.status}` };
     const html = await r.text();
-    const linkRegex = /<a[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    const baseUrl = new URL(url);
     const seenHrefs = new Set<string>();
     const jobs: { title: string; location: string; url: string }[] = [];
-    const baseUrl = new URL(url);
-    let mm: RegExpExecArray | null;
-    while ((mm = linkRegex.exec(html)) !== null) {
-      const rawHref = mm[1].trim();
-      const rawText = mm[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-      if (!rawHref || !rawText) continue;
-      if (rawText.length < 5 || rawText.length > 200) continue;
-      // Skip obvious non-job links
-      if (/^(home|about|contact|login|sign in|search|privacy|terms|menu|skip)$/i.test(rawText)) continue;
+
+    // Strategy 1: JSON-LD JobPosting nodes (highest precision when present)
+    for (const j of extractJsonLdJobs(html, baseUrl)) {
+      if (!seenHrefs.has(j.url) && j.title.length >= 3 && j.title.length <= 200) {
+        seenHrefs.add(j.url);
+        jobs.push(j);
+      }
+    }
+    if (jobs.length > 0) {
+      // Some sites duplicate jobs in JSON-LD AND HTML; if JSON-LD found
+      // anything we trust it and skip the HTML pass to avoid noise.
+      return { jobs: jobs.slice(0, 200), ats: 'generic' };
+    }
+
+    // Strategy 2 + 3: anchor-based extraction with structural context
+    const anchorRegex = /<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = anchorRegex.exec(html)) !== null) {
+      const rawHref = m[1].trim();
+      const innerHtml = m[2];
+      if (!rawHref) continue;
       // Path looks job-like
       if (!/\/(job|jobs|career|careers|opening|openings|position|positions|vacancy|vacancies|opportunity|opportunities|requisition|posting)/i.test(rawHref)) continue;
+
+      let title = '';
+
+      // Try 2a: heading INSIDE the anchor (common card pattern where
+      // the whole card is wrapped in <a>)
+      const headInside = innerHtml.match(/<(h[1-6]|strong|b)\b[^>]*>([\s\S]*?)<\/\1>/i);
+      if (headInside) {
+        const t = STRIP_HTML(headInside[2]);
+        if (t && !isGenericLabel(t) && t.length >= 5 && t.length <= 200) title = t;
+      }
+
+      // Try 2b: anchor's own text content (stripped of HTML)
+      if (!title) {
+        const anchorText = STRIP_HTML(innerHtml);
+        if (anchorText && !isGenericLabel(anchorText) && anchorText.length >= 5 && anchorText.length <= 200) {
+          title = anchorText;
+        }
+      }
+
+      // Try 3: heading just BEFORE this anchor in the source (the
+      // "card" pattern where the title is a sibling, not a child)
+      if (!title) {
+        const lookbackStart = Math.max(0, m.index - 800);
+        const before = html.substring(lookbackStart, m.index);
+        const headsBefore = [...before.matchAll(/<(h[1-6])\b[^>]*>([\s\S]*?)<\/\1>/gi)];
+        if (headsBefore.length > 0) {
+          const lastH = headsBefore[headsBefore.length - 1];
+          const t = STRIP_HTML(lastH[2]);
+          if (t && !isGenericLabel(t) && t.length >= 5 && t.length <= 200) title = t;
+        }
+      }
+
+      if (!title) continue;
+
       let absUrl: string;
       try { absUrl = rawHref.startsWith('http') ? rawHref : new URL(rawHref, baseUrl).toString(); } catch { continue; }
       if (seenHrefs.has(absUrl)) continue;
       seenHrefs.add(absUrl);
-      jobs.push({ title: rawText, location: '', url: absUrl });
-      if (jobs.length >= 100) break; // hard cap to avoid runaway pages
+      jobs.push({ title, location: '', url: absUrl });
+      if (jobs.length >= 200) break;
     }
     return { jobs, ats: 'generic' };
   } catch (e) { clearTimeout(timeout); return { jobs: [], ats: 'generic', error: (e as Error).message }; }
@@ -1008,6 +1126,16 @@ Deno.serve(async (req) => {
     // limit?: number, offset?: number }. Returns a summary + next_offset
     // so the caller can paginate through all companies.
     // ------------------------------------------------------------------
+    // Debug helper: scrape a single career URL and return the extracted
+    // job list verbatim. Lets us see exactly what scrapeCareerPage is
+    // pulling out without doing any DB writes.
+    if (action === 'debug_scrape_career_page') {
+      const debugUrl = body.url;
+      if (!debugUrl) return new Response(JSON.stringify({ success: false, error: 'url required' }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+      const r = await scrapeCareerPage(debugUrl, body.company || '');
+      return new Response(JSON.stringify({ success: true, url: debugUrl, ats: r.ats, error: r.error, count: r.jobs.length, jobs: r.jobs }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+    }
+
     if (action === 'backfill_career_urls') {
       const startMs = Date.now();
       const limit = Math.min(Math.max(Number(body.limit) || 25, 1), 100);
