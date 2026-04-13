@@ -841,11 +841,16 @@ const MarketingNewJobs: React.FC = () => {
                             {editingCompanyTypeId === c.id ? (
                               <select
                                 autoFocus
-                                value={c.company_type || ''}
-                                onChange={e => handleSaveCompanyType(c.id, e.target.value)}
+                                // If the stored value doesn't match any option, start blank
+                                // and force the user to make an explicit choice. Without this
+                                // the browser silently shows the first option as "selected"
+                                // but onChange never fires, so closing the dropdown doesn't save.
+                                value={COMPANY_CATEGORY_OPTIONS.includes(c.company_type || '') ? c.company_type : ''}
+                                onChange={e => { if (e.target.value) handleSaveCompanyType(c.id, e.target.value); }}
                                 onBlur={() => setEditingCompanyTypeId(null)}
                                 className="text-xs border border-[#911406] rounded px-2 py-1 bg-white focus:ring-1 focus:ring-[#911406] focus:border-[#911406] outline-none"
                               >
+                                <option value="" disabled>Select category…</option>
                                 {COMPANY_CATEGORY_OPTIONS.map(opt => (
                                   <option key={opt} value={opt}>{opt}</option>
                                 ))}

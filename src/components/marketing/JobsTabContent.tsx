@@ -1103,11 +1103,15 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                       {editingJobTypeId === j.id ? (
                         <select
                           autoFocus
-                          defaultValue={classified}
-                          onChange={e => handleSaveJobType(j.id, e.target.value)}
+                          // Start blank unless the current classification is one of the
+                          // edit options, so picking the "already visible" choice still
+                          // fires onChange and saves.
+                          value={JOB_TYPE_EDIT_OPTIONS.includes(classified) ? classified : ''}
+                          onChange={e => { if (e.target.value) handleSaveJobType(j.id, e.target.value); }}
                           onBlur={() => setEditingJobTypeId(null)}
                           className="text-xs border border-[#911406] rounded px-2 py-1 bg-white focus:ring-1 focus:ring-[#911406] focus:border-[#911406] outline-none"
                         >
+                          <option value="" disabled>Select job type…</option>
                           {JOB_TYPE_EDIT_OPTIONS.map(opt => (
                             <option key={opt} value={opt}>{opt}</option>
                           ))}
