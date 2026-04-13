@@ -1126,6 +1126,20 @@ Deno.serve(async (req) => {
     // limit?: number, offset?: number }. Returns a summary + next_offset
     // so the caller can paginate through all companies.
     // ------------------------------------------------------------------
+    // Debug: run a single SerpAPI Google Jobs query and return the raw
+    // response so we can see what's actually coming back (including any
+    // error string from the helper).
+    if (action === 'debug_serp_query') {
+      const q = body.q || body.query || '';
+      if (!q) return new Response(JSON.stringify({ success: false, error: 'q required' }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+      const r = await searchSerpApiBroad(q);
+      return new Response(JSON.stringify({
+        success: true, query: q, searchSuccess: r.searchSuccess, error: r.error,
+        jobsFound: r.jobsFound.length,
+        sample: r.jobsFound.slice(0, 3).map(j => ({ title: j.title, company: j.company_name, location: j.location, via: j.via, apply_urls: j.apply_urls }))
+      }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+    }
+
     // Debug helper: scrape a single career URL and return the extracted
     // job list verbatim. Lets us see exactly what scrapeCareerPage is
     // pulling out without doing any DB writes.
@@ -1135,6 +1149,120 @@ Deno.serve(async (req) => {
       const r = await scrapeCareerPage(debugUrl, body.company || '');
       return new Response(JSON.stringify({ success: true, url: debugUrl, ats: r.ats, error: r.error, count: r.jobs.length, jobs: r.jobs }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
+
+    // ------------------------------------------------------------------
+    // SERPAPI-DRIVEN BACKFILL (v83)
+    // For each existing marketing_jobs row whose job_url is currently a
+    // job-board aggregator (Indeed, LinkedIn, Google Jobs search etc),
+    // run a Google Jobs query for "<title>" "<company>" and look at the
+    // apply_options URLs. If any of them is on the company's careers
+    // domain, swap that into job_url. ~$0.01 per job examined.
+    // ------------------------------------------------------------------
+    if (action === 'backfill_via_serpapi') {
+      const startMs = Date.now();
+      const limit = Math.min(Math.max(Number(body.limit) || 20, 1), 50);
+      const offset = Math.max(Number(body.offset) || 0, 0);
+      const R = (o: any) => new Response(JSON.stringify(o), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+
+      const serpKey = Deno.env.get("SERP_API_KEY");
+      if (!serpKey) return R({ success: false, error: 'SERP_API_KEY not configured' });
+
+      const { data: jobs, error: jobErr } = await supabase
+        .from('marketing_jobs')
+        .select('id, company_id, job_title, company_name, city, state, job_url')
+        .not('job_title', 'is', null)
+        .not('company_name', 'is', null)
+        .order('id')
+        .range(offset, offset + limit - 1);
+      if (jobErr) return R({ success: false, error: jobErr.message });
+      if (!jobs || jobs.length === 0) {
+        return R({ success: true, message: 'No more jobs', companies_processed: 0, done: true, next_offset: offset });
+      }
+
+      // Build company_id -> careers_url map for these jobs
+      const cids = [...new Set(jobs.map(j => j.company_id).filter(Boolean))] as string[];
+      const { data: companies } = await supabase
+        .from('marketing_companies')
+        .select('id, careers_url')
+        .in('id', cids);
+      const careersByCo = new Map<string, string>();
+      for (const c of companies || []) {
+        if (c.careers_url && String(c.careers_url).startsWith('http')) careersByCo.set(c.id, c.careers_url);
+      }
+
+      const hostOf = (u: string): string => { try { return new URL(u).hostname.toLowerCase(); } catch { return ''; } };
+      const registered = (h: string): string => h.split('.').slice(-2).join('.');
+
+      let examined = 0, serpCalls = 0, updated = 0, noResults = 0, noCareerHit = 0, alreadyOk = 0, noCareersUrl = 0, errors = 0;
+      const updates: any[] = [];
+
+      for (const job of jobs) {
+        if (Date.now() - startMs > 45000) break;
+        examined++;
+        const careersUrl = job.company_id ? careersByCo.get(job.company_id) : undefined;
+        if (!careersUrl) { noCareersUrl++; continue; }
+        const careersHost = hostOf(careersUrl);
+        if (!careersHost) { noCareersUrl++; continue; }
+        const careersDomain = registered(careersHost);
+
+        // If the job already has a URL on the careers domain, skip.
+        if (job.job_url) {
+          const cur = hostOf(job.job_url);
+          if (cur && (cur === careersHost || cur.endsWith('.' + careersDomain) || cur === careersDomain)) {
+            alreadyOk++; continue;
+          }
+        }
+
+        const q = `"${job.job_title}" "${job.company_name}"`;
+        const r = await searchSerpApiBroad(q);
+        serpCalls++;
+        if (!r.searchSuccess) { errors++; continue; }
+        if (r.jobsFound.length === 0) { noResults++; await new Promise(r2 => setTimeout(r2, 150)); continue; }
+
+        // Walk apply_options across all returned jobs; first careers-domain
+        // hit wins. Some SerpAPI results contain multiple apply_urls.
+        let foundUrl = '';
+        for (const sj of r.jobsFound) {
+          for (const aply of sj.apply_urls || []) {
+            const h = hostOf(aply);
+            if (!h) continue;
+            if (h === careersHost || h.endsWith('.' + careersDomain) || h === careersDomain) {
+              foundUrl = aply; break;
+            }
+          }
+          if (foundUrl) break;
+        }
+        if (!foundUrl) { noCareerHit++; await new Promise(r2 => setTimeout(r2, 150)); continue; }
+        if (foundUrl === job.job_url) { alreadyOk++; await new Promise(r2 => setTimeout(r2, 150)); continue; }
+
+        const { error: upErr } = await supabase
+          .from('marketing_jobs')
+          .update({ job_url: foundUrl, updated_at: new Date().toISOString() })
+          .eq('id', job.id);
+        if (upErr) { errors++; }
+        else { updated++; updates.push({ id: job.id, title: job.job_title, company: job.company_name, new_url: foundUrl }); }
+
+        await new Promise(r2 => setTimeout(r2, 150));
+      }
+
+      const { count: total } = await supabase.from('marketing_jobs').select('id', { count: 'exact', head: true });
+      const next_offset = offset + examined;
+      return R({
+        success: true,
+        elapsed_ms: Date.now() - startMs,
+        examined, serp_calls: serpCalls, updated,
+        already_ok: alreadyOk,
+        no_results: noResults,
+        no_career_hit: noCareerHit,
+        no_careers_url: noCareersUrl,
+        errors,
+        estimated_cost_usd: Number((serpCalls * 0.01).toFixed(2)),
+        next_offset, total_jobs: total,
+        done: next_offset >= (total || 0),
+        sample_updates: updates.slice(0, 15),
+      });
+    }
+    // ------------------------------------------------------------------
 
     if (action === 'backfill_career_urls') {
       const startMs = Date.now();
