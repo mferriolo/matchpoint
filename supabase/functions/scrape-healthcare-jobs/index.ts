@@ -12,6 +12,22 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const CATS = ["Value Based Care (VBC)","PACE Medical Groups","Health Plans","Health Systems","Hospitals","FQHC","All Others"];
 const ROLES = ["Medical Director","Chief Medical Officer","Primary Care Physician","Nurse Practitioner","Physician Assistant"];
 const JOB_BOARDS = ["Indeed","LinkedIn Jobs","ZipRecruiter","Google Jobs","Glassdoor","DocCafe","Health eCareers","PracticeLink","Monster","CareerBuilder","SimplyHired"];
+
+// Healthcare-specific job boards queried via SerpAPI Google Jobs with a
+// site: filter (Phase D). Many of these are NOT well indexed in the
+// default Google Jobs aggregator results, so a targeted site: query
+// surfaces postings the per-company / per-role queries miss.
+// Domains kept tight (no www.) so the site: filter resolves cleanly.
+const HEALTHCARE_BOARDS = [
+  'doccafe.com',
+  'healthecareers.com',
+  'practicelink.com',
+  'careers.jamanetwork.com',
+  'jobs.nejmcareercenter.org',
+  'practicematch.com',
+  'vivian.com',
+  'jobs.nurse.com',
+];
 const PRIORITY_ORGS = ["Agilon Health","Oak Street Health","ChenMed","Iora Health","Aledade","Cityblock Health","Cano Health","Privia Health","Signify Health","Curana Health","VillageMD","Hopscotch Health","Cohere Health","CINQCARE","CenterWell","HarmonyCares","CareMax","P3 Health Partners","Wellvana","Bloom Healthcare","Pair Team","Firefly Health","Vera Whole Health","Everside Health","Marathon Health","Alignment Healthcare","Devoted Health","Clover Health","Bright Health","Carelon","Optum","UnitedHealth Group","InnovAge","Trinity Health PACE","myPlace Health","Element Care","Humana","CVS Health","Aetna","Elevance Health","Cigna","Molina Healthcare","Centene","SCAN Health Plan","Oscar Health","Point32Health","CommonSpirit Health","HCA Healthcare","Ascension","Providence","Trinity Health","Intermountain Health","Kaiser Permanente","Advocate Aurora Health","Atrium Health","Geisinger","Tenet Healthcare","Landmark Health","DispatchHealth","BrightSpring Health","Enhabit Home Health","Compassus","Main Street Health","Strive Health","Crossover Health","Pearl Health","Rush University System for Health","Evolent Health","Lumeris"];
 
 // validating_urls and verifying_new_jobs removed in v78 — they were
@@ -940,9 +956,54 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
 
         telem.recordSerpCalls(serpCalls);
         telem.endStep(candidates.length, `${targets.length} companies + ${effectiveRoles.length} broad role searches → ${candidates.length} matching candidates (${serpErrors} SerpAPI errors)`);
+
+        // ---------- Phase D: Healthcare-specific board queries (v84) ----------
+        // For each board domain in HEALTHCARE_BOARDS, run one SerpAPI Google
+        // Jobs query with all selected role keywords OR'd together and a
+        // site: filter. Surfaces postings on physician/nurse-specific boards
+        // that the default Google Jobs aggregator under-indexes.
+        if (HEALTHCARE_BOARDS.length > 0 && effectiveRoles.length > 0) {
+          telem.startStep('discover_healthcare_boards', HEALTHCARE_BOARDS.length);
+          log('searching_sources', `Phase D: ${HEALTHCARE_BOARDS.length} healthcare-specific boards via SerpAPI site: queries`);
+          const candBefore = candidates.length;
+          let dCalls = 0, dErrors = 0;
+          const perBoardCounts: Record<string, number> = {};
+          // Build one OR'd role clause used across all board queries
+          const roleClause = effectiveRoles
+            .map(r => `"${_cleanRoleLabel(r)}"`)
+            .filter(s => s.length > 2)
+            .join(' OR ');
+          if (roleClause) {
+            for (const board of HEALTHCARE_BOARDS) {
+              if (Date.now() - runStartMs > 12 * 60 * 1000) {
+                log('searching_sources', `Phase D: time budget exhausted after ${dCalls} board queries`);
+                break;
+              }
+              const before = candidates.length;
+              const r = await searchSerpApiBroad(`(${roleClause}) site:${board}`);
+              dCalls++;
+              if (!r.searchSuccess) {
+                dErrors++;
+                log('searching_sources', `Phase D site:${board} error: ${r.error}`);
+              } else {
+                for (const sj of r.jobsFound) ingestSerpResult(sj, '', `board: ${board}`);
+              }
+              perBoardCounts[board] = candidates.length - before;
+              await new Promise(r2 => setTimeout(r2, 150));
+            }
+          }
+          const dAdded = candidates.length - candBefore;
+          telem.recordSerpCalls(dCalls);
+          serpCalls += dCalls;
+          serpErrors += dErrors;
+          const breakdown = Object.entries(perBoardCounts).filter(([,n]) => n > 0).map(([b,n]) => `${b.split('.')[0]}:${n}`).join(' ') || '(no matches)';
+          log('searching_sources', `Phase D complete: ${dAdded} candidates added from ${dCalls} board queries [${breakdown}], ${dErrors} errors`);
+          telem.endStep(dAdded, `${HEALTHCARE_BOARDS.length} boards × OR'd roles, ${dAdded} candidates added [${breakdown}], ${dErrors} errors`);
+        }
+
         log('searching_sources', `Discovery complete: ${candidates.length} candidates from ${serpCalls} SerpAPI calls (${serpErrors} errors)`);
         searchPasses = 1;
-        await progress.completeStep('searching_sources', `${candidates.length} jobs discovered via Google Jobs (${serpCalls} queries)`);
+        await progress.completeStep('searching_sources', `${candidates.length} jobs discovered via Google Jobs + healthcare boards (${serpCalls} queries)`);
         await upd({ search_passes_completed: searchPasses, new_jobs_found: candidates.length });
 
         // (Former STEP 4: VERIFICATION removed in v78 — results from

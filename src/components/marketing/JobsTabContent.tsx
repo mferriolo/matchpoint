@@ -397,11 +397,15 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
 
   const handleToggleBlock = useCallback(async (jobId: string, currentlyBlocked: boolean) => {
     try {
-      const { error } = await supabase.from('marketing_jobs')
-        .update({ is_blocked: !currentlyBlocked, updated_at: new Date().toISOString() })
-        .eq('id', jobId);
+      // Block also marks the job as Closed so it disappears from the open
+      // list (it's effectively dead to the user). Unblock reverses both.
+      const now = new Date().toISOString();
+      const update: Record<string, any> = currentlyBlocked
+        ? { is_blocked: false, is_closed: false, status: 'Open', closed_at: null, closed_reason: null, updated_at: now }
+        : { is_blocked: true, is_closed: true, status: 'Closed', closed_at: now, closed_reason: 'Manually blocked', updated_at: now };
+      const { error } = await supabase.from('marketing_jobs').update(update).eq('id', jobId);
       if (error) throw error;
-      toast({ title: currentlyBlocked ? 'Job unblocked' : 'Job blocked from future runs' });
+      toast({ title: currentlyBlocked ? 'Job unblocked & reopened' : 'Job blocked & marked Closed' });
       onRefresh();
     } catch (err: any) {
       toast({ title: 'Error updating block flag', description: err.message, variant: 'destructive' });
@@ -412,11 +416,13 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
     if (selectedIds.size === 0) return;
     const ids = Array.from(selectedIds);
     try {
-      const { error } = await supabase.from('marketing_jobs')
-        .update({ is_blocked: block, updated_at: new Date().toISOString() })
-        .in('id', ids);
+      const now = new Date().toISOString();
+      const update: Record<string, any> = block
+        ? { is_blocked: true, is_closed: true, status: 'Closed', closed_at: now, closed_reason: 'Manually blocked', updated_at: now }
+        : { is_blocked: false, is_closed: false, status: 'Open', closed_at: null, closed_reason: null, updated_at: now };
+      const { error } = await supabase.from('marketing_jobs').update(update).in('id', ids);
       if (error) throw error;
-      toast({ title: block ? `${ids.length} job(s) blocked` : `${ids.length} job(s) unblocked` });
+      toast({ title: block ? `${ids.length} job(s) blocked & closed` : `${ids.length} job(s) unblocked & reopened` });
       clearSelection();
       onRefresh();
     } catch (err: any) {
