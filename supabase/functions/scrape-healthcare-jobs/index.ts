@@ -235,6 +235,137 @@ function createProgressTracker(rid: string, logs: any[]) {
 interface SerpJobResult { title: string; company_name: string; location: string; via: string; apply_urls: string[]; extensions: string[]; }
 interface CompanySearchResult { company: string; searchSuccess: boolean; jobsFound: SerpJobResult[]; error?: string; }
 
+// ============================================================
+// CAREER PAGE SCRAPING (v80)
+// Fetch jobs directly from a company's careers page. Detects which
+// applicant-tracking system (ATS) the page uses and calls the
+// appropriate JSON API; falls back to a generic HTML scrape for
+// unknown systems. Career-page URLs are preferred over job-board
+// URLs (Indeed/LinkedIn/Google Jobs) for the canonical job_url
+// because they're the most direct link to apply.
+// ============================================================
+interface CareerPageScrapeResult {
+  jobs: Array<{ title: string; location: string; url: string }>;
+  ats: string;
+  error?: string;
+}
+
+async function scrapeCareerPage(careersUrl: string, _company: string): Promise<CareerPageScrapeResult> {
+  const url = (careersUrl || '').trim();
+  if (!url || !url.startsWith('http')) return { jobs: [], ats: 'invalid', error: 'invalid url' };
+  const lower = url.toLowerCase();
+  try {
+    if (lower.includes('greenhouse.io') || lower.includes('boards.greenhouse')) return await scrapeGreenhouseBoard(url);
+    if (lower.includes('lever.co')) return await scrapeLeverBoard(url);
+    if (lower.includes('myworkdayjobs.com') || lower.includes('workday.com')) return await scrapeWorkdayBoard(url);
+    return await scrapeGenericCareersPage(url);
+  } catch (e) {
+    return { jobs: [], ats: 'error', error: (e as Error).message };
+  }
+}
+
+async function scrapeGreenhouseBoard(url: string): Promise<CareerPageScrapeResult> {
+  // Greenhouse Boards API. Slug is the path segment after greenhouse.io
+  // e.g. https://boards.greenhouse.io/oakstreethealth -> 'oakstreethealth'
+  const m = url.match(/(?:boards\.greenhouse\.io|greenhouse\.io)\/([\w-]+)/i);
+  if (!m) return { jobs: [], ats: 'greenhouse', error: 'could not extract Greenhouse slug from URL' };
+  const slug = m[1];
+  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const r = await fetch(`https://boards-api.greenhouse.io/v1/boards/${slug}/jobs`, { signal: controller.signal, headers: { 'Accept': 'application/json' } });
+    clearTimeout(timeout);
+    if (!r.ok) return { jobs: [], ats: 'greenhouse', error: `HTTP ${r.status}` };
+    const d = await r.json();
+    const jobs = (d.jobs || []).map((j: any) => ({
+      title: j.title || '',
+      location: j.location?.name || '',
+      url: j.absolute_url || '',
+    })).filter((j: any) => j.title && j.url);
+    return { jobs, ats: 'greenhouse' };
+  } catch (e) { clearTimeout(timeout); return { jobs: [], ats: 'greenhouse', error: (e as Error).message }; }
+}
+
+async function scrapeLeverBoard(url: string): Promise<CareerPageScrapeResult> {
+  const m = url.match(/(?:jobs\.lever\.co|lever\.co)\/([\w-]+)/i);
+  if (!m) return { jobs: [], ats: 'lever', error: 'could not extract Lever slug from URL' };
+  const slug = m[1];
+  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const r = await fetch(`https://api.lever.co/v0/postings/${slug}?mode=json`, { signal: controller.signal, headers: { 'Accept': 'application/json' } });
+    clearTimeout(timeout);
+    if (!r.ok) return { jobs: [], ats: 'lever', error: `HTTP ${r.status}` };
+    const d = await r.json();
+    const jobs = (d || []).map((j: any) => ({
+      title: j.text || '',
+      location: j.categories?.location || '',
+      url: j.hostedUrl || j.applyUrl || '',
+    })).filter((j: any) => j.title && j.url);
+    return { jobs, ats: 'lever' };
+  } catch (e) { clearTimeout(timeout); return { jobs: [], ats: 'lever', error: (e as Error).message }; }
+}
+
+async function scrapeWorkdayBoard(url: string): Promise<CareerPageScrapeResult> {
+  // Workday URLs look like: https://{tenant}.wd{N}.myworkdayjobs.com/[en-US/]{site}
+  // The JSON jobs endpoint is: POST /wday/cxs/{tenant}/{site}/jobs
+  const m = url.match(/^https?:\/\/([\w-]+)\.(wd\d+)\.myworkdayjobs\.com\/(?:[a-z]{2}-[A-Z]{2}\/)?([\w-]+)/i);
+  if (!m) return { jobs: [], ats: 'workday', error: 'could not parse Workday URL' };
+  const [, tenant, wd, site] = m;
+  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const apiUrl = `https://${tenant}.${wd}.myworkdayjobs.com/wday/cxs/${tenant}/${site}/jobs`;
+    const r = await fetch(apiUrl, {
+      method: 'POST', signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ appliedFacets: {}, limit: 50, offset: 0, searchText: '' }),
+    });
+    clearTimeout(timeout);
+    if (!r.ok) return { jobs: [], ats: 'workday', error: `HTTP ${r.status}` };
+    const d = await r.json();
+    const baseHost = `https://${tenant}.${wd}.myworkdayjobs.com`;
+    const jobs = (d.jobPostings || []).map((j: any) => ({
+      title: j.title || '',
+      location: j.locationsText || '',
+      url: j.externalPath ? `${baseHost}${j.externalPath}` : '',
+    })).filter((j: any) => j.title && j.url);
+    return { jobs, ats: 'workday' };
+  } catch (e) { clearTimeout(timeout); return { jobs: [], ats: 'workday', error: (e as Error).message }; }
+}
+
+async function scrapeGenericCareersPage(url: string): Promise<CareerPageScrapeResult> {
+  // Heuristic HTML scrape: fetch the page and pull anchor tags whose
+  // hrefs look like job postings. Lots of false positives at this stage;
+  // role-match filtering downstream will discard non-job titles.
+  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const r = await fetch(url, { signal: controller.signal, headers: { 'Accept': 'text/html', 'User-Agent': 'Mozilla/5.0 (compatible; MatchPointBot/1.0; +https://matchpoint-nu-dun.vercel.app)' } });
+    clearTimeout(timeout);
+    if (!r.ok) return { jobs: [], ats: 'generic', error: `HTTP ${r.status}` };
+    const html = await r.text();
+    const linkRegex = /<a[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    const seenHrefs = new Set<string>();
+    const jobs: { title: string; location: string; url: string }[] = [];
+    const baseUrl = new URL(url);
+    let mm: RegExpExecArray | null;
+    while ((mm = linkRegex.exec(html)) !== null) {
+      const rawHref = mm[1].trim();
+      const rawText = mm[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!rawHref || !rawText) continue;
+      if (rawText.length < 5 || rawText.length > 200) continue;
+      // Skip obvious non-job links
+      if (/^(home|about|contact|login|sign in|search|privacy|terms|menu|skip)$/i.test(rawText)) continue;
+      // Path looks job-like
+      if (!/\/(job|jobs|career|careers|opening|openings|position|positions|vacancy|vacancies|opportunity|opportunities|requisition|posting)/i.test(rawHref)) continue;
+      let absUrl: string;
+      try { absUrl = rawHref.startsWith('http') ? rawHref : new URL(rawHref, baseUrl).toString(); } catch { continue; }
+      if (seenHrefs.has(absUrl)) continue;
+      seenHrefs.add(absUrl);
+      jobs.push({ title: rawText, location: '', url: absUrl });
+      if (jobs.length >= 100) break; // hard cap to avoid runaway pages
+    }
+    return { jobs, ats: 'generic' };
+  } catch (e) { clearTimeout(timeout); return { jobs: [], ats: 'generic', error: (e as Error).message }; }
+}
+
 async function searchSerpApiForCompany(company: string, roleHints: string[]): Promise<CompanySearchResult> {
   const serpKey = Deno.env.get("SERP_API_KEY");
   if (!serpKey) return { company, searchSuccess: false, jobsFound: [], error: 'no key' };
@@ -542,10 +673,10 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         }
 
         const totalUnits = targets.length + effectiveRoles.length;
-        log('searching_sources', `DIRECT DISCOVERY: ${targets.length} companies + ${effectiveRoles.length} broad role searches = ${totalUnits} SerpAPI calls`);
-        await progress.startStep('searching_sources', `Querying ${totalUnits} sources via Google Jobs...`);
+        log('searching_sources', `DIRECT DISCOVERY: ${targets.length} companies + ${effectiveRoles.length} broad role searches = ${totalUnits} SerpAPI calls (preceded by direct career-page scraping)`);
+        await progress.startStep('searching_sources', `Scraping career pages, then querying Google Jobs...`);
         await progress.updateStep('searching_sources', { items_total: totalUnits, items_processed: 0 });
-        telem.startStep('discover_via_serpapi', totalUnits);
+        // discover_via_serpapi telemetry step is started below, after Phase A.
 
         const candidates: any[] = [];
         const candidateKeys = new Set<string>();
@@ -594,7 +725,61 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           });
         };
 
-        // Per-company queries — one SerpAPI call per priority/recurring company.
+        // ---------- Phase A: Direct career-page scraping (v80) ----------
+        // For each target with a careers_url, fetch the page (or its ATS
+        // JSON API) BEFORE running SerpAPI. Career-page jobs land in the
+        // candidate set first, so when SerpAPI later returns the same
+        // posting it gets deduped — keeping the canonical career-page URL
+        // as the stored job_url instead of an aggregator URL.
+        const targetsWithCareerUrl = targets
+          .map(t => ({ t, co: coMap.get(t.name.toLowerCase().trim()) }))
+          .filter(x => x.co?.careers_url && String(x.co.careers_url).startsWith('http'));
+        if (targetsWithCareerUrl.length > 0) {
+          telem.startStep('scrape_career_pages', targetsWithCareerUrl.length);
+          log('searching_sources', `Phase A: scraping ${targetsWithCareerUrl.length} career pages directly`);
+          let cpFetched = 0, cpErrors = 0, cpJobsBefore = candidates.length;
+          const atsCounts: Record<string, number> = {};
+          for (let i = 0; i < targetsWithCareerUrl.length; i++) {
+            if (Date.now() - runStartMs > 12 * 60 * 1000) {
+              log('searching_sources', `Career-page time budget exhausted after ${cpFetched} fetches`);
+              break;
+            }
+            const { t, co } = targetsWithCareerUrl[i];
+            const cp = await scrapeCareerPage(co!.careers_url, t.name);
+            cpFetched++;
+            atsCounts[cp.ats] = (atsCounts[cp.ats] || 0) + 1;
+            if (cp.error) {
+              cpErrors++;
+              log('searching_sources', `Career page failed for ${t.name} (${cp.ats}): ${cp.error}`);
+            } else if (cp.jobs.length > 0) {
+              for (const cj of cp.jobs) {
+                // Funnel through the same ingest pipeline using a synthetic
+                // SerpJobResult so role-match + dedup + blocked checks all
+                // apply uniformly.
+                ingestSerpResult({
+                  title: cj.title,
+                  company_name: t.name,
+                  location: cj.location,
+                  via: `${cp.ats} career page`,
+                  extensions: [],
+                  apply_urls: cj.url ? [cj.url] : [],
+                }, t.name, `career-page:${cp.ats}`);
+              }
+            }
+            if ((i + 1) % 5 === 0 || i + 1 === targetsWithCareerUrl.length) {
+              await progress.updateStep('searching_sources', { sub_step: `Phase A: ${cpFetched}/${targetsWithCareerUrl.length} career pages, ${candidates.length} candidates so far` });
+            }
+            await new Promise(r2 => setTimeout(r2, 200));
+          }
+          const cpJobsAdded = candidates.length - cpJobsBefore;
+          const atsBreakdown = Object.entries(atsCounts).map(([k, v]) => `${k}:${v}`).join(' ');
+          log('searching_sources', `Phase A complete: ${cpFetched} pages fetched, ${cpJobsAdded} matching jobs added [${atsBreakdown}], ${cpErrors} errors`);
+          telem.endStep(cpJobsAdded, `${cpFetched} career pages fetched [${atsBreakdown}], ${cpJobsAdded} matching jobs added (${cpErrors} errors)`);
+        }
+        // discover_via_serpapi telemetry covers Phase B + Phase C below.
+        telem.startStep('discover_via_serpapi', totalUnits);
+
+        // ---------- Phase B: Per-company SerpAPI queries ----------
         for (let i = 0; i < targets.length; i++) {
           if (Date.now() - runStartMs > 12 * 60 * 1000) {
             log('searching_sources', `Time budget exhausted after ${processed} queries (${candidates.length} candidates so far)`);
