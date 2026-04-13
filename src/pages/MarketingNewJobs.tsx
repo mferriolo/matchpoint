@@ -9,7 +9,7 @@ import {
   Database, Shield, Phone, Send,
   Linkedin, Unlink, Upload, Trash2, Zap,
   ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert, FileText, ArrowRightLeft,
-  Ban, RotateCcw, Eye, EyeOff, Pencil
+  Ban, RotateCcw, Eye, EyeOff, Pencil, Filter, X
 } from 'lucide-react';
 
 import { supabase } from '@/lib/supabase';
@@ -78,6 +78,21 @@ const MarketingNewJobs: React.FC = () => {
     'Health Systems', 'Hospitals', 'FQHC', 'All Others'
   ];
   const [editingCompanyTypeId, setEditingCompanyTypeId] = useState<string | null>(null);
+
+  // Category column filter on the Companies tab.
+  const [filterCompanyCategory, setFilterCompanyCategory] = useState<string>('All');
+  const [companyCategoryFilterOpen, setCompanyCategoryFilterOpen] = useState(false);
+  const companyCategoryFilterRef = React.useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!companyCategoryFilterOpen) return;
+    const onClickOutside = (e: MouseEvent) => {
+      if (companyCategoryFilterRef.current && !companyCategoryFilterRef.current.contains(e.target as Node)) {
+        setCompanyCategoryFilterOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, [companyCategoryFilterOpen]);
 
   const handleSaveCompanyType = async (id: string, newType: string) => {
     try {
@@ -341,6 +356,7 @@ const MarketingNewJobs: React.FC = () => {
         // Hide blocked companies unless the user opts in via the toggle.
         if (!showBlockedCompanies && c.is_blocked) return false;
         if (filterHighPriorityCompanies && !c.is_high_priority) return false;
+        if (filterCompanyCategory !== 'All' && (c.company_type || '') !== filterCompanyCategory) return false;
         if (!searchCompanies) return true;
         const s = searchCompanies.toLowerCase();
         return c.company_name?.toLowerCase().includes(s) ||
@@ -363,7 +379,7 @@ const MarketingNewJobs: React.FC = () => {
         const cmp = aVal.toString().localeCompare(bVal.toString());
         return companySortDir === 'asc' ? cmp : -cmp;
       });
-  }, [companies, searchCompanies, filterHighPriorityCompanies, showBlockedCompanies, companySortField, companySortDir]);
+  }, [companies, searchCompanies, filterHighPriorityCompanies, filterCompanyCategory, showBlockedCompanies, companySortField, companySortDir]);
 
   const highPriorityCompanyCount = useMemo(() => companies.filter(c => c.is_high_priority).length, [companies]);
 
@@ -763,10 +779,51 @@ const MarketingNewJobs: React.FC = () => {
                           Company <CompanySortIcon field="company_name" />
                         </button>
                       </th>
-                      <th className="text-left px-4 py-3 font-medium text-gray-600">
-                        <button onClick={() => handleCompanySort('company_type')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors text-xs uppercase tracking-wider font-semibold">
-                          Category <CompanySortIcon field="company_type" />
-                        </button>
+                      <th className="text-left px-4 py-3 font-medium text-gray-600 relative select-none">
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => handleCompanySort('company_type')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors text-xs uppercase tracking-wider font-semibold">
+                            Category <CompanySortIcon field="company_type" />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setCompanyCategoryFilterOpen(o => !o); }}
+                            className={`p-0.5 rounded transition-colors ml-0.5 ${filterCompanyCategory !== 'All' ? 'text-[#911406] bg-red-50' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
+                            title="Filter by Category"
+                          >
+                            <Filter className="w-3 h-3" />
+                          </button>
+                          {filterCompanyCategory !== 'All' && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setFilterCompanyCategory('All'); }}
+                              className="p-0.5 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                              title="Clear filter"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                        {companyCategoryFilterOpen && (
+                          <div
+                            ref={companyCategoryFilterRef}
+                            className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-xl z-50 min-w-[220px] max-h-[360px] flex flex-col"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <div className="p-2 border-b border-gray-100 sticky top-0 bg-white z-10">
+                              <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Filter by Category</p>
+                            </div>
+                            <div className="py-1 overflow-y-auto flex-1">
+                              {['All', ...COMPANY_CATEGORY_OPTIONS].map(opt => (
+                                <button
+                                  key={opt}
+                                  onClick={() => { setFilterCompanyCategory(opt); setCompanyCategoryFilterOpen(false); }}
+                                  className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors flex items-center justify-between ${filterCompanyCategory === opt ? 'bg-red-50 text-[#911406] font-medium' : 'text-gray-700'}`}
+                                >
+                                  <span className="truncate">{opt}</span>
+                                  {filterCompanyCategory === opt && <span className="w-1.5 h-1.5 rounded-full bg-[#911406] flex-shrink-0 ml-2" />}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </th>
                       <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold">Find Open Jobs</th>
                       <th className="text-center px-4 py-3 font-medium text-gray-600">

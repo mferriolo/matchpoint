@@ -1014,10 +1014,10 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                   title={allVisibleSelected ? 'Deselect all visible' : 'Select all visible'}
                 />
               </th>
-              <ColumnHeader field="job_category" label="Job Category" filterValue={filterCategory} filterOptions={CATEGORY_OPTIONS} onFilterChange={setFilterCategory} filterKey="category" />
               <ColumnHeader field="company_name" label="Company" filterValue={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} filterKey="company" />
               <ColumnHeader field="job_title" label="Job Title" filterValue={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} filterKey="title" />
               <ColumnHeader field="job_type" label="Job Type" filterValue={filterJobType} filterOptions={JOB_TYPE_OPTIONS} onFilterChange={setFilterJobType} filterKey="jobtype" />
+              <ColumnHeader field="job_category" label="Company Category" filterValue={filterCategory} filterOptions={CATEGORY_OPTIONS} onFilterChange={setFilterCategory} filterKey="category" />
               <ColumnHeader field="location" label="Location" filterValue={filterLocation} filterOptions={uniqueLocations} onFilterChange={setFilterLocation} filterKey="location" />
 
               <th className="text-center px-4 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[80px]">
@@ -1090,9 +1090,6 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                         className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406] cursor-pointer"
                       />
                     </td>
-                    <td className="px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap ${categoryBadge(j.job_category)}`}>{j.job_category || '-'}</span>
-                    </td>
                     <td className="px-4 py-3 font-medium text-gray-900 max-w-[200px]">
                       <span className="truncate block">{j.company_name || '-'}</span>
                     </td>
@@ -1119,6 +1116,9 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                       ) : (
                         <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap font-medium ${jobTypeBadgeColor(classified)}`}>{classified}</span>
                       )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap ${categoryBadge(j.job_category)}`}>{j.job_category || '-'}</span>
                     </td>
                     <td className="px-4 py-3 text-gray-600">
                       {loc ? (
