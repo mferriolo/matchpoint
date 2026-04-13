@@ -996,6 +996,123 @@ Deno.serve(async (req) => {
     await cleanupStaleRuns();
     const body = await req.json().catch(() => ({}));
     const { action = 'full', jobTitles = [] } = body;
+
+    // ------------------------------------------------------------------
+    // ONE-SHOT BACKFILL ACTION (v81)
+    // For each company that has a careers_url, scrape that page and try
+    // to find a matching posting for every existing marketing_jobs row at
+    // that company. If a match is found, swap the row's job_url to the
+    // career-page URL.
+    //
+    // Synchronous, batched. Body params: { action: 'backfill_career_urls',
+    // limit?: number, offset?: number }. Returns a summary + next_offset
+    // so the caller can paginate through all companies.
+    // ------------------------------------------------------------------
+    if (action === 'backfill_career_urls') {
+      const startMs = Date.now();
+      const limit = Math.min(Math.max(Number(body.limit) || 25, 1), 100);
+      const offset = Math.max(Number(body.offset) || 0, 0);
+      const R = (o: any) => new Response(JSON.stringify(o), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+
+      const { data: companies, error: coErr } = await supabase
+        .from('marketing_companies')
+        .select('id, company_name, careers_url')
+        .not('careers_url', 'is', null)
+        .neq('careers_url', '')
+        .order('company_name')
+        .range(offset, offset + limit - 1);
+      if (coErr) return R({ success: false, error: coErr.message });
+      if (!companies || companies.length === 0) {
+        return R({ success: true, message: 'No more companies to process', companies_processed: 0, done: true, next_offset: offset });
+      }
+
+      // Get total count so we can show progress.
+      const { count: totalWithUrl } = await supabase
+        .from('marketing_companies')
+        .select('id', { count: 'exact', head: true })
+        .not('careers_url', 'is', null)
+        .neq('careers_url', '');
+
+      let companiesProcessed = 0, jobsExamined = 0, jobsUpdated = 0, noMatchCount = 0, errors = 0;
+      const atsCounts: Record<string, number> = {};
+      const details: any[] = [];
+
+      for (const co of companies) {
+        if (Date.now() - startMs > 45000) {
+          details.push({ note: `time budget exhausted after ${companiesProcessed} companies` });
+          break;
+        }
+        const cp = await scrapeCareerPage(co.careers_url, co.company_name);
+        companiesProcessed++;
+        atsCounts[cp.ats] = (atsCounts[cp.ats] || 0) + 1;
+
+        if (cp.error) {
+          errors++;
+          details.push({ company: co.company_name, ats: cp.ats, status: 'error', error: cp.error });
+          continue;
+        }
+        if (cp.jobs.length === 0) {
+          details.push({ company: co.company_name, ats: cp.ats, status: 'no jobs on page' });
+          continue;
+        }
+
+        const { data: existingJobs } = await supabase
+          .from('marketing_jobs')
+          .select('id, job_title, city, state, job_url')
+          .eq('company_id', co.id);
+        if (!existingJobs || existingJobs.length === 0) {
+          details.push({ company: co.company_name, ats: cp.ats, status: 'no existing jobs to backfill', jobs_on_page: cp.jobs.length });
+          continue;
+        }
+
+        let updated = 0, noMatch = 0;
+        for (const ej of existingJobs) {
+          jobsExamined++;
+          const matches = cp.jobs.filter(cj => fuzzyTitleMatch(cj.title, ej.job_title || ''));
+          if (matches.length === 0) { noMatch++; noMatchCount++; continue; }
+          // Prefer a match whose location string contains the existing job's
+          // city or state, when there are multiple title matches.
+          let best = matches[0];
+          if (matches.length > 1 && (ej.city || ej.state)) {
+            const cityLower = (ej.city || '').toLowerCase();
+            const stateLower = (ej.state || '').toLowerCase();
+            const locMatch = matches.find(cj => {
+              const cl = (cj.location || '').toLowerCase();
+              return (cityLower && cl.includes(cityLower)) || (stateLower && cl.includes(stateLower));
+            });
+            if (locMatch) best = locMatch;
+          }
+          if (best.url && best.url !== ej.job_url) {
+            const { error: upErr } = await supabase
+              .from('marketing_jobs')
+              .update({ job_url: best.url, updated_at: new Date().toISOString() })
+              .eq('id', ej.id);
+            if (!upErr) { updated++; jobsUpdated++; }
+          }
+        }
+        details.push({ company: co.company_name, ats: cp.ats, jobs_on_page: cp.jobs.length, existing_jobs: existingJobs.length, updated, no_match: noMatch });
+        await new Promise(r => setTimeout(r, 200));
+      }
+
+      const next_offset = offset + companiesProcessed;
+      const done = !!(totalWithUrl !== null && next_offset >= (totalWithUrl || 0));
+      return R({
+        success: true,
+        elapsed_ms: Date.now() - startMs,
+        companies_processed: companiesProcessed,
+        jobs_examined: jobsExamined,
+        jobs_updated: jobsUpdated,
+        no_match_count: noMatchCount,
+        errors,
+        ats_breakdown: atsCounts,
+        next_offset,
+        total_companies_with_url: totalWithUrl,
+        done,
+        details,
+      });
+    }
+    // ------------------------------------------------------------------
+
     const safeJobTitles: string[] = Array.isArray(jobTitles)
       ? jobTitles.filter((s: unknown): s is string => typeof s === 'string' && s.trim().length > 0)
       : [];
