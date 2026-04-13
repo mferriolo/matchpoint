@@ -47,6 +47,34 @@ interface TrackerRun {
   jobs_verified?: number;
   jobs_rejected?: number;
   error_message?: string;
+  telemetry?: TelemetrySnapshot;
+}
+
+interface StepMetrics {
+  step: string;
+  duration_ms: number;
+  ai_calls: number;
+  ai_input_tokens: number;
+  ai_output_tokens: number;
+  ai_cost_usd: number;
+  serp_calls: number;
+  serp_cost_usd: number;
+  items_in: number;
+  items_out: number;
+  notes: string;
+}
+interface TelemetrySnapshot {
+  steps: StepMetrics[];
+  totals: {
+    duration_ms: number;
+    ai_calls: number;
+    ai_input_tokens: number;
+    ai_output_tokens: number;
+    ai_cost_usd: number;
+    serp_calls: number;
+    serp_cost_usd: number;
+    total_cost_usd: number;
+  };
 }
 
 interface StepProgress {
@@ -1205,6 +1233,84 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
           )}
         </div>
       )}
+
+      {/* Telemetry — per-step cost + result counts. Surfaces what each step
+          actually does so we can decide what to keep / replace. */}
+      {(currentRun?.telemetry || lastRun?.telemetry) && (() => {
+        const t = (currentRun?.telemetry || lastRun?.telemetry) as TelemetrySnapshot;
+        const fmtMs = (ms: number) => ms < 1000 ? `${ms}ms` : ms < 60000 ? `${(ms/1000).toFixed(1)}s` : `${(ms/60000).toFixed(1)}m`;
+        const fmtUsd = (n: number) => n === 0 ? '$0.00' : n < 0.01 ? `<$0.01` : `$${n.toFixed(n < 1 ? 4 : 2)}`;
+        const fmtNum = (n: number) => n.toLocaleString();
+        return (
+          <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+            <div className="px-4 py-3 border-b bg-gradient-to-r from-slate-50 to-blue-50/50">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4 text-blue-600" />
+                  Per-step telemetry
+                </h3>
+                <div className="flex items-center gap-3 text-xs text-gray-600">
+                  <span><strong className="text-gray-900">{fmtMs(t.totals.duration_ms)}</strong> total</span>
+                  <span className="text-gray-300">·</span>
+                  <span><strong className="text-gray-900">{t.totals.ai_calls}</strong> AI calls ({fmtNum(t.totals.ai_input_tokens)} in / {fmtNum(t.totals.ai_output_tokens)} out tokens)</span>
+                  <span className="text-gray-300">·</span>
+                  <span><strong className="text-gray-900">{t.totals.serp_calls}</strong> SerpAPI</span>
+                  <span className="text-gray-300">·</span>
+                  <span><strong className="text-emerald-700">{fmtUsd(t.totals.total_cost_usd)}</strong> est. cost</span>
+                </div>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-50 text-gray-500 uppercase tracking-wider">
+                  <tr>
+                    <th className="text-left px-3 py-2 font-semibold">Step</th>
+                    <th className="text-right px-3 py-2 font-semibold">Time</th>
+                    <th className="text-right px-3 py-2 font-semibold">AI calls</th>
+                    <th className="text-right px-3 py-2 font-semibold">In tok</th>
+                    <th className="text-right px-3 py-2 font-semibold">Out tok</th>
+                    <th className="text-right px-3 py-2 font-semibold">SerpAPI</th>
+                    <th className="text-right px-3 py-2 font-semibold">Cost</th>
+                    <th className="text-right px-3 py-2 font-semibold">Items in → out</th>
+                    <th className="text-left px-3 py-2 font-semibold">Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {t.steps.map((s, i) => {
+                    const stepCost = s.ai_cost_usd + s.serp_cost_usd;
+                    const yieldRate = s.items_in > 0 ? (s.items_out / s.items_in) : null;
+                    return (
+                      <tr key={i} className={`border-t ${i % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}`}>
+                        <td className="px-3 py-2 font-medium text-gray-800">{s.step}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-gray-700">{fmtMs(s.duration_ms)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-gray-700">{s.ai_calls || '—'}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-gray-500">{s.ai_input_tokens ? fmtNum(s.ai_input_tokens) : '—'}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-gray-500">{s.ai_output_tokens ? fmtNum(s.ai_output_tokens) : '—'}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-gray-700">{s.serp_calls || '—'}</td>
+                        <td className="px-3 py-2 text-right tabular-nums font-medium text-emerald-700">{fmtUsd(stepCost)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-gray-700">
+                          {s.items_in || s.items_out ? (
+                            <>
+                              {fmtNum(s.items_in)} → {fmtNum(s.items_out)}
+                              {yieldRate !== null && s.items_in > 0 && (
+                                <span className="ml-1 text-[10px] text-gray-400">({Math.round(yieldRate * 100)}%)</span>
+                              )}
+                            </>
+                          ) : '—'}
+                        </td>
+                        <td className="px-3 py-2 text-gray-500 max-w-[300px] truncate" title={s.notes}>{s.notes || ''}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div className="px-3 py-2 border-t bg-slate-50 text-[10px] text-gray-500">
+              Cost estimates: gpt-4o-mini at $0.15/M input + $0.60/M output tokens; SerpAPI at $0.01/search. Item yield (%) = items_out / items_in.
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Execution Log */}
       {displayLog.length > 0 && (

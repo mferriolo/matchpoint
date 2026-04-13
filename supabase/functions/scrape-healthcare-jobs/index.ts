@@ -61,7 +61,17 @@ function isDirectJobUrl(url: string): boolean {
 // gpt-4o-mini to match the rest of the codebase (chatgpt-integration's
 // default). The function signature is unchanged so all call sites still
 // work; the `key` parameter is now an OpenAI API key.
-async function aiCall(key: string, prompt: string, maxTok = 8000): Promise<string> {
+//
+// Telemetry: gpt-4o-mini pricing as of late 2025 is $0.150/M input
+// tokens + $0.600/M output tokens. The wrapper records token counts +
+// dollar cost into the active step's metrics so we can see what each
+// pass actually costs.
+const GPT4O_MINI_INPUT_PER_M = 0.150;   // USD per 1M input tokens
+const GPT4O_MINI_OUTPUT_PER_M = 0.600;  // USD per 1M output tokens
+const SERPAPI_COST_PER_SEARCH = 0.01;   // USD; typical Self plan rate
+
+async function aiCall(key: string, prompt: string, maxTok = 8000, telem?: Telemetry): Promise<string> {
+  const t0 = Date.now();
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
@@ -73,7 +83,109 @@ async function aiCall(key: string, prompt: string, maxTok = 8000): Promise<strin
     }),
   });
   const d = await r.json();
+  if (telem) {
+    const inT = d.usage?.prompt_tokens || 0;
+    const outT = d.usage?.completion_tokens || 0;
+    const cost = (inT * GPT4O_MINI_INPUT_PER_M / 1_000_000) + (outT * GPT4O_MINI_OUTPUT_PER_M / 1_000_000);
+    telem.recordAiCall(inT, outT, cost, Date.now() - t0);
+  }
   return d.choices?.[0]?.message?.content || '';
+}
+
+// ============================================================
+// TELEMETRY TRACKER
+// Records per-step duration, AI calls/tokens/cost, SerpAPI calls/cost,
+// and item-flow counts (how many items entered vs. survived each step).
+// Saved to tracker_runs.telemetry at the end of every run so we can
+// see exactly what each step is costing and producing.
+// ============================================================
+interface StepMetrics {
+  step: string;
+  duration_ms: number;
+  ai_calls: number;
+  ai_input_tokens: number;
+  ai_output_tokens: number;
+  ai_cost_usd: number;
+  serp_calls: number;
+  serp_cost_usd: number;
+  items_in: number;
+  items_out: number;
+  notes: string;
+}
+interface TelemetrySnapshot {
+  steps: StepMetrics[];
+  totals: {
+    duration_ms: number;
+    ai_calls: number;
+    ai_input_tokens: number;
+    ai_output_tokens: number;
+    ai_cost_usd: number;
+    serp_calls: number;
+    serp_cost_usd: number;
+    total_cost_usd: number;
+  };
+}
+
+class Telemetry {
+  private steps: StepMetrics[] = [];
+  private current: StepMetrics | null = null;
+  private startedAt = Date.now();
+
+  startStep(name: string, itemsIn = 0) {
+    if (this.current) this.endStep(); // auto-close if not closed
+    this.current = {
+      step: name, duration_ms: 0,
+      ai_calls: 0, ai_input_tokens: 0, ai_output_tokens: 0, ai_cost_usd: 0,
+      serp_calls: 0, serp_cost_usd: 0,
+      items_in: itemsIn, items_out: 0, notes: '',
+    };
+    (this.current as any)._startedAt = Date.now();
+  }
+
+  endStep(itemsOut?: number, notes?: string) {
+    if (!this.current) return;
+    this.current.duration_ms = Date.now() - (this.current as any)._startedAt;
+    if (itemsOut !== undefined) this.current.items_out = itemsOut;
+    if (notes !== undefined) this.current.notes = notes;
+    delete (this.current as any)._startedAt;
+    this.steps.push(this.current);
+    this.current = null;
+  }
+
+  recordAiCall(inputTokens: number, outputTokens: number, cost: number, _durMs: number) {
+    if (!this.current) return;
+    this.current.ai_calls++;
+    this.current.ai_input_tokens += inputTokens;
+    this.current.ai_output_tokens += outputTokens;
+    this.current.ai_cost_usd += cost;
+  }
+
+  recordSerpCalls(n: number) {
+    if (!this.current) return;
+    this.current.serp_calls += n;
+    this.current.serp_cost_usd += n * SERPAPI_COST_PER_SEARCH;
+  }
+
+  bumpItemsOut(delta: number) {
+    if (this.current) this.current.items_out += delta;
+  }
+
+  snapshot(): TelemetrySnapshot {
+    if (this.current) this.endStep(); // close any open step
+    const totals = this.steps.reduce((acc, s) => ({
+      duration_ms: acc.duration_ms + s.duration_ms,
+      ai_calls: acc.ai_calls + s.ai_calls,
+      ai_input_tokens: acc.ai_input_tokens + s.ai_input_tokens,
+      ai_output_tokens: acc.ai_output_tokens + s.ai_output_tokens,
+      ai_cost_usd: acc.ai_cost_usd + s.ai_cost_usd,
+      serp_calls: acc.serp_calls + s.serp_calls,
+      serp_cost_usd: acc.serp_cost_usd + s.serp_cost_usd,
+      total_cost_usd: acc.total_cost_usd + s.ai_cost_usd + s.serp_cost_usd,
+    }), { duration_ms: 0, ai_calls: 0, ai_input_tokens: 0, ai_output_tokens: 0, ai_cost_usd: 0, serp_calls: 0, serp_cost_usd: 0, total_cost_usd: 0 });
+    // Wall-clock total can differ from sum of steps if there are gaps; use wall clock.
+    totals.duration_ms = Date.now() - this.startedAt;
+    return { steps: this.steps, totals };
+  }
 }
 
 function parseJson(text: string): any { try { const m = text.match(/\{[\s\S]*\}/); if (m) return JSON.parse(m[0]); } catch {} return {}; }
@@ -325,6 +437,9 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
   // raw title and accept any job whose title contains a selected type
   // as a substring (case-insensitive, parenthetical bits stripped).
   const useDefaultMode = effectiveRoles === ROLES;
+
+  // Per-run telemetry. Saved to tracker_runs.telemetry on completion.
+  const telem = new Telemetry();
   const logs: any[] = [];
   const log = (s: string, m: string) => { logs.push({ step: s, msg: m, ts: new Date().toISOString() }); };
   const upd = async (u: any) => { await supabase.from('tracker_runs').update({ ...u, execution_log: logs }).eq('id', rid); };
@@ -366,6 +481,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
     // STEP 2: URL VALIDATION
     if (action === 'full' || action === 'checker_only') {
       const openJ = allJ.filter(j => !j.is_closed && j.status !== 'Closed' && !j.is_blocked);
+      telem.startStep('validating_urls', openJ.length);
       await progress.startStep('validating_urls', `Validating ${openJ.length} open job URLs...`);
       await progress.updateStep('validating_urls', { items_total: openJ.length, items_processed: 0 });
       log('validating_urls', `${openJ.length} open jobs to validate`);
@@ -374,12 +490,13 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         await progress.updateStep('validating_urls', { items_processed: i, sub_step: `Validating batch ${Math.floor(i/20)+1}/${Math.ceil(openJ.length/20)} (${Math.min(i+20, openJ.length)}/${openJ.length})...` });
         const list = batch.map((j, x) => `${x+1}. "${j.job_title}" at "${j.company_name}" in ${j.city||'?'}, ${j.state||'?'}`).join('\n');
         try {
-          const c = await aiCall(oa, `Healthcare job validation. For each job, is the company CURRENTLY hiring for this role?\nMark CLOSED only with strong evidence. Default to OPEN if uncertain.\nJobs:\n${list}\nReturn JSON: [{"index":1,"status":"OPEN"|"CLOSED","reason":"brief"}]\nOnly JSON.`, 3000);
+          const c = await aiCall(oa, `Healthcare job validation. For each job, is the company CURRENTLY hiring for this role?\nMark CLOSED only with strong evidence. Default to OPEN if uncertain.\nJobs:\n${list}\nReturn JSON: [{"index":1,"status":"OPEN"|"CLOSED","reason":"brief"}]\nOnly JSON.`, 3000, telem);
           const res = parseArr(c);
           for (const r of res) { const idx = (r.index||0)-1; if (idx < 0 || idx >= batch.length) continue; validated++; if (r.status === 'CLOSED') { closed++; await supabase.from('marketing_jobs').update({ is_closed: true, status: 'Closed', url_status: 'closed', url_check_result: r.reason||'Closed', closed_reason: r.reason, closed_at: new Date().toISOString(), last_url_check: new Date().toISOString() }).eq('id', batch[idx].id); } else { stillOpen++; await supabase.from('marketing_jobs').update({ url_status: 'active', url_check_result: 'Verified active', last_url_check: new Date().toISOString() }).eq('id', batch[idx].id); } }
         } catch (e) { log('validating_urls', `Batch error: ${(e as Error).message}`); }
       }
       log('validating_urls', `Done: ${validated} checked, ${closed} closed, ${stillOpen} open`);
+      telem.endStep(validated, `${closed} closed, ${stillOpen} still open of ${validated} checked`);
       await progress.completeStep('validating_urls', `${validated} checked, ${closed} closed, ${stillOpen} still open`);
       await upd({ jobs_validated: validated, jobs_closed: closed, jobs_still_open: stillOpen });
     } else { await progress.skipStep('validating_urls'); }
@@ -400,42 +517,51 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
       let passesCompleted = 0;
 
       // PASS 1
+      telem.startStep('pass1_broad_search', 0);
       await progress.updateStep('searching_sources', { items_total: totalPasses, items_processed: 0, sub_step: 'PASS 1: Broad job board search...' });
       log('searching_sources', 'PASS 1: Broad job board search'); searchPasses++;
+      let p1Found = 0;
       try {
-        const p1 = await aiCall(oa, `Healthcare recruiting intelligence. Search: ${JOB_BOARDS.join(', ')}\n\nFind ACTIVE postings for ONLY these roles:\n${effectiveRoles.map((r, i) => `${i+1}. ${r}`).join('\n')}\n\nTarget: Medicare Advantage, VBC, PACE, health plans, health systems, hospitals, FQHCs.\nALREADY IN DB: ${existing}\n\nCRITICAL: ONLY return jobs you have HIGH CONFIDENCE are CURRENTLY ACTIVE. Do NOT fabricate.\njob_posting_url: Leave EMPTY.\nMap job_category to: ${CATS.join(' | ')}\nMap job_title to: ${effectiveRoles.join(', ')}\n\nReturn JSON: {"jobs":[{"company":"","job_title":"","job_category":"","city":"","state":"","source_found":""}]}\nFind 40-60 jobs. ONLY valid JSON.`, 12000);
-        const d = parseJson(p1); if (d.jobs) { allFound.push(...d.jobs); log('searching_sources', `Pass 1: ${d.jobs.length} jobs`); }
+        const p1 = await aiCall(oa, `Healthcare recruiting intelligence. Search: ${JOB_BOARDS.join(', ')}\n\nFind ACTIVE postings for ONLY these roles:\n${effectiveRoles.map((r, i) => `${i+1}. ${r}`).join('\n')}\n\nTarget: Medicare Advantage, VBC, PACE, health plans, health systems, hospitals, FQHCs.\nALREADY IN DB: ${existing}\n\nCRITICAL: ONLY return jobs you have HIGH CONFIDENCE are CURRENTLY ACTIVE. Do NOT fabricate.\njob_posting_url: Leave EMPTY.\nMap job_category to: ${CATS.join(' | ')}\nMap job_title to: ${effectiveRoles.join(', ')}\n\nReturn JSON: {"jobs":[{"company":"","job_title":"","job_category":"","city":"","state":"","source_found":""}]}\nFind 40-60 jobs. ONLY valid JSON.`, 12000, telem);
+        const d = parseJson(p1); if (d.jobs) { allFound.push(...d.jobs); p1Found = d.jobs.length; log('searching_sources', `Pass 1: ${d.jobs.length} jobs`); }
       } catch (e) { log('searching_sources', `Pass 1 error: ${(e as Error).message}`); }
+      telem.endStep(p1Found, `${JOB_BOARDS.length} job boards queried, ${p1Found} candidates returned`);
       passesCompleted++;
 
       // PASS 2
+      telem.startStep('pass2_priority_orgs', effectivePriorityOrgs.length);
       log('searching_sources', `PASS 2: Targeted priority org search (${effectivePriorityOrgs.length} orgs after blocked-filter)`); searchPasses++;
+      let p2Found = 0;
       for (let ci = 0; ci < effectivePriorityOrgs.length; ci += 40) {
         const chunk = effectivePriorityOrgs.slice(ci, ci + 40);
         await progress.updateStep('searching_sources', { items_processed: passesCompleted, sub_step: `PASS 2: Priority orgs chunk ${Math.floor(ci/40)+1}/${pass2Chunks}...` });
         try {
-          const p2 = await aiCall(oa, `Search for CURRENT job openings at these healthcare organizations:\n${chunk.map((o,i)=>`${i+1}. ${o}`).join('\n')}\n\nRoles: ${effectiveRoles.join(', ')}\nALREADY FOUND: ${allFound.slice(-30).map(j=>`${j.company}-${j.job_title}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000);
-          const d = parseJson(p2); if (d.jobs) { allFound.push(...d.jobs); log('searching_sources', `Pass 2 chunk: ${d.jobs.length} jobs`); }
+          const p2 = await aiCall(oa, `Search for CURRENT job openings at these healthcare organizations:\n${chunk.map((o,i)=>`${i+1}. ${o}`).join('\n')}\n\nRoles: ${effectiveRoles.join(', ')}\nALREADY FOUND: ${allFound.slice(-30).map(j=>`${j.company}-${j.job_title}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000, telem);
+          const d = parseJson(p2); if (d.jobs) { allFound.push(...d.jobs); p2Found += d.jobs.length; log('searching_sources', `Pass 2 chunk: ${d.jobs.length} jobs`); }
         } catch (e) { log('searching_sources', `Pass 2 error: ${(e as Error).message}`); }
         passesCompleted++;
       }
+      telem.endStep(p2Found, `${effectivePriorityOrgs.length} orgs in ${pass2Chunks} chunks, ${p2Found} candidates returned`);
 
       // PASS 3 - chunk through ALL recurring career sources (was previously
       // capped at .slice(0, 50), which silently dropped any recurring source
       // beyond the first 50). Mirrors Pass 2's chunked iteration.
       if (recSrc.length > 0) {
+        telem.startStep('pass3_recurring_careers', recSrc.length);
         log('searching_sources', `PASS 3: ${recSrc.length} recurring career pages (${pass3Chunks} chunks)`); searchPasses++;
+        let p3Found = 0;
         for (let ci = 0; ci < recSrc.length; ci += 40) {
           const chunk = recSrc.slice(ci, ci + 40);
           await progress.updateStep('searching_sources', { items_processed: passesCompleted, sub_step: `PASS 3: Career pages chunk ${Math.floor(ci/40)+1}/${pass3Chunks}...` });
           const srcList = chunk.map((s,i) => `${i+1}. ${s.company_name}${s.careers_url ? ` (${s.careers_url})` : ''}`).join('\n');
           try {
-            const p3 = await aiCall(oa, `Check these employer career pages for openings:\n${srcList}\nRoles: ${effectiveRoles.join(', ')}\nALREADY FOUND: ${allFound.slice(-40).map(j=>`${j.company}-${j.job_title}-${j.city||''}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000);
-            const d = parseJson(p3); if (d.jobs) { allFound.push(...d.jobs); log('searching_sources', `Pass 3 chunk ${Math.floor(ci/40)+1}: ${d.jobs.length} jobs`); }
+            const p3 = await aiCall(oa, `Check these employer career pages for openings:\n${srcList}\nRoles: ${effectiveRoles.join(', ')}\nALREADY FOUND: ${allFound.slice(-40).map(j=>`${j.company}-${j.job_title}-${j.city||''}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000, telem);
+            const d = parseJson(p3); if (d.jobs) { allFound.push(...d.jobs); p3Found += d.jobs.length; log('searching_sources', `Pass 3 chunk ${Math.floor(ci/40)+1}: ${d.jobs.length} jobs`); }
           } catch (e) { log('searching_sources', `Pass 3 chunk error: ${(e as Error).message}`); }
           passesCompleted++;
         }
         for (const s of recSrc) await supabase.from('marketing_companies').update({ last_searched_at: new Date().toISOString() }).eq('id', s.id);
+        telem.endStep(p3Found, `${recSrc.length} recurring sources in ${pass3Chunks} chunks, ${p3Found} candidates returned`);
       }
 
       log('searching_sources', `Total raw: ${allFound.length} jobs across ${searchPasses} passes`);
@@ -472,10 +598,13 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
       log('verifying_new_jobs', `${candidateJobs.length} candidate jobs to verify (${dupes} pre-filtered as duplicates)`);
       await progress.startStep('verifying_new_jobs', `Verifying ${candidateJobs.length} candidate jobs via SerpAPI Google Jobs (strict mode)...`);
 
+      telem.startStep('serpapi_verification', candidateJobs.length);
       const verifyResult = await batchVerifyWithSerpApi(candidateJobs, log, progress);
       jobsVerified = verifyResult.verified.length;
       jobsRejected = verifyResult.rejected.length;
       serpSearchCount = verifyResult.stats.serpSearches;
+      telem.recordSerpCalls(serpSearchCount);
+      telem.endStep(jobsVerified, `${candidateJobs.length} candidates → ${jobsVerified} verified, ${jobsRejected} rejected (${serpSearchCount} SerpAPI calls)`);
 
       log('verifying_new_jobs', `Results: ${jobsVerified} VERIFIED (will be added), ${jobsRejected} REJECTED (will NOT be added). ${serpSearchCount} SerpAPI searches.`);
       await progress.completeStep('verifying_new_jobs', `${jobsVerified} verified, ${jobsRejected} rejected. ${serpSearchCount} SerpAPI searches.`);
@@ -529,9 +658,12 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
 
       // PASS 4: New company search - also verify via SerpAPI
       if (newCos.length > 0 && serpKey) {
+        telem.startStep('pass4_new_companies', newCos.length);
         log('searching_sources', `PASS 4: Searching ${newCos.length} new companies for additional roles`); searchPasses++;
+        let p4SerpCalls = 0;
+        let p4Verified = 0;
         try {
-          const p4 = await aiCall(oa, `Search these NEW companies for additional openings:\n${newCos.map((c,i)=>`${i+1}. ${c}`).join('\n')}\nRoles: ${effectiveRoles.join(', ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 6000);
+          const p4 = await aiCall(oa, `Search these NEW companies for additional openings:\n${newCos.map((c,i)=>`${i+1}. ${c}`).join('\n')}\nRoles: ${effectiveRoles.join(', ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 6000, telem);
           const d = parseJson(p4);
           const pass4Candidates: any[] = [];
           for (const j of (d.jobs||[])) {
@@ -561,6 +693,9 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             jobsVerified += pass4Verify.verified.length;
             jobsRejected += pass4Verify.rejected.length;
             serpSearchCount += pass4Verify.stats.serpSearches;
+            p4SerpCalls = pass4Verify.stats.serpSearches;
+            p4Verified = pass4Verify.verified.length;
+            telem.recordSerpCalls(pass4Verify.stats.serpSearches);
             for (const j of pass4Verify.verified) {
               if (jKeys.has(j._dedupKey)) { dupes++; continue; } jKeys.add(j._dedupKey);
               const co = coMap.get(j.company.toLowerCase().trim()); if (!co?.id) continue;
@@ -577,6 +712,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             log('searching_sources', `Pass 4: ${pass4Verify.verified.length} verified and added, ${pass4Verify.rejected.length} rejected`);
           }
         } catch (e) { log('searching_sources', `Pass 4 error: ${(e as Error).message}`); }
+        telem.endStep(p4Verified, `${newCos.length} new companies, ${p4Verified} verified-and-added (${p4SerpCalls} SerpAPI calls)`);
         await upd({ new_jobs_added: added, search_passes_completed: searchPasses, new_roles_by_type: roleB, jobs_verified: jobsVerified, jobs_rejected: jobsRejected });
       } else if (newCos.length > 0 && !serpKey) {
         log('searching_sources', `PASS 4: Skipped - no SerpAPI key to verify additional jobs from ${newCos.length} new companies`);
@@ -591,6 +727,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
       const needCt: string[] = [];
       for (const cn of coWithJobs) { if (allT.filter(c => c.company_name === cn).length < 2) needCt.push(cn); }
       await progress.updateStep('enriching_contacts', { items_total: needCt.length, items_processed: 0, sub_step: `${needCt.length} companies need contacts` });
+      telem.startStep('enriching_contacts', needCt.length);
 
       if (needCt.length > 0) {
         log('enriching_contacts', `${needCt.length} companies need contacts`);
@@ -598,7 +735,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           const batch = needCt.slice(i, i + 25);
           await progress.updateStep('enriching_contacts', { items_processed: i, sub_step: `Enriching batch ${Math.floor(i/25)+1}/${Math.ceil(needCt.length/25)}...` });
           try {
-            const cr = await aiCall(oa, `Find hiring contacts for:\n${batch.map((c,i)=>`${i+1}. ${c}`).join('\n')}\nFind: Talent Acquisition, Recruiters, HR Directors, Medical Directors, CMOs.\nONLY real verifiable info. No guessed emails.\nReturn JSON: [{"company":"","first_name":"","last_name":"","email":"","phone_work":"","phone_cell":"","phone_home":"","title":"","source":"","source_url":""}]\nOnly JSON.`, 5000);
+            const cr = await aiCall(oa, `Find hiring contacts for:\n${batch.map((c,i)=>`${i+1}. ${c}`).join('\n')}\nFind: Talent Acquisition, Recruiters, HR Directors, Medical Directors, CMOs.\nONLY real verifiable info. No guessed emails.\nReturn JSON: [{"company":"","first_name":"","last_name":"","email":"","phone_work":"","phone_cell":"","phone_home":"","title":"","source":"","source_url":""}]\nOnly JSON.`, 5000, telem);
             for (const c of parseArr(cr)) {
               if (!c.company || (!c.first_name && !c.last_name)) continue;
               const dk = `${(c.first_name||'').toLowerCase().trim()}|${(c.last_name||'').toLowerCase().trim()}|${(c.company||'').toLowerCase().trim()}`;
@@ -613,6 +750,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         }
       }
       log('enriching_contacts', `${ctAdded} contacts added`);
+      telem.endStep(ctAdded, `${ctAdded} contacts added across ${needCt.length} companies needing enrichment`);
       await progress.completeStep('enriching_contacts', `${ctAdded} contacts added`);
       await upd({ contacts_added: ctAdded });
     } else {
@@ -662,7 +800,8 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
       new_roles_by_type: roleB, high_priority_targets: hp||[],
       master_file_name: mfn, new_data_file_name: nfn,
       alert_summary: alerts, execution_log: logs, search_passes_completed: searchPasses, sources_searched: JOB_BOARDS,
-      progress: progress.getState()
+      progress: progress.getState(),
+      telemetry: telem.snapshot(),
     }).eq('id', rid);
 
   } catch (error) {
@@ -671,7 +810,8 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
     await supabase.from('tracker_runs').update({
       status: 'failed', current_step: 'error', completed_at: new Date().toISOString(),
       execution_log: logs, error_message: (error as Error).message,
-      jobs_verified: jobsVerified, jobs_rejected: jobsRejected, progress: progress.getState()
+      jobs_verified: jobsVerified, jobs_rejected: jobsRejected, progress: progress.getState(),
+      telemetry: telem.snapshot(),
     }).eq('id', rid);
   }
 }
