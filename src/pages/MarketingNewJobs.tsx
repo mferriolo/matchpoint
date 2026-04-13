@@ -552,10 +552,6 @@ const MarketingNewJobs: React.FC = () => {
           <span className="font-semibold">{contacts.length}</span> Contacts
         </div>
         <div className="flex items-center gap-2 text-sm">
-          <Database className="w-4 h-4 text-indigo-600" />
-          <span className="font-semibold">{crelateCount}</span> from Crelate
-        </div>
-        <div className="flex items-center gap-2 text-sm">
           <Star className="w-4 h-4 text-amber-500" />
           <span className="font-semibold">{highPriorityCount}</span> Priority Co.
         </div>
