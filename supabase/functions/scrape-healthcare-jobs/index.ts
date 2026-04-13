@@ -461,6 +461,8 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
 
   // Per-run telemetry. Saved to tracker_runs.telemetry on completion.
   const telem = new Telemetry();
+  // Wall-clock start used for the time-budget guard inside the discovery loop.
+  const runStartMs = Date.now();
   const logs: any[] = [];
   const log = (s: string, m: string) => { logs.push({ step: s, msg: m, ts: new Date().toISOString() }); };
   const upd = async (u: any) => { await supabase.from('tracker_runs').update({ ...u, execution_log: logs }).eq('id', rid); };
@@ -597,7 +599,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
 
         // Per-company queries — one SerpAPI call per priority/recurring company.
         for (let i = 0; i < targets.length; i++) {
-          if (Date.now() - st > 12 * 60 * 1000) {
+          if (Date.now() - runStartMs > 12 * 60 * 1000) {
             log('searching_sources', `Time budget exhausted after ${processed} queries (${candidates.length} candidates so far)`);
             break;
           }
@@ -620,7 +622,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         // Broad per-role queries — vacuum coverage for jobs at companies
         // not yet in our DB. One call per role keyword, ~10 results each.
         for (const role of effectiveRoles) {
-          if (Date.now() - st > 12 * 60 * 1000) break;
+          if (Date.now() - runStartMs > 12 * 60 * 1000) break;
           const cleanRole = _cleanRoleLabel(role);
           if (!cleanRole) { processed++; continue; }
           const r = await searchSerpApiBroad(`"${cleanRole}" healthcare`);
