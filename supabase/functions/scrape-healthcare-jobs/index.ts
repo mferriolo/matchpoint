@@ -350,15 +350,22 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
     log('loading', `Loaded ${allJ.length} jobs, ${allC.length} companies, ${allT.length} contacts`);
     await progress.completeStep('loading', `Loaded ${allJ.length} jobs, ${allC.length} companies, ${allT.length} contacts`);
 
+    // jKeys intentionally includes blocked jobs so that the dedup check
+    // catches AI re-discoveries of jobs the user explicitly blocked.
     const jKeys = new Set(allJ.map(j => `${(j.company_name||'').toLowerCase().trim()}|${(j.job_title||'').toLowerCase().trim()}|${(j.city||'').toLowerCase().trim()}|${(j.state||'').toLowerCase().trim()}`));
     const coMap = new Map(allC.map(c => [(c.company_name||'').toLowerCase().trim(), c]));
     const ctKeys = new Set(allT.map(c => `${(c.first_name||'').toLowerCase().trim()}|${(c.last_name||'').toLowerCase().trim()}|${(c.company_name||'').toLowerCase().trim()}`));
-    const recSrc = allC.filter(c => c.is_recurring_source || c.careers_url || c.job_board_url);
-    log('loading', `${recSrc.length} recurring company career sources`);
+    // Blocked items the user has explicitly excluded from future scraping.
+    // Used to skip URL revalidation, drop AI-found candidates whose company
+    // is blocked, and prune blocked companies from Pass 2 / Pass 3.
+    const blockedJobIds = new Set(allJ.filter(j => j.is_blocked).map(j => j.id));
+    const blockedCompanyNames = new Set(allC.filter(c => c.is_blocked).map(c => (c.company_name||'').toLowerCase().trim()));
+    const recSrc = allC.filter(c => (c.is_recurring_source || c.careers_url || c.job_board_url) && !c.is_blocked);
+    log('loading', `${recSrc.length} recurring company career sources, ${blockedJobIds.size} jobs / ${blockedCompanyNames.size} companies blocked`);
 
     // STEP 2: URL VALIDATION
     if (action === 'full' || action === 'checker_only') {
-      const openJ = allJ.filter(j => !j.is_closed && j.status !== 'Closed');
+      const openJ = allJ.filter(j => !j.is_closed && j.status !== 'Closed' && !j.is_blocked);
       await progress.startStep('validating_urls', `Validating ${openJ.length} open job URLs...`);
       await progress.updateStep('validating_urls', { items_total: openJ.length, items_processed: 0 });
       log('validating_urls', `${openJ.length} open jobs to validate`);
@@ -384,7 +391,10 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
       const existing = Array.from(coMap.keys()).slice(0, 60).join(', ');
       const allFound: any[] = [];
       const newCos: string[] = [];
-      const pass2Chunks = Math.ceil(PRIORITY_ORGS.length / 40);
+      // Drop any blocked company names from PRIORITY_ORGS so Pass 2 doesn't
+      // waste AI calls searching for jobs at companies the user excluded.
+      const effectivePriorityOrgs = PRIORITY_ORGS.filter(o => !blockedCompanyNames.has(o.toLowerCase().trim()));
+      const pass2Chunks = Math.ceil(effectivePriorityOrgs.length / 40);
       const pass3Chunks = recSrc.length > 0 ? Math.ceil(recSrc.length / 40) : 0;
       const totalPasses = 1 + pass2Chunks + pass3Chunks;
       let passesCompleted = 0;
@@ -399,9 +409,9 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
       passesCompleted++;
 
       // PASS 2
-      log('searching_sources', 'PASS 2: Targeted priority org search'); searchPasses++;
-      for (let ci = 0; ci < PRIORITY_ORGS.length; ci += 40) {
-        const chunk = PRIORITY_ORGS.slice(ci, ci + 40);
+      log('searching_sources', `PASS 2: Targeted priority org search (${effectivePriorityOrgs.length} orgs after blocked-filter)`); searchPasses++;
+      for (let ci = 0; ci < effectivePriorityOrgs.length; ci += 40) {
+        const chunk = effectivePriorityOrgs.slice(ci, ci + 40);
         await progress.updateStep('searching_sources', { items_processed: passesCompleted, sub_step: `PASS 2: Priority orgs chunk ${Math.floor(ci/40)+1}/${pass2Chunks}...` });
         try {
           const p2 = await aiCall(oa, `Search for CURRENT job openings at these healthcare organizations:\n${chunk.map((o,i)=>`${i+1}. ${o}`).join('\n')}\n\nRoles: ${effectiveRoles.join(', ')}\nALREADY FOUND: ${allFound.slice(-30).map(j=>`${j.company}-${j.job_title}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000);
@@ -436,6 +446,8 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
       const candidateJobs: any[] = [];
       for (const j of allFound) {
         if (!j.company || !j.job_title) continue;
+        // Skip any AI-found job whose company is blocked by the user.
+        if (blockedCompanyNames.has(j.company.toLowerCase().trim())) { dupes++; continue; }
         let nt: string;
         if (useDefaultMode) {
           // Legacy clinical-roles path: normalize then strict-include.
@@ -524,6 +536,8 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           const pass4Candidates: any[] = [];
           for (const j of (d.jobs||[])) {
             if (!j.company || !j.job_title) continue;
+            // Skip any AI-found job whose company is blocked by the user.
+            if (blockedCompanyNames.has(j.company.toLowerCase().trim())) { dupes++; continue; }
             let nt: string;
             if (useDefaultMode) {
               nt = normalizeRole(j.job_title);

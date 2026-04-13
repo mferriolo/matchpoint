@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Plus, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, ExternalLink, Save, X, Pencil } from 'lucide-react';
+import { Plus, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, ExternalLink, Save, X, Pencil, Ban, RotateCcw, Eye, EyeOff } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 interface MarketingCompany {
@@ -20,6 +20,7 @@ interface MarketingCompany {
   last_contacted_at: string | null;
   created_at: string;
   updated_at: string;
+  is_blocked: boolean;
 }
 
 type SortField = keyof MarketingCompany;
@@ -49,6 +50,11 @@ const MarketingCompaniesTab: React.FC = () => {
     company_name: '', industry: '', website: '', contact_name: '',
     contact_email: '', contact_phone: '', location: '', notes: '', status: 'New', source: ''
   });
+  // Multi-select + blocking state. Selected rows are tracked by id; the
+  // bulk action bar appears when >0 are selected. Blocked rows are hidden
+  // from the table by default and excluded from future scraper runs.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showBlocked, setShowBlocked] = useState(false);
   const tableRef = useRef<HTMLDivElement>(null);
 
   const fetchCompanies = useCallback(async () => {
@@ -154,7 +160,63 @@ const MarketingCompaniesTab: React.FC = () => {
     }
   };
 
+  // ---------- Selection + blocking ----------
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const clearSelection = () => setSelectedIds(new Set());
+
+  const handleToggleBlock = async (id: string, currentlyBlocked: boolean) => {
+    try {
+      const { error } = await supabase.from('marketing_companies')
+        .update({ is_blocked: !currentlyBlocked, updated_at: new Date().toISOString() })
+        .eq('id', id);
+      if (error) throw error;
+      toast({ title: currentlyBlocked ? 'Company unblocked' : 'Company blocked from future runs' });
+      fetchCompanies();
+    } catch (err: any) {
+      toast({ title: 'Error updating block flag', description: err.message, variant: 'destructive' });
+    }
+  };
+
+  const handleBulkBlock = async (block: boolean) => {
+    if (selectedIds.size === 0) return;
+    const ids = Array.from(selectedIds);
+    try {
+      const { error } = await supabase.from('marketing_companies')
+        .update({ is_blocked: block, updated_at: new Date().toISOString() })
+        .in('id', ids);
+      if (error) throw error;
+      toast({ title: block ? `${ids.length} company(s) blocked` : `${ids.length} company(s) unblocked` });
+      clearSelection();
+      fetchCompanies();
+    } catch (err: any) {
+      toast({ title: 'Error updating companies', description: err.message, variant: 'destructive' });
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`Delete ${selectedIds.size} selected company(s) and their associated jobs? This cannot be undone.`)) return;
+    const ids = Array.from(selectedIds);
+    try {
+      const { error } = await supabase.from('marketing_companies').delete().in('id', ids);
+      if (error) throw error;
+      toast({ title: `${ids.length} company(s) deleted` });
+      clearSelection();
+      fetchCompanies();
+    } catch (err: any) {
+      toast({ title: 'Error deleting companies', description: err.message, variant: 'destructive' });
+    }
+  };
+
   const filtered = companies
+    .filter(c => showBlocked || !c.is_blocked)
     .filter(c => {
       if (!searchTerm) return true;
       const s = searchTerm.toLowerCase();
@@ -171,6 +233,16 @@ const MarketingCompaniesTab: React.FC = () => {
       const cmp = aVal.toString().localeCompare(bVal.toString());
       return sortDir === 'asc' ? cmp : -cmp;
     });
+
+  const blockedCount = companies.filter(c => c.is_blocked).length;
+  const allVisibleSelected = filtered.length > 0 && filtered.every(c => selectedIds.has(c.id));
+  const toggleSelectAllVisible = () => {
+    if (allVisibleSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(filtered.map(c => c.id)));
+    }
+  };
 
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return <ArrowUpDown className="w-3 h-3 ml-1 opacity-40" />;
@@ -292,19 +364,81 @@ const MarketingCompaniesTab: React.FC = () => {
           />
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-sm text-gray-500">{filtered.length} companies</span>
+          <span className="text-sm text-gray-500">
+            {filtered.length} companies{blockedCount > 0 && !showBlocked && <span className="text-gray-400"> ({blockedCount} blocked hidden)</span>}
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowBlocked(s => !s)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded border border-gray-200 hover:bg-gray-50 text-gray-600"
+            title={showBlocked ? 'Hide blocked companies' : 'Show blocked companies'}
+          >
+            {showBlocked ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+            {showBlocked ? 'Hide blocked' : 'Show blocked'}
+          </button>
           <Button onClick={() => setAddingNew(true)} className="bg-[#911406] hover:bg-[#911406]/90 text-white" disabled={addingNew}>
             <Plus className="w-4 h-4 mr-1" /> Add Company
           </Button>
         </div>
       </div>
 
+      {/* Bulk action bar */}
+      {selectedIds.size > 0 && (
+        <div className="mb-3 flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-50 border border-amber-200">
+          <span className="text-sm font-medium text-amber-900">
+            {selectedIds.size} selected
+          </span>
+          <div className="ml-auto flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => handleBulkBlock(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-red-200 bg-white hover:bg-red-50 text-red-700"
+              title="Block selected from future scraper runs"
+            >
+              <Ban className="w-3.5 h-3.5" /> Block
+            </button>
+            <button
+              type="button"
+              onClick={() => handleBulkBlock(false)}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-gray-200 bg-white hover:bg-gray-50 text-gray-700"
+              title="Unblock selected"
+            >
+              <RotateCcw className="w-3.5 h-3.5" /> Unblock
+            </button>
+            <button
+              type="button"
+              onClick={handleBulkDelete}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-red-200 bg-white hover:bg-red-50 text-red-700"
+              title="Delete selected permanently"
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Delete
+            </button>
+            <button
+              type="button"
+              onClick={clearSelection}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded text-gray-500 hover:bg-amber-100"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Spreadsheet */}
       <div ref={tableRef} className="flex-1 overflow-auto border border-gray-200 rounded-lg bg-white">
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10">
             <tr className="bg-gray-50 border-b border-gray-200">
-              <th className="px-2 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200 w-[70px] sticky left-0 bg-gray-50 z-20">
+              <th className="px-2 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200 w-[36px] sticky left-0 bg-gray-50 z-20">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={toggleSelectAllVisible}
+                  className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406] cursor-pointer"
+                  title={allVisibleSelected ? 'Deselect all visible' : 'Select all visible'}
+                />
+              </th>
+              <th className="px-2 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200 w-[96px] sticky left-[36px] bg-gray-50 z-20">
                 Actions
               </th>
               {columns.map(col => (
@@ -325,7 +459,8 @@ const MarketingCompaniesTab: React.FC = () => {
             {/* New row */}
             {addingNew && (
               <tr className="bg-green-50 border-b border-gray-200">
-                <td className="px-2 py-1.5 border-r border-gray-200 sticky left-0 bg-green-50 z-20">
+                <td className="px-2 py-1.5 border-r border-gray-200 sticky left-0 bg-green-50 z-20" />
+                <td className="px-2 py-1.5 border-r border-gray-200 sticky left-[36px] bg-green-50 z-20">
                   <div className="flex gap-1">
                     <button onClick={handleAddNew} className="p-1 rounded hover:bg-green-200 text-green-700" title="Save">
                       <Save className="w-4 h-4" />
@@ -346,25 +481,36 @@ const MarketingCompaniesTab: React.FC = () => {
             {/* Data rows */}
             {loading ? (
               <tr>
-                <td colSpan={columns.length + 1} className="text-center py-12 text-gray-400">
+                <td colSpan={columns.length + 2} className="text-center py-12 text-gray-400">
                   Loading companies...
                 </td>
               </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={columns.length + 1} className="text-center py-12 text-gray-400">
+                <td colSpan={columns.length + 2} className="text-center py-12 text-gray-400">
                   {searchTerm ? 'No companies match your search.' : 'No companies yet. Click "Add Company" to get started.'}
                 </td>
               </tr>
             ) : (
               filtered.map((company, idx) => {
                 const isEditing = editingId === company.id;
+                const isSelected = selectedIds.has(company.id);
+                const blocked = company.is_blocked;
+                const baseBg = blocked ? 'bg-gray-100' : isEditing ? 'bg-blue-50' : isSelected ? 'bg-amber-50' : idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/30';
                 return (
                   <tr
                     key={company.id}
-                    className={`border-b border-gray-100 ${isEditing ? 'bg-blue-50' : idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/30'} hover:bg-gray-100/50 transition-colors`}
+                    className={`border-b border-gray-100 ${baseBg} hover:bg-gray-100/50 transition-colors ${blocked ? 'opacity-60' : ''}`}
                   >
-                    <td className={`px-2 py-1.5 border-r border-gray-200 sticky left-0 z-20 ${isEditing ? 'bg-blue-50' : idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/30'}`}>
+                    <td className={`px-2 py-1.5 border-r border-gray-200 sticky left-0 z-20 text-center ${baseBg}`}>
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggleSelect(company.id)}
+                        className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406] cursor-pointer"
+                      />
+                    </td>
+                    <td className={`px-2 py-1.5 border-r border-gray-200 sticky left-[36px] z-20 ${baseBg}`}>
                       {isEditing ? (
                         <div className="flex gap-1">
                           <button onClick={handleSaveEdit} className="p-1 rounded hover:bg-green-100 text-green-700" title="Save">
@@ -375,9 +521,16 @@ const MarketingCompaniesTab: React.FC = () => {
                           </button>
                         </div>
                       ) : (
-                        <div className="flex gap-1">
+                        <div className="flex gap-0.5">
                           <button onClick={() => handleEdit(company)} className="p-1 rounded hover:bg-blue-100 text-blue-600" title="Edit">
                             <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleToggleBlock(company.id, blocked)}
+                            className={`p-1 rounded ${blocked ? 'hover:bg-gray-200 text-gray-600' : 'hover:bg-red-100 text-red-600'}`}
+                            title={blocked ? 'Unblock (allow scraper to discover jobs at this company)' : 'Block from future scraper runs'}
+                          >
+                            {blocked ? <RotateCcw className="w-3.5 h-3.5" /> : <Ban className="w-3.5 h-3.5" />}
                           </button>
                           <button onClick={() => handleDelete(company.id, company.company_name)} className="p-1 rounded hover:bg-red-100 text-red-600" title="Delete">
                             <Trash2 className="w-3.5 h-3.5" />
