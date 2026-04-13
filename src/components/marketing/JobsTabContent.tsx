@@ -6,7 +6,7 @@ import {
   Search, ArrowUpDown, ArrowUp, ArrowDown, ExternalLink, MapPin,
   Download, Loader2, X, Archive, RotateCcw, Filter, ShieldCheck,
   CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Trash2,
-  Link2, Star, Zap, Building2, Briefcase, Ban, Eye, EyeOff
+  Link2, Star, Zap, Building2, Briefcase, Ban, Eye, EyeOff, Pencil
 } from 'lucide-react';
 
 
@@ -181,6 +181,12 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
   // to skip these on future runs.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showBlocked, setShowBlocked] = useState(false);
+
+  // Inline edit of job_type. Only one row can be in edit mode at a time;
+  // editingJobTypeId === j.id swaps the Job Type cell into a <select>.
+  // Choices match JOB_TYPE_OPTIONS (minus the 'All' filter sentinel).
+  const [editingJobTypeId, setEditingJobTypeId] = useState<string | null>(null);
+  const JOB_TYPE_EDIT_OPTIONS = JOB_TYPE_OPTIONS.filter(o => o !== 'All');
 
 
   // Close filter dropdown when clicking outside
@@ -412,6 +418,20 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
       toast({ title: 'Error deleting jobs', description: err.message, variant: 'destructive' });
     }
   }, [selectedIds, toast, onRefresh, clearSelection]);
+
+  const handleSaveJobType = useCallback(async (id: string, newType: string) => {
+    try {
+      const { error } = await supabase.from('marketing_jobs')
+        .update({ job_type: newType, updated_at: new Date().toISOString() })
+        .eq('id', id);
+      if (error) throw error;
+      toast({ title: 'Job type updated' });
+      setEditingJobTypeId(null);
+      onRefresh();
+    } catch (err: any) {
+      toast({ title: 'Error updating job type', description: err.message, variant: 'destructive' });
+    }
+  }, [toast, onRefresh]);
 
 
   // Export to CSV
@@ -1080,7 +1100,21 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                       <span className="truncate block">{j.job_title || '-'}</span>
                     </td>
                     <td className="px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap font-medium ${jobTypeBadgeColor(classified)}`}>{classified}</span>
+                      {editingJobTypeId === j.id ? (
+                        <select
+                          autoFocus
+                          defaultValue={classified}
+                          onChange={e => handleSaveJobType(j.id, e.target.value)}
+                          onBlur={() => setEditingJobTypeId(null)}
+                          className="text-xs border border-[#911406] rounded px-2 py-1 bg-white focus:ring-1 focus:ring-[#911406] focus:border-[#911406] outline-none"
+                        >
+                          {JOB_TYPE_EDIT_OPTIONS.map(opt => (
+                            <option key={opt} value={opt}>{opt}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap font-medium ${jobTypeBadgeColor(classified)}`}>{classified}</span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-gray-600">
                       {loc ? (
@@ -1155,6 +1189,13 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                             Reopen
                           </button>
                         )}
+                        <button
+                          onClick={() => setEditingJobTypeId(prev => prev === j.id ? null : j.id)}
+                          className="inline-flex items-center justify-center p-1 rounded text-blue-600 hover:bg-blue-50"
+                          title="Edit job type"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
                         <button
                           onClick={() => handleToggleBlock(j.id, blocked)}
                           className={`inline-flex items-center justify-center p-1 rounded ${blocked ? 'text-gray-600 hover:bg-gray-200' : 'text-red-600 hover:bg-red-50'}`}

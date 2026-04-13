@@ -9,7 +9,7 @@ import {
   Database, Shield, Phone, Send,
   Linkedin, Unlink, Upload, Trash2, Zap,
   ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert, FileText, ArrowRightLeft,
-  Ban, RotateCcw, Eye, EyeOff
+  Ban, RotateCcw, Eye, EyeOff, Pencil
 } from 'lucide-react';
 
 import { supabase } from '@/lib/supabase';
@@ -69,6 +69,29 @@ const MarketingNewJobs: React.FC = () => {
   // future scraper runs (the scraper consults marketing_companies.is_blocked).
   const [selectedCompanyIds, setSelectedCompanyIds] = useState<Set<string>>(new Set());
   const [showBlockedCompanies, setShowBlockedCompanies] = useState(false);
+
+  // Inline edit of company_type. Only one row can be in edit mode at a
+  // time; editingCompanyTypeId === c.id swaps the Category cell into a
+  // <select>. Same constants the scraper uses for company categorization.
+  const COMPANY_CATEGORY_OPTIONS = [
+    'Value Based Care (VBC)', 'PACE Medical Groups', 'Health Plans',
+    'Health Systems', 'Hospitals', 'FQHC', 'All Others'
+  ];
+  const [editingCompanyTypeId, setEditingCompanyTypeId] = useState<string | null>(null);
+
+  const handleSaveCompanyType = async (id: string, newType: string) => {
+    try {
+      const { error } = await supabase.from('marketing_companies')
+        .update({ company_type: newType, industry: newType, updated_at: new Date().toISOString() })
+        .eq('id', id);
+      if (error) throw error;
+      toast({ title: 'Category updated' });
+      setEditingCompanyTypeId(null);
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Error updating category', description: err.message, variant: 'destructive' });
+    }
+  };
 
   const toggleCompanySelect = (id: string) => {
     setSelectedCompanyIds(prev => {
@@ -815,7 +838,21 @@ const MarketingNewJobs: React.FC = () => {
                             <div className="font-medium text-gray-900">{c.company_name}</div>
                           </td>
                           <td className="px-4 py-3">
-                            <span className={`text-xs px-2 py-0.5 rounded-full ${categoryBadge(c.company_type)}`}>{c.company_type || '-'}</span>
+                            {editingCompanyTypeId === c.id ? (
+                              <select
+                                autoFocus
+                                value={c.company_type || ''}
+                                onChange={e => handleSaveCompanyType(c.id, e.target.value)}
+                                onBlur={() => setEditingCompanyTypeId(null)}
+                                className="text-xs border border-[#911406] rounded px-2 py-1 bg-white focus:ring-1 focus:ring-[#911406] focus:border-[#911406] outline-none"
+                              >
+                                {COMPANY_CATEGORY_OPTIONS.map(opt => (
+                                  <option key={opt} value={opt}>{opt}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <span className={`text-xs px-2 py-0.5 rounded-full ${categoryBadge(c.company_type)}`}>{c.company_type || '-'}</span>
+                            )}
                           </td>
                           <td className="px-4 py-3">
                             {hasOpenRoles ? (
@@ -883,13 +920,22 @@ const MarketingNewJobs: React.FC = () => {
                             {c.has_md_cmo ? <CheckCircle className="w-4 h-4 text-green-600 mx-auto" /> : <span className="text-gray-300">-</span>}
                           </td>
                           <td className="text-center px-4 py-3">
-                            <button
-                              onClick={() => handleToggleCompanyBlock(c.id, blocked)}
-                              className={`inline-flex items-center justify-center p-1.5 rounded ${blocked ? 'text-gray-600 hover:bg-gray-200' : 'text-red-600 hover:bg-red-50'}`}
-                              title={blocked ? 'Unblock (allow scraper to discover jobs at this company)' : 'Block from future scraper runs'}
-                            >
-                              {blocked ? <RotateCcw className="w-4 h-4" /> : <Ban className="w-4 h-4" />}
-                            </button>
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                onClick={() => setEditingCompanyTypeId(prev => prev === c.id ? null : c.id)}
+                                className="inline-flex items-center justify-center p-1.5 rounded text-blue-600 hover:bg-blue-50"
+                                title="Edit category"
+                              >
+                                <Pencil className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => handleToggleCompanyBlock(c.id, blocked)}
+                                className={`inline-flex items-center justify-center p-1.5 rounded ${blocked ? 'text-gray-600 hover:bg-gray-200' : 'text-red-600 hover:bg-red-50'}`}
+                                title={blocked ? 'Unblock (allow scraper to discover jobs at this company)' : 'Block from future scraper runs'}
+                              >
+                                {blocked ? <RotateCcw className="w-4 h-4" /> : <Ban className="w-4 h-4" />}
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
