@@ -6,7 +6,7 @@ import {
   Search, ArrowUpDown, ArrowUp, ArrowDown, ExternalLink, MapPin,
   Download, Loader2, X, Archive, RotateCcw, Filter, ShieldCheck,
   CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Trash2,
-  Link2, Star, Zap, Building2, Briefcase
+  Link2, Star, Zap, Building2, Briefcase, Ban, Eye, EyeOff
 } from 'lucide-react';
 
 
@@ -175,6 +175,13 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
   // Confirm dialog
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
 
+  // Multi-select + blocking state. Selected rows are tracked by id; the
+  // bulk action bar appears when >0 are selected. Blocked rows are hidden
+  // from the table by default; the scraper consults marketing_jobs.is_blocked
+  // to skip these on future runs.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showBlocked, setShowBlocked] = useState(false);
+
 
   // Close filter dropdown when clicking outside
   React.useEffect(() => {
@@ -221,6 +228,8 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
   // Apply filters and search
   const filteredJobs = useMemo(() => {
     return baseJobs.filter(j => {
+      // Block filter: hide blocked rows unless the user explicitly opts in.
+      if (!showBlocked && j.is_blocked) return false;
       // High priority quick-filter
       if (filterHighPriority && !j.high_priority) return false;
       if (searchTerm) {
@@ -286,6 +295,17 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
     });
   }, [filteredJobs, sortField, sortDir]);
 
+  // Block-aware derived counts and select-all helper.
+  const blockedInTab = useMemo(() => baseJobs.filter(j => j.is_blocked).length, [baseJobs]);
+  const allVisibleSelected = sortedJobs.length > 0 && sortedJobs.every(j => selectedIds.has(j.id));
+  const toggleSelectAllVisible = useCallback(() => {
+    if (allVisibleSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(sortedJobs.map(j => j.id)));
+    }
+  }, [allVisibleSelected, sortedJobs]);
+
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -337,6 +357,61 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
       setTogglingPriorityId(null);
     }
   }, [toast, onRefresh]);
+
+  // ---------- Selection + blocking ----------
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+
+  const handleToggleBlock = useCallback(async (jobId: string, currentlyBlocked: boolean) => {
+    try {
+      const { error } = await supabase.from('marketing_jobs')
+        .update({ is_blocked: !currentlyBlocked, updated_at: new Date().toISOString() })
+        .eq('id', jobId);
+      if (error) throw error;
+      toast({ title: currentlyBlocked ? 'Job unblocked' : 'Job blocked from future runs' });
+      onRefresh();
+    } catch (err: any) {
+      toast({ title: 'Error updating block flag', description: err.message, variant: 'destructive' });
+    }
+  }, [toast, onRefresh]);
+
+  const handleBulkBlock = useCallback(async (block: boolean) => {
+    if (selectedIds.size === 0) return;
+    const ids = Array.from(selectedIds);
+    try {
+      const { error } = await supabase.from('marketing_jobs')
+        .update({ is_blocked: block, updated_at: new Date().toISOString() })
+        .in('id', ids);
+      if (error) throw error;
+      toast({ title: block ? `${ids.length} job(s) blocked` : `${ids.length} job(s) unblocked` });
+      clearSelection();
+      onRefresh();
+    } catch (err: any) {
+      toast({ title: 'Error updating jobs', description: err.message, variant: 'destructive' });
+    }
+  }, [selectedIds, toast, onRefresh, clearSelection]);
+
+  const handleBulkDelete = useCallback(async () => {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`Delete ${selectedIds.size} selected job(s)? This cannot be undone.`)) return;
+    const ids = Array.from(selectedIds);
+    try {
+      const { error } = await supabase.from('marketing_jobs').delete().in('id', ids);
+      if (error) throw error;
+      toast({ title: `${ids.length} job(s) deleted` });
+      clearSelection();
+      onRefresh();
+    } catch (err: any) {
+      toast({ title: 'Error deleting jobs', description: err.message, variant: 'destructive' });
+    }
+  }, [selectedIds, toast, onRefresh, clearSelection]);
 
 
   // Export to CSV
@@ -757,8 +832,21 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
           </span>
         </button>
 
-        <span className="text-sm text-gray-500">{sortedJobs.length} of {baseJobs.length} jobs</span>
+        <span className="text-sm text-gray-500">
+          {sortedJobs.length} of {baseJobs.length} jobs
+          {blockedInTab > 0 && !showBlocked && <span className="text-gray-400"> ({blockedInTab} blocked hidden)</span>}
+        </span>
 
+        {/* Show / Hide Blocked toggle */}
+        <button
+          type="button"
+          onClick={() => setShowBlocked(s => !s)}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded border border-gray-200 hover:bg-gray-50 text-gray-600"
+          title={showBlocked ? 'Hide blocked jobs' : 'Show blocked jobs'}
+        >
+          {showBlocked ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+          {showBlocked ? 'Hide blocked' : 'Show blocked'}
+        </button>
 
         {/* Scrub Dead Links Button */}
         {subTab === 'open' && (
@@ -786,6 +874,48 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
           Export CSV
         </Button>
       </div>
+
+      {/* Bulk action bar — visible only when 1+ rows are selected */}
+      {selectedIds.size > 0 && (
+        <div className="px-4 py-2 border-b bg-amber-50 border-amber-200 flex items-center gap-2">
+          <span className="text-sm font-medium text-amber-900">
+            {selectedIds.size} selected
+          </span>
+          <div className="ml-auto flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => handleBulkBlock(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-red-200 bg-white hover:bg-red-50 text-red-700"
+              title="Block selected from future scraper runs"
+            >
+              <Ban className="w-3.5 h-3.5" /> Block
+            </button>
+            <button
+              type="button"
+              onClick={() => handleBulkBlock(false)}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-gray-200 bg-white hover:bg-gray-50 text-gray-700"
+              title="Unblock selected"
+            >
+              <RotateCcw className="w-3.5 h-3.5" /> Unblock
+            </button>
+            <button
+              type="button"
+              onClick={handleBulkDelete}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-red-200 bg-white hover:bg-red-50 text-red-700"
+              title="Delete selected permanently"
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Delete
+            </button>
+            <button
+              type="button"
+              onClick={clearSelection}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded text-gray-500 hover:bg-amber-100"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Scrub Progress Bar */}
       {isScrubbing && (
@@ -855,6 +985,15 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
         <table className="w-full text-sm">
           <thead className="bg-gray-50 border-b sticky top-0 z-10">
             <tr>
+              <th className="text-center px-2 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[36px]">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={toggleSelectAllVisible}
+                  className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406] cursor-pointer"
+                  title={allVisibleSelected ? 'Deselect all visible' : 'Select all visible'}
+                />
+              </th>
               <ColumnHeader field="job_category" label="Job Category" filterValue={filterCategory} filterOptions={CATEGORY_OPTIONS} onFilterChange={setFilterCategory} filterKey="category" />
               <ColumnHeader field="company_name" label="Company" filterValue={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} filterKey="company" />
               <ColumnHeader field="job_title" label="Job Title" filterValue={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} filterKey="title" />
@@ -878,14 +1017,14 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={8} className="text-center py-16">
+                <td colSpan={9} className="text-center py-16">
                   <Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400 mb-2" />
                   <span className="text-sm text-gray-400">Loading jobs...</span>
                 </td>
               </tr>
             ) : sortedJobs.length === 0 ? (
               <tr>
-                <td colSpan={8} className="text-center py-16">
+                <td colSpan={9} className="text-center py-16">
 
                   <div className="text-gray-400">
                     {searchTerm || activeFilterCount > 0 || filterHighPriority ? (
@@ -911,16 +1050,26 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                 const classified = classifyJobType(j.job_title || '', j.job_type || j.opportunity_type || '');
                 const isMoving = movingJobId === j.id;
                 const directUrl = getDirectJobUrl(j);
+                const isSelected = selectedIds.has(j.id);
+                const blocked = !!j.is_blocked;
 
                 return (
                   <tr
                     key={j.id}
-                    className={`border-b transition-colors ${isMoving ? 'opacity-50' : ''} ${
+                    className={`border-b transition-colors ${isMoving ? 'opacity-50' : ''} ${blocked ? 'bg-gray-100 opacity-60' : isSelected ? 'bg-amber-50 hover:bg-amber-100/50' : (
                       subTab === 'open'
                         ? j.is_net_new ? 'bg-blue-50/30 hover:bg-blue-50/60' : idx % 2 === 0 ? 'bg-white hover:bg-gray-50' : 'bg-gray-50/30 hover:bg-gray-100/50'
                         : idx % 2 === 0 ? 'bg-white hover:bg-gray-50' : 'bg-gray-50/30 hover:bg-gray-100/50'
-                    }`}
+                    )}`}
                   >
+                    <td className="px-2 py-3 text-center">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggleSelect(j.id)}
+                        className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406] cursor-pointer"
+                      />
+                    </td>
                     <td className="px-4 py-3">
                       <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap ${categoryBadge(j.job_category)}`}>{j.job_category || '-'}</span>
                     </td>
@@ -984,27 +1133,36 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                     </td>
 
                     <td className="px-4 py-3 text-center">
-                      {subTab === 'open' ? (
+                      <div className="inline-flex items-center gap-1">
+                        {subTab === 'open' ? (
+                          <button
+                            onClick={() => handleMoveJob(j.id, true)}
+                            disabled={isMoving}
+                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md text-gray-500 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors"
+                            title="Close this job"
+                          >
+                            {isMoving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Archive className="w-3 h-3" />}
+                            Close
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => handleMoveJob(j.id, false)}
+                            disabled={isMoving}
+                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md text-gray-500 hover:text-green-700 hover:bg-green-50 border border-transparent hover:border-green-200 transition-colors"
+                            title="Reopen this job"
+                          >
+                            {isMoving ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
+                            Reopen
+                          </button>
+                        )}
                         <button
-                          onClick={() => handleMoveJob(j.id, true)}
-                          disabled={isMoving}
-                          className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md text-gray-500 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors"
-                          title="Close this job"
+                          onClick={() => handleToggleBlock(j.id, blocked)}
+                          className={`inline-flex items-center justify-center p-1 rounded ${blocked ? 'text-gray-600 hover:bg-gray-200' : 'text-red-600 hover:bg-red-50'}`}
+                          title={blocked ? 'Unblock (allow scraper to re-discover)' : 'Block from future scraper runs'}
                         >
-                          {isMoving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Archive className="w-3 h-3" />}
-                          Close
+                          {blocked ? <RotateCcw className="w-3.5 h-3.5" /> : <Ban className="w-3.5 h-3.5" />}
                         </button>
-                      ) : (
-                        <button
-                          onClick={() => handleMoveJob(j.id, false)}
-                          disabled={isMoving}
-                          className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md text-gray-500 hover:text-green-700 hover:bg-green-50 border border-transparent hover:border-green-200 transition-colors"
-                          title="Reopen this job"
-                        >
-                          {isMoving ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
-                          Reopen
-                        </button>
-                      )}
+                      </div>
                     </td>
                   </tr>
                 );

@@ -8,7 +8,8 @@ import {
   Search, ExternalLink, Star, CheckCircle, XCircle, AlertTriangle, RefreshCw,
   Database, Shield, Phone, Send,
   Linkedin, Unlink, Upload, Trash2, Zap,
-  ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert, FileText, ArrowRightLeft
+  ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert, FileText, ArrowRightLeft,
+  Ban, RotateCcw, Eye, EyeOff
 } from 'lucide-react';
 
 import { supabase } from '@/lib/supabase';
@@ -62,6 +63,66 @@ const MarketingNewJobs: React.FC = () => {
   const [companySortDir, setCompanySortDir] = useState<'asc' | 'desc'>('desc');
   const [showAutoPrioritizeResults, setShowAutoPrioritizeResults] = useState(false);
   const [autoPrioritizeResults, setAutoPrioritizeResults] = useState<any>(null);
+
+  // Multi-select + blocking for companies. Selected ids drive the bulk
+  // action bar; blocked rows are hidden by default and excluded from
+  // future scraper runs (the scraper consults marketing_companies.is_blocked).
+  const [selectedCompanyIds, setSelectedCompanyIds] = useState<Set<string>>(new Set());
+  const [showBlockedCompanies, setShowBlockedCompanies] = useState(false);
+
+  const toggleCompanySelect = (id: string) => {
+    setSelectedCompanyIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const clearCompanySelection = () => setSelectedCompanyIds(new Set());
+
+  const handleToggleCompanyBlock = async (id: string, currentlyBlocked: boolean) => {
+    try {
+      const { error } = await supabase.from('marketing_companies')
+        .update({ is_blocked: !currentlyBlocked, updated_at: new Date().toISOString() })
+        .eq('id', id);
+      if (error) throw error;
+      toast({ title: currentlyBlocked ? 'Company unblocked' : 'Company blocked from future runs' });
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Error updating block flag', description: err.message, variant: 'destructive' });
+    }
+  };
+
+  const handleBulkCompanyBlock = async (block: boolean) => {
+    if (selectedCompanyIds.size === 0) return;
+    const ids = Array.from(selectedCompanyIds);
+    try {
+      const { error } = await supabase.from('marketing_companies')
+        .update({ is_blocked: block, updated_at: new Date().toISOString() })
+        .in('id', ids);
+      if (error) throw error;
+      toast({ title: block ? `${ids.length} company(s) blocked` : `${ids.length} company(s) unblocked` });
+      clearCompanySelection();
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Error updating companies', description: err.message, variant: 'destructive' });
+    }
+  };
+
+  const handleBulkCompanyDelete = async () => {
+    if (selectedCompanyIds.size === 0) return;
+    if (!confirm(`Delete ${selectedCompanyIds.size} selected company(s) and their associated jobs? This cannot be undone.`)) return;
+    const ids = Array.from(selectedCompanyIds);
+    try {
+      const { error } = await supabase.from('marketing_companies').delete().in('id', ids);
+      if (error) throw error;
+      toast({ title: `${ids.length} company(s) deleted` });
+      clearCompanySelection();
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Error deleting companies', description: err.message, variant: 'destructive' });
+    }
+  };
 
 
   const contactSources = ['All', 'Crelate ATS', 'AI Intelligence Engine', 'AI Second-Pass Sweep', 'Manual'];
@@ -254,6 +315,8 @@ const MarketingNewJobs: React.FC = () => {
   const filteredCompanies = useMemo(() => {
     return companies
       .filter(c => {
+        // Hide blocked companies unless the user opts in via the toggle.
+        if (!showBlockedCompanies && c.is_blocked) return false;
         if (filterHighPriorityCompanies && !c.is_high_priority) return false;
         if (!searchCompanies) return true;
         const s = searchCompanies.toLowerCase();
@@ -277,7 +340,7 @@ const MarketingNewJobs: React.FC = () => {
         const cmp = aVal.toString().localeCompare(bVal.toString());
         return companySortDir === 'asc' ? cmp : -cmp;
       });
-  }, [companies, searchCompanies, filterHighPriorityCompanies, companySortField, companySortDir]);
+  }, [companies, searchCompanies, filterHighPriorityCompanies, showBlockedCompanies, companySortField, companySortDir]);
 
   const highPriorityCompanyCount = useMemo(() => companies.filter(c => c.is_high_priority).length, [companies]);
 
@@ -573,7 +636,26 @@ const MarketingNewJobs: React.FC = () => {
                   </span>
                 </button>
 
-                <span className="text-sm text-gray-500">{filteredCompanies.length} of {companies.length} companies</span>
+                <span className="text-sm text-gray-500">
+                  {filteredCompanies.length} of {companies.length} companies
+                  {(() => {
+                    const hidden = companies.filter(c => c.is_blocked).length;
+                    return hidden > 0 && !showBlockedCompanies ? (
+                      <span className="text-gray-400"> ({hidden} blocked hidden)</span>
+                    ) : null;
+                  })()}
+                </span>
+
+                {/* Show / Hide Blocked toggle */}
+                <button
+                  type="button"
+                  onClick={() => setShowBlockedCompanies(s => !s)}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded border border-gray-200 hover:bg-gray-50 text-gray-600"
+                  title={showBlockedCompanies ? 'Hide blocked companies' : 'Show blocked companies'}
+                >
+                  {showBlockedCompanies ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  {showBlockedCompanies ? 'Hide blocked' : 'Show blocked'}
+                </button>
 
                 {/* Auto-Prioritize Button */}
                 <Button
@@ -593,11 +675,66 @@ const MarketingNewJobs: React.FC = () => {
                 </Button>
               </div>
 
+              {/* Bulk action bar - visible only when 1+ rows selected */}
+              {selectedCompanyIds.size > 0 && (
+                <div className="px-4 py-2 border-b bg-amber-50 border-amber-200 flex items-center gap-2">
+                  <span className="text-sm font-medium text-amber-900">
+                    {selectedCompanyIds.size} selected
+                  </span>
+                  <div className="ml-auto flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleBulkCompanyBlock(true)}
+                      className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-red-200 bg-white hover:bg-red-50 text-red-700"
+                      title="Block selected from future scraper runs"
+                    >
+                      <Ban className="w-3.5 h-3.5" /> Block
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleBulkCompanyBlock(false)}
+                      className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-gray-200 bg-white hover:bg-gray-50 text-gray-700"
+                      title="Unblock selected"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" /> Unblock
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleBulkCompanyDelete}
+                      className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-red-200 bg-white hover:bg-red-50 text-red-700"
+                      title="Delete selected permanently"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Delete
+                    </button>
+                    <button
+                      type="button"
+                      onClick={clearCompanySelection}
+                      className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded text-gray-500 hover:bg-amber-100"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Table */}
               <div className="flex-1 overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 border-b sticky top-0 z-10">
                     <tr>
+                      <th className="text-center px-2 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[36px]">
+                        <input
+                          type="checkbox"
+                          checked={filteredCompanies.length > 0 && filteredCompanies.every(c => selectedCompanyIds.has(c.id))}
+                          onChange={() => {
+                            const allSelected = filteredCompanies.length > 0 && filteredCompanies.every(c => selectedCompanyIds.has(c.id));
+                            if (allSelected) setSelectedCompanyIds(new Set());
+                            else setSelectedCompanyIds(new Set(filteredCompanies.map(c => c.id)));
+                          }}
+                          className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406] cursor-pointer"
+                          title="Select / deselect all visible"
+                        />
+                      </th>
                       <th className="text-left px-4 py-3 font-medium text-gray-600">
                         <button onClick={() => handleCompanySort('company_name')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors text-xs uppercase tracking-wider font-semibold">
                           Company <CompanySortIcon field="company_name" />
@@ -629,16 +766,17 @@ const MarketingNewJobs: React.FC = () => {
                           MD/CMO <CompanySortIcon field="has_md_cmo" />
                         </button>
                       </th>
+                      <th className="text-center px-4 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[80px]">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {loading ? (
-                      <tr><td colSpan={7} className="text-center py-16">
+                      <tr><td colSpan={9} className="text-center py-16">
                         <Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400 mb-2" />
                         <span className="text-sm text-gray-400">Loading companies...</span>
                       </td></tr>
                     ) : filteredCompanies.length === 0 ? (
-                      <tr><td colSpan={7} className="text-center py-16">
+                      <tr><td colSpan={9} className="text-center py-16">
                         <div className="text-gray-400">
                           {searchCompanies || filterHighPriorityCompanies ? (
                             <>
@@ -653,16 +791,26 @@ const MarketingNewJobs: React.FC = () => {
                       </td></tr>
                     ) : filteredCompanies.map((c, idx) => {
                       const hasOpenRoles = (c.open_roles_count || 0) > 0;
-                      const hasVerifiedCareers = c.careers_url && 
-                        c.careers_url.startsWith('http') && 
+                      const hasVerifiedCareers = c.careers_url &&
+                        c.careers_url.startsWith('http') &&
                         !c.careers_url.includes('google.com/search') &&
                         !c.careers_url.includes('indeed.com/jobs') &&
                         !c.careers_url.includes('linkedin.com/jobs') &&
                         !c.careers_url.includes('?q=') &&
                         !c.careers_url.includes('&keywords=');
+                      const isSelected = selectedCompanyIds.has(c.id);
+                      const blocked = !!c.is_blocked;
 
                       return (
-                        <tr key={c.id} className={`border-b transition-colors ${c.is_high_priority ? 'bg-amber-50/50 hover:bg-amber-100/50' : !hasOpenRoles ? 'opacity-60 hover:bg-gray-50' : idx % 2 === 0 ? 'bg-white hover:bg-gray-50' : 'bg-gray-50/30 hover:bg-gray-100/50'}`}>
+                        <tr key={c.id} className={`border-b transition-colors ${blocked ? 'bg-gray-100 opacity-60' : isSelected ? 'bg-amber-50 hover:bg-amber-100/50' : (c.is_high_priority ? 'bg-amber-50/50 hover:bg-amber-100/50' : !hasOpenRoles ? 'opacity-60 hover:bg-gray-50' : idx % 2 === 0 ? 'bg-white hover:bg-gray-50' : 'bg-gray-50/30 hover:bg-gray-100/50')}`}>
+                          <td className="px-2 py-3 text-center">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleCompanySelect(c.id)}
+                              className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406] cursor-pointer"
+                            />
+                          </td>
                           <td className="px-4 py-3">
                             <div className="font-medium text-gray-900">{c.company_name}</div>
                           </td>
@@ -733,6 +881,15 @@ const MarketingNewJobs: React.FC = () => {
                           </td>
                           <td className="text-center px-4 py-3">
                             {c.has_md_cmo ? <CheckCircle className="w-4 h-4 text-green-600 mx-auto" /> : <span className="text-gray-300">-</span>}
+                          </td>
+                          <td className="text-center px-4 py-3">
+                            <button
+                              onClick={() => handleToggleCompanyBlock(c.id, blocked)}
+                              className={`inline-flex items-center justify-center p-1.5 rounded ${blocked ? 'text-gray-600 hover:bg-gray-200' : 'text-red-600 hover:bg-red-50'}`}
+                              title={blocked ? 'Unblock (allow scraper to discover jobs at this company)' : 'Block from future scraper runs'}
+                            >
+                              {blocked ? <RotateCcw className="w-4 h-4" /> : <Ban className="w-4 h-4" />}
+                            </button>
                           </td>
                         </tr>
                       );
