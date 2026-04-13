@@ -253,6 +253,27 @@ async function searchSerpApiForCompany(company: string, roleHints: string[]): Pr
   } catch (e: any) { return { company, searchSuccess: false, jobsFound: [], error: e.message }; }
 }
 
+// Broad Google Jobs query — used for "vacuum" mode to catch jobs at
+// companies not yet in our DB. Doesn't quote the query as a company name;
+// caller is responsible for quoting if they want exact-phrase matching.
+async function searchSerpApiBroad(query: string): Promise<CompanySearchResult> {
+  const serpKey = Deno.env.get("SERP_API_KEY");
+  if (!serpKey) return { company: '(broad)', searchSuccess: false, jobsFound: [], error: 'no key' };
+  try {
+    const params = new URLSearchParams({ engine: 'google_jobs', q: query, api_key: serpKey, hl: 'en', gl: 'us' });
+    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 10000);
+    const resp = await fetch(`https://serpapi.com/search.json?${params}`, { signal: controller.signal, headers: { 'Accept': 'application/json' } });
+    clearTimeout(timeout);
+    if (!resp.ok) { const errText = await resp.text().catch(() => ''); return { company: '(broad)', searchSuccess: false, jobsFound: [], error: `HTTP ${resp.status}: ${errText.substring(0, 100)}` }; }
+    const data = await resp.json();
+    const jobs: SerpJobResult[] = (data.jobs_results || []).map((j: any) => ({
+      title: j.title || '', company_name: j.company_name || '', location: j.location || '', via: j.via || '',
+      extensions: j.extensions || [], apply_urls: (j.apply_options || []).map((ao: any) => ao.link).filter((u: string) => u?.startsWith('http')),
+    }));
+    return { company: '(broad)', searchSuccess: true, jobsFound: jobs };
+  } catch (e: any) { return { company: '(broad)', searchSuccess: false, jobsFound: [], error: e.message }; }
+}
+
 function fuzzyCompanyMatch(serpCompany: string, targetCompany: string): boolean {
   const s = serpCompany.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
   const t = targetCompany.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
@@ -478,244 +499,210 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
     const recSrc = allC.filter(c => (c.is_recurring_source || c.careers_url || c.job_board_url) && !c.is_blocked);
     log('loading', `${recSrc.length} recurring company career sources, ${blockedJobIds.size} jobs / ${blockedCompanyNames.size} companies blocked`);
 
-    // STEP 2: URL VALIDATION
-    if (action === 'full' || action === 'checker_only') {
-      const openJ = allJ.filter(j => !j.is_closed && j.status !== 'Closed' && !j.is_blocked);
-      telem.startStep('validating_urls', openJ.length);
-      await progress.startStep('validating_urls', `Validating ${openJ.length} open job URLs...`);
-      await progress.updateStep('validating_urls', { items_total: openJ.length, items_processed: 0 });
-      log('validating_urls', `${openJ.length} open jobs to validate`);
-      for (let i = 0; i < openJ.length; i += 20) {
-        const batch = openJ.slice(i, i + 20);
-        await progress.updateStep('validating_urls', { items_processed: i, sub_step: `Validating batch ${Math.floor(i/20)+1}/${Math.ceil(openJ.length/20)} (${Math.min(i+20, openJ.length)}/${openJ.length})...` });
-        const list = batch.map((j, x) => `${x+1}. "${j.job_title}" at "${j.company_name}" in ${j.city||'?'}, ${j.state||'?'}`).join('\n');
-        try {
-          const c = await aiCall(oa, `Healthcare job validation. For each job, is the company CURRENTLY hiring for this role?\nMark CLOSED only with strong evidence. Default to OPEN if uncertain.\nJobs:\n${list}\nReturn JSON: [{"index":1,"status":"OPEN"|"CLOSED","reason":"brief"}]\nOnly JSON.`, 3000, telem);
-          const res = parseArr(c);
-          for (const r of res) { const idx = (r.index||0)-1; if (idx < 0 || idx >= batch.length) continue; validated++; if (r.status === 'CLOSED') { closed++; await supabase.from('marketing_jobs').update({ is_closed: true, status: 'Closed', url_status: 'closed', url_check_result: r.reason||'Closed', closed_reason: r.reason, closed_at: new Date().toISOString(), last_url_check: new Date().toISOString() }).eq('id', batch[idx].id); } else { stillOpen++; await supabase.from('marketing_jobs').update({ url_status: 'active', url_check_result: 'Verified active', last_url_check: new Date().toISOString() }).eq('id', batch[idx].id); } }
-        } catch (e) { log('validating_urls', `Batch error: ${(e as Error).message}`); }
-      }
-      log('validating_urls', `Done: ${validated} checked, ${closed} closed, ${stillOpen} open`);
-      telem.endStep(validated, `${closed} closed, ${stillOpen} still open of ${validated} checked`);
-      await progress.completeStep('validating_urls', `${validated} checked, ${closed} closed, ${stillOpen} still open`);
-      await upd({ jobs_validated: validated, jobs_closed: closed, jobs_still_open: stillOpen });
-    } else { await progress.skipStep('validating_urls'); }
+    // STEP 2: URL VALIDATION — disabled in v76. v75 telemetry showed this
+    // step closed 0 of 76 jobs because the AI defaults OPEN when uncertain
+    // and has no way to actually reach the posting URL. A real fetch()-based
+    // URL checker is a future enhancement; for now we skip entirely so the
+    // run is ~30s faster and a few tokens cheaper.
+    log('validating_urls', 'skipped (v76: AI-based validation produced 0 closures, replace with fetch()-based checker later)');
+    await progress.skipStep('validating_urls');
 
-    // STEP 3: MULTI-PASS SEARCH
+    // STEP 3: DIRECT DISCOVERY VIA SERPAPI GOOGLE JOBS (v76 rewrite)
+    // Replaced the v75 multi-pass AI brainstorm — which produced 0 net-new
+    // jobs and burned $0.22/run rejecting AI hallucinations — with direct
+    // SerpAPI Google Jobs queries. Each priority + recurring company gets
+    // one search; each role keyword gets one broad search for "vacuum"
+    // coverage of companies not already in our DB. No separate verification
+    // step is needed because results are already verified by virtue of being
+    // currently indexed in Google Jobs.
     if (action === 'full' || action === 'scan_only') {
-      await progress.startStep('searching_sources', 'Beginning multi-pass search across job boards...');
-      log('searching_sources', 'Beginning multi-pass search');
-      const existing = Array.from(coMap.keys()).slice(0, 60).join(', ');
-      const allFound: any[] = [];
       const newCos: string[] = [];
-      // Drop any blocked company names from PRIORITY_ORGS so Pass 2 doesn't
-      // waste AI calls searching for jobs at companies the user excluded.
-      const effectivePriorityOrgs = PRIORITY_ORGS.filter(o => !blockedCompanyNames.has(o.toLowerCase().trim()));
-      const pass2Chunks = Math.ceil(effectivePriorityOrgs.length / 40);
-      const pass3Chunks = recSrc.length > 0 ? Math.ceil(recSrc.length / 40) : 0;
-      const totalPasses = 1 + pass2Chunks + pass3Chunks;
-      let passesCompleted = 0;
-
-      // PASS 1
-      telem.startStep('pass1_broad_search', 0);
-      await progress.updateStep('searching_sources', { items_total: totalPasses, items_processed: 0, sub_step: 'PASS 1: Broad job board search...' });
-      log('searching_sources', 'PASS 1: Broad job board search'); searchPasses++;
-      let p1Found = 0;
-      try {
-        const p1 = await aiCall(oa, `Healthcare recruiting intelligence. Search: ${JOB_BOARDS.join(', ')}\n\nFind ACTIVE postings for ONLY these roles:\n${effectiveRoles.map((r, i) => `${i+1}. ${r}`).join('\n')}\n\nTarget: Medicare Advantage, VBC, PACE, health plans, health systems, hospitals, FQHCs.\nALREADY IN DB: ${existing}\n\nCRITICAL: ONLY return jobs you have HIGH CONFIDENCE are CURRENTLY ACTIVE. Do NOT fabricate.\njob_posting_url: Leave EMPTY.\nMap job_category to: ${CATS.join(' | ')}\nMap job_title to: ${effectiveRoles.join(', ')}\n\nReturn JSON: {"jobs":[{"company":"","job_title":"","job_category":"","city":"","state":"","source_found":""}]}\nFind 40-60 jobs. ONLY valid JSON.`, 12000, telem);
-        const d = parseJson(p1); if (d.jobs) { allFound.push(...d.jobs); p1Found = d.jobs.length; log('searching_sources', `Pass 1: ${d.jobs.length} jobs`); }
-      } catch (e) { log('searching_sources', `Pass 1 error: ${(e as Error).message}`); }
-      telem.endStep(p1Found, `${JOB_BOARDS.length} job boards queried, ${p1Found} candidates returned`);
-      passesCompleted++;
-
-      // PASS 2
-      telem.startStep('pass2_priority_orgs', effectivePriorityOrgs.length);
-      log('searching_sources', `PASS 2: Targeted priority org search (${effectivePriorityOrgs.length} orgs after blocked-filter)`); searchPasses++;
-      let p2Found = 0;
-      for (let ci = 0; ci < effectivePriorityOrgs.length; ci += 40) {
-        const chunk = effectivePriorityOrgs.slice(ci, ci + 40);
-        await progress.updateStep('searching_sources', { items_processed: passesCompleted, sub_step: `PASS 2: Priority orgs chunk ${Math.floor(ci/40)+1}/${pass2Chunks}...` });
-        try {
-          const p2 = await aiCall(oa, `Search for CURRENT job openings at these healthcare organizations:\n${chunk.map((o,i)=>`${i+1}. ${o}`).join('\n')}\n\nRoles: ${effectiveRoles.join(', ')}\nALREADY FOUND: ${allFound.slice(-30).map(j=>`${j.company}-${j.job_title}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000, telem);
-          const d = parseJson(p2); if (d.jobs) { allFound.push(...d.jobs); p2Found += d.jobs.length; log('searching_sources', `Pass 2 chunk: ${d.jobs.length} jobs`); }
-        } catch (e) { log('searching_sources', `Pass 2 error: ${(e as Error).message}`); }
-        passesCompleted++;
-      }
-      telem.endStep(p2Found, `${effectivePriorityOrgs.length} orgs in ${pass2Chunks} chunks, ${p2Found} candidates returned`);
-
-      // PASS 3 - chunk through ALL recurring career sources (was previously
-      // capped at .slice(0, 50), which silently dropped any recurring source
-      // beyond the first 50). Mirrors Pass 2's chunked iteration.
-      if (recSrc.length > 0) {
-        telem.startStep('pass3_recurring_careers', recSrc.length);
-        log('searching_sources', `PASS 3: ${recSrc.length} recurring career pages (${pass3Chunks} chunks)`); searchPasses++;
-        let p3Found = 0;
-        for (let ci = 0; ci < recSrc.length; ci += 40) {
-          const chunk = recSrc.slice(ci, ci + 40);
-          await progress.updateStep('searching_sources', { items_processed: passesCompleted, sub_step: `PASS 3: Career pages chunk ${Math.floor(ci/40)+1}/${pass3Chunks}...` });
-          const srcList = chunk.map((s,i) => `${i+1}. ${s.company_name}${s.careers_url ? ` (${s.careers_url})` : ''}`).join('\n');
-          try {
-            const p3 = await aiCall(oa, `Check these employer career pages for openings:\n${srcList}\nRoles: ${effectiveRoles.join(', ')}\nALREADY FOUND: ${allFound.slice(-40).map(j=>`${j.company}-${j.job_title}-${j.city||''}`).join('; ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 8000, telem);
-            const d = parseJson(p3); if (d.jobs) { allFound.push(...d.jobs); p3Found += d.jobs.length; log('searching_sources', `Pass 3 chunk ${Math.floor(ci/40)+1}: ${d.jobs.length} jobs`); }
-          } catch (e) { log('searching_sources', `Pass 3 chunk error: ${(e as Error).message}`); }
-          passesCompleted++;
+      if (!serpKey) {
+        log('searching_sources', 'No SerpAPI key configured — discovery skipped (set SERP_API_KEY in Supabase Edge Function secrets)');
+        await progress.skipStep('searching_sources');
+        await progress.skipStep('verifying_new_jobs');
+        await progress.skipStep('deduplicating');
+      } else {
+        // Build unified target list: priority orgs ∪ recurring sources,
+        // deduped by lowercased name and blocked-filtered.
+        type SearchTarget = { name: string; source: 'priority' | 'recurring' };
+        const effectivePriorityOrgs = PRIORITY_ORGS.filter(o => !blockedCompanyNames.has(o.toLowerCase().trim()));
+        const targets: SearchTarget[] = [];
+        const seenLower = new Set<string>();
+        for (const name of effectivePriorityOrgs) {
+          const lower = name.toLowerCase().trim();
+          if (seenLower.has(lower)) continue;
+          seenLower.add(lower);
+          targets.push({ name, source: 'priority' });
         }
-        for (const s of recSrc) await supabase.from('marketing_companies').update({ last_searched_at: new Date().toISOString() }).eq('id', s.id);
-        telem.endStep(p3Found, `${recSrc.length} recurring sources in ${pass3Chunks} chunks, ${p3Found} candidates returned`);
-      }
+        for (const c of recSrc) {
+          const lower = (c.company_name || '').toLowerCase().trim();
+          if (!lower || seenLower.has(lower)) continue;
+          seenLower.add(lower);
+          targets.push({ name: c.company_name, source: 'recurring' });
+        }
 
-      log('searching_sources', `Total raw: ${allFound.length} jobs across ${searchPasses} passes`);
-      await progress.completeStep('searching_sources', `${allFound.length} raw jobs found across ${searchPasses} passes`);
-      await upd({ search_passes_completed: searchPasses, new_jobs_found: allFound.length });
+        const totalUnits = targets.length + effectiveRoles.length;
+        log('searching_sources', `DIRECT DISCOVERY: ${targets.length} companies + ${effectiveRoles.length} broad role searches = ${totalUnits} SerpAPI calls`);
+        await progress.startStep('searching_sources', `Querying ${totalUnits} sources via Google Jobs...`);
+        await progress.updateStep('searching_sources', { items_total: totalUnits, items_processed: 0 });
+        telem.startStep('discover_via_serpapi', totalUnits);
 
-      // STEP 4: VERIFY VIA SERPAPI (strict: only verified jobs pass)
-      const candidateJobs: any[] = [];
-      for (const j of allFound) {
-        if (!j.company || !j.job_title) continue;
-        // Skip any AI-found job whose company is blocked by the user.
-        if (blockedCompanyNames.has(j.company.toLowerCase().trim())) { dupes++; continue; }
-        let nt: string;
-        if (useDefaultMode) {
-          // Legacy clinical-roles path: normalize then strict-include.
-          nt = normalizeRole(j.job_title);
-          if (!ROLES.includes(nt)) continue;
-        } else {
-          // Custom job-titles path: keep the AI's raw title and accept any
-          // job whose title contains a selected type as a substring.
-          nt = j.job_title;
-          const titleLower = nt.toLowerCase();
-          const passes = effectiveRoles.some(r => {
-            const clean = _cleanRoleLabel(r);
-            return clean && titleLower.includes(clean);
+        const candidates: any[] = [];
+        const candidateKeys = new Set<string>();
+        let serpCalls = 0, serpErrors = 0, processed = 0;
+
+        // Reusable role-match check. Same dual-mode logic as the legacy
+        // candidate filter: strict normalizeRole+ROLES.includes in default
+        // mode; loose substring match against effectiveRoles in custom mode.
+        const titleMatches = (title: string): { passes: boolean; normalized: string } => {
+          if (useDefaultMode) {
+            const nt = normalizeRole(title);
+            return { passes: ROLES.includes(nt), normalized: nt };
+          }
+          const lower = title.toLowerCase();
+          const hit = effectiveRoles.find(r => {
+            const c = _cleanRoleLabel(r);
+            return c && lower.includes(c);
           });
-          if (!passes) continue;
-        }
-        const dk = `${j.company.toLowerCase().trim()}|${nt.toLowerCase().trim()}|${(j.city||'').toLowerCase().trim()}|${(j.state||'').toLowerCase().trim()}`;
-        if (jKeys.has(dk)) { dupes++; continue; }
-        candidateJobs.push({ ...j, _normalizedTitle: nt, _dedupKey: dk });
-      }
+          return { passes: !!hit, normalized: title };
+        };
 
-      log('verifying_new_jobs', `${candidateJobs.length} candidate jobs to verify (${dupes} pre-filtered as duplicates)`);
-      await progress.startStep('verifying_new_jobs', `Verifying ${candidateJobs.length} candidate jobs via SerpAPI Google Jobs (strict mode)...`);
+        const ingestSerpResult = (sj: SerpJobResult, defaultCompanyName: string, sourceLabel: string) => {
+          const title = (sj.title || '').trim();
+          const company = (sj.company_name || defaultCompanyName || '').trim();
+          if (!title || !company) return;
+          if (blockedCompanyNames.has(company.toLowerCase().trim())) return;
+          const m = titleMatches(title);
+          if (!m.passes) return;
+          const loc = (sj.location || '').trim();
+          const locParts = loc.split(',').map(s => s.trim());
+          const city = locParts[0] || '';
+          const state = locParts[1] || '';
+          const dk = `${company.toLowerCase().trim()}|${m.normalized.toLowerCase().trim()}|${city.toLowerCase()}|${state.toLowerCase()}`;
+          if (jKeys.has(dk) || candidateKeys.has(dk)) { dupes++; return; }
+          candidateKeys.add(dk);
+          const url = sj.apply_urls?.[0] || '';
+          candidates.push({
+            company,
+            job_title: title,
+            _normalizedTitle: m.normalized,
+            _dedupKey: dk,
+            city, state,
+            source_found: sj.via || `Google Jobs (${sourceLabel})`,
+            _verifiedUrl: url,
+            _verifyReason: `Direct from Google Jobs (via ${sj.via || sourceLabel})`,
+          });
+        };
 
-      telem.startStep('serpapi_verification', candidateJobs.length);
-      const verifyResult = await batchVerifyWithSerpApi(candidateJobs, log, progress);
-      jobsVerified = verifyResult.verified.length;
-      jobsRejected = verifyResult.rejected.length;
-      serpSearchCount = verifyResult.stats.serpSearches;
-      telem.recordSerpCalls(serpSearchCount);
-      telem.endStep(jobsVerified, `${candidateJobs.length} candidates → ${jobsVerified} verified, ${jobsRejected} rejected (${serpSearchCount} SerpAPI calls)`);
-
-      log('verifying_new_jobs', `Results: ${jobsVerified} VERIFIED (will be added), ${jobsRejected} REJECTED (will NOT be added). ${serpSearchCount} SerpAPI searches.`);
-      await progress.completeStep('verifying_new_jobs', `${jobsVerified} verified, ${jobsRejected} rejected. ${serpSearchCount} SerpAPI searches.`);
-      await upd({ jobs_verified: jobsVerified, jobs_rejected: jobsRejected });
-
-      // STEP 5: INSERT ONLY VERIFIED JOBS
-      const jobsToInsert = verifyResult.verified;
-      await progress.startStep('deduplicating', `Inserting ${jobsToInsert.length} verified jobs...`);
-      await progress.updateStep('deduplicating', { items_total: jobsToInsert.length, items_processed: 0 });
-      log('deduplicating', `Inserting ${jobsToInsert.length} verified jobs (${jobsRejected} rejected jobs will NOT be inserted)`);
-
-      let processed = 0;
-      for (const j of jobsToInsert) {
-        processed++;
-        const nt = j._normalizedTitle, dk = j._dedupKey;
-        if (jKeys.has(dk)) { dupes++; continue; }
-        jKeys.add(dk);
-        const cat = CATS.includes(j.job_category) ? j.job_category : catCo(j.company);
-
-        let co = coMap.get(j.company.toLowerCase().trim()); let cid = co?.id;
-        if (!cid) {
-          const { data: nc } = await supabase.from('marketing_companies').insert({ company_name: j.company, industry: cat, company_type: cat, website: '', status: 'New', source: 'AI Intelligence Engine', is_recurring_source: true, role_types_hired: nt, last_searched_at: new Date().toISOString() }).select('*').single();
-          if (nc) { cid = nc.id; coMap.set(j.company.toLowerCase().trim(), nc); coAdded++; newCos.push(j.company); log('deduplicating', `NEW COMPANY: ${j.company} (${cat})`); }
-        } else {
-          const u: any = { is_recurring_source: true };
-          if (co.role_types_hired && !co.role_types_hired.includes(nt)) u.role_types_hired = `${co.role_types_hired}, ${nt}`;
-          else if (!co.role_types_hired) u.role_types_hired = nt;
-          await supabase.from('marketing_companies').update(u).eq('id', cid);
-        }
-        if (!cid) continue;
-
-        const directUrl = j._verifiedUrl && isDirectJobUrl(j._verifiedUrl) ? j._verifiedUrl : null;
-        const { error } = await supabase.from('marketing_jobs').insert({
-          company_id: cid, company_name: j.company, job_title: nt, job_type: nt, job_category: cat,
-          city: j.city||'', state: j.state||'', location: j.city && j.state ? `${j.city}, ${j.state}` : '',
-          job_url: directUrl, indeed_url: buildIndeedUrl(nt, j.company, j.city, j.state),
-          linkedin_url: buildLinkedInUrl(nt, j.company), google_jobs_url: buildGoogleJobsUrl(nt, j.company, j.city, j.state),
-          opportunity_type: 'Business Development Opportunity', status: 'Open',
-          source: `${j.source_found||'AI'} - ${new Date().toISOString().split('T')[0]}`,
-          date_posted: new Date().toISOString(), is_net_new: true, tracker_run_id: rid,
-          url_status: 'live',
-          url_check_result: `[SerpAPI verified] ${j._verifyReason || 'Confirmed in Google Jobs'}`.substring(0, 500),
-          last_url_check: new Date().toISOString()
-        });
-        if (!error) { added++; roleB[nt] = (roleB[nt]||0)+1; }
-        if (processed % 10 === 0) await progress.updateStep('deduplicating', { items_processed: processed, sub_step: `Inserted ${added}/${jobsToInsert.length} verified jobs (${coAdded} new companies)...` });
-      }
-      log('deduplicating', `Added ${added} SerpAPI-verified jobs, ${coAdded} new companies. ${jobsRejected} jobs rejected.`);
-      await progress.completeStep('deduplicating', `${added} verified jobs added, ${coAdded} new companies`);
-      await upd({ new_jobs_added: added, duplicates_skipped: dupes, new_companies_added: coAdded, new_roles_by_type: roleB });
-
-      // PASS 4: New company search - also verify via SerpAPI
-      if (newCos.length > 0 && serpKey) {
-        telem.startStep('pass4_new_companies', newCos.length);
-        log('searching_sources', `PASS 4: Searching ${newCos.length} new companies for additional roles`); searchPasses++;
-        let p4SerpCalls = 0;
-        let p4Verified = 0;
-        try {
-          const p4 = await aiCall(oa, `Search these NEW companies for additional openings:\n${newCos.map((c,i)=>`${i+1}. ${c}`).join('\n')}\nRoles: ${effectiveRoles.join(', ')}\nCRITICAL: ONLY return jobs you are CONFIDENT are currently active.\nReturn JSON: {"jobs":[{"company":"","job_title":"","city":"","state":"","source_found":""}]}\nOnly JSON.`, 6000, telem);
-          const d = parseJson(p4);
-          const pass4Candidates: any[] = [];
-          for (const j of (d.jobs||[])) {
-            if (!j.company || !j.job_title) continue;
-            // Skip any AI-found job whose company is blocked by the user.
-            if (blockedCompanyNames.has(j.company.toLowerCase().trim())) { dupes++; continue; }
-            let nt: string;
-            if (useDefaultMode) {
-              nt = normalizeRole(j.job_title);
-              if (!ROLES.includes(nt)) continue;
-            } else {
-              nt = j.job_title;
-              const titleLower = nt.toLowerCase();
-              const passes = effectiveRoles.some(r => {
-                const clean = _cleanRoleLabel(r);
-                return clean && titleLower.includes(clean);
-              });
-              if (!passes) continue;
-            }
-            const dk = `${j.company.toLowerCase().trim()}|${nt.toLowerCase().trim()}|${(j.city||'').toLowerCase().trim()}|${(j.state||'').toLowerCase().trim()}`;
-            if (jKeys.has(dk)) { dupes++; continue; }
-            pass4Candidates.push({ ...j, _normalizedTitle: nt, _dedupKey: dk });
+        // Per-company queries — one SerpAPI call per priority/recurring company.
+        for (let i = 0; i < targets.length; i++) {
+          if (Date.now() - st > 12 * 60 * 1000) {
+            log('searching_sources', `Time budget exhausted after ${processed} queries (${candidates.length} candidates so far)`);
+            break;
           }
-          if (pass4Candidates.length > 0) {
-            log('searching_sources', `Pass 4: ${pass4Candidates.length} additional candidates, verifying via SerpAPI...`);
-            const pass4Verify = await batchVerifyWithSerpApi(pass4Candidates, log);
-            jobsVerified += pass4Verify.verified.length;
-            jobsRejected += pass4Verify.rejected.length;
-            serpSearchCount += pass4Verify.stats.serpSearches;
-            p4SerpCalls = pass4Verify.stats.serpSearches;
-            p4Verified = pass4Verify.verified.length;
-            telem.recordSerpCalls(pass4Verify.stats.serpSearches);
-            for (const j of pass4Verify.verified) {
-              if (jKeys.has(j._dedupKey)) { dupes++; continue; } jKeys.add(j._dedupKey);
-              const co = coMap.get(j.company.toLowerCase().trim()); if (!co?.id) continue;
-              const directUrl = j._verifiedUrl && isDirectJobUrl(j._verifiedUrl) ? j._verifiedUrl : null;
-              const { error } = await supabase.from('marketing_jobs').insert({
-                company_id: co.id, company_name: j.company, job_title: j._normalizedTitle, job_type: j._normalizedTitle, job_category: catCo(j.company),
-                city: j.city||'', state: j.state||'', location: j.city && j.state ? `${j.city}, ${j.state}` : '',
-                job_url: directUrl, indeed_url: buildIndeedUrl(j._normalizedTitle, j.company, j.city, j.state), linkedin_url: buildLinkedInUrl(j._normalizedTitle, j.company), google_jobs_url: buildGoogleJobsUrl(j._normalizedTitle, j.company, j.city, j.state),
-                opportunity_type: 'Business Development Opportunity', status: 'Open', source: `${j.source_found||'AI Pass 4'} - ${new Date().toISOString().split('T')[0]}`,
-                date_posted: new Date().toISOString(), is_net_new: true, tracker_run_id: rid, url_status: 'live', url_check_result: `[SerpAPI verified] ${j._verifyReason || 'Confirmed in Google Jobs'}`.substring(0, 500), last_url_check: new Date().toISOString()
-              });
-              if (!error) { added++; roleB[j._normalizedTitle] = (roleB[j._normalizedTitle]||0)+1; }
-            }
-            log('searching_sources', `Pass 4: ${pass4Verify.verified.length} verified and added, ${pass4Verify.rejected.length} rejected`);
+          const t = targets[i];
+          const r = await searchSerpApiForCompany(t.name, effectiveRoles);
+          serpCalls++;
+          if (!r.searchSuccess) {
+            serpErrors++;
+            log('searching_sources', `SerpAPI error for ${t.name}: ${r.error}`);
+          } else {
+            for (const sj of r.jobsFound) ingestSerpResult(sj, t.name, t.source);
           }
-        } catch (e) { log('searching_sources', `Pass 4 error: ${(e as Error).message}`); }
-        telem.endStep(p4Verified, `${newCos.length} new companies, ${p4Verified} verified-and-added (${p4SerpCalls} SerpAPI calls)`);
-        await upd({ new_jobs_added: added, search_passes_completed: searchPasses, new_roles_by_type: roleB, jobs_verified: jobsVerified, jobs_rejected: jobsRejected });
-      } else if (newCos.length > 0 && !serpKey) {
-        log('searching_sources', `PASS 4: Skipped - no SerpAPI key to verify additional jobs from ${newCos.length} new companies`);
+          processed++;
+          if (processed % 5 === 0 || processed === totalUnits) {
+            await progress.updateStep('searching_sources', { items_processed: processed, sub_step: `${processed}/${totalUnits} queries, ${candidates.length} matching jobs found` });
+          }
+          if (i < targets.length - 1) await new Promise(r2 => setTimeout(r2, 150));
+        }
+
+        // Broad per-role queries — vacuum coverage for jobs at companies
+        // not yet in our DB. One call per role keyword, ~10 results each.
+        for (const role of effectiveRoles) {
+          if (Date.now() - st > 12 * 60 * 1000) break;
+          const cleanRole = _cleanRoleLabel(role);
+          if (!cleanRole) { processed++; continue; }
+          const r = await searchSerpApiBroad(`"${cleanRole}" healthcare`);
+          serpCalls++;
+          if (!r.searchSuccess) {
+            serpErrors++;
+            log('searching_sources', `SerpAPI error for broad role "${role}": ${r.error}`);
+          } else {
+            for (const sj of r.jobsFound) ingestSerpResult(sj, '', `broad: ${role}`);
+          }
+          processed++;
+          await progress.updateStep('searching_sources', { items_processed: processed, sub_step: `${processed}/${totalUnits} queries, ${candidates.length} matching jobs found` });
+          await new Promise(r2 => setTimeout(r2, 150));
+        }
+
+        telem.recordSerpCalls(serpCalls);
+        telem.endStep(candidates.length, `${targets.length} companies + ${effectiveRoles.length} broad role searches → ${candidates.length} matching candidates (${serpErrors} SerpAPI errors)`);
+        log('searching_sources', `Discovery complete: ${candidates.length} candidates from ${serpCalls} SerpAPI calls (${serpErrors} errors)`);
+        searchPasses = 1;
+        await progress.completeStep('searching_sources', `${candidates.length} jobs discovered via Google Jobs (${serpCalls} queries)`);
+        await upd({ search_passes_completed: searchPasses, new_jobs_found: candidates.length });
+
+        // STEP 4: VERIFICATION — no longer a separate step. Results from
+        // Google Jobs are already current postings; the previous
+        // "verify candidates against SerpAPI" step is redundant.
+        await progress.skipStep('verifying_new_jobs');
+        jobsVerified = candidates.length;
+        jobsRejected = 0;
+        serpSearchCount = serpCalls;
+        await upd({ jobs_verified: jobsVerified, jobs_rejected: jobsRejected });
+
+        // STEP 5: INSERT discovered jobs
+        telem.startStep('insert_candidates', candidates.length);
+        await progress.startStep('deduplicating', `Inserting ${candidates.length} discovered jobs...`);
+        await progress.updateStep('deduplicating', { items_total: candidates.length, items_processed: 0 });
+        log('deduplicating', `Inserting ${candidates.length} discovered jobs from direct Google Jobs queries`);
+
+        let processedInsert = 0;
+        for (const j of candidates) {
+          processedInsert++;
+          const nt = j._normalizedTitle, dk = j._dedupKey;
+          if (jKeys.has(dk)) { dupes++; continue; }
+          jKeys.add(dk);
+          const cat = catCo(j.company);
+
+          let co = coMap.get(j.company.toLowerCase().trim());
+          let cid = co?.id;
+          if (!cid) {
+            const { data: nc } = await supabase.from('marketing_companies').insert({
+              company_name: j.company, industry: cat, company_type: cat, website: '', status: 'New',
+              source: 'Google Jobs Direct', is_recurring_source: true, role_types_hired: nt,
+              last_searched_at: new Date().toISOString()
+            }).select('*').single();
+            if (nc) { cid = nc.id; coMap.set(j.company.toLowerCase().trim(), nc); coAdded++; newCos.push(j.company); log('deduplicating', `NEW COMPANY: ${j.company} (${cat})`); }
+          } else {
+            const u: any = {};
+            if (co.role_types_hired && !co.role_types_hired.includes(nt)) u.role_types_hired = `${co.role_types_hired}, ${nt}`;
+            else if (!co.role_types_hired) u.role_types_hired = nt;
+            if (Object.keys(u).length > 0) await supabase.from('marketing_companies').update(u).eq('id', cid);
+          }
+          if (!cid) continue;
+
+          const directUrl = j._verifiedUrl && isDirectJobUrl(j._verifiedUrl) ? j._verifiedUrl : null;
+          const { error } = await supabase.from('marketing_jobs').insert({
+            company_id: cid, company_name: j.company, job_title: nt, job_type: nt, job_category: cat,
+            city: j.city || '', state: j.state || '', location: j.city && j.state ? `${j.city}, ${j.state}` : '',
+            job_url: directUrl, indeed_url: buildIndeedUrl(nt, j.company, j.city, j.state),
+            linkedin_url: buildLinkedInUrl(nt, j.company), google_jobs_url: buildGoogleJobsUrl(nt, j.company, j.city, j.state),
+            opportunity_type: 'Business Development Opportunity', status: 'Open',
+            source: `${j.source_found} - ${new Date().toISOString().split('T')[0]}`,
+            date_posted: new Date().toISOString(), is_net_new: true, tracker_run_id: rid,
+            url_status: 'live',
+            url_check_result: (j._verifyReason || '').substring(0, 500),
+            last_url_check: new Date().toISOString()
+          });
+          if (!error) { added++; roleB[nt] = (roleB[nt] || 0) + 1; }
+          if (processedInsert % 10 === 0) await progress.updateStep('deduplicating', { items_processed: processedInsert, sub_step: `Inserted ${added}/${candidates.length} jobs (${coAdded} new companies)` });
+        }
+        log('deduplicating', `Added ${added} jobs from direct Google Jobs discovery, ${coAdded} new companies`);
+        telem.endStep(added, `${candidates.length} candidates → ${added} jobs inserted, ${coAdded} new companies`);
+        await progress.completeStep('deduplicating', `${added} jobs added, ${coAdded} new companies`);
+        await upd({ new_jobs_added: added, duplicates_skipped: dupes, new_companies_added: coAdded, new_roles_by_type: roleB });
       }
 
       // STEP 6: CONTACTS (only for companies that have verified jobs)
