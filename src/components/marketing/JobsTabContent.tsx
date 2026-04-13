@@ -6,7 +6,8 @@ import {
   Search, ArrowUpDown, ArrowUp, ArrowDown, ExternalLink, MapPin,
   Download, Loader2, X, Archive, RotateCcw, Filter, ShieldCheck,
   CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Trash2,
-  Link2, Star, Zap, Building2, Briefcase, Ban, Eye, EyeOff, Pencil
+  Link2, Star, Zap, Building2, Briefcase, Ban, Eye, EyeOff, Pencil,
+  Calendar, FileText, Minus
 } from 'lucide-react';
 
 
@@ -22,7 +23,7 @@ interface JobsTabContentProps {
   onRefresh: () => void;
 }
 
-type SortField = 'job_category' | 'company_name' | 'job_title' | 'job_type' | 'location' | 'job_url' | 'high_priority';
+type SortField = 'job_category' | 'company_name' | 'job_title' | 'job_type' | 'location' | 'job_url' | 'high_priority' | 'date_posted' | 'has_description';
 
 type SortDir = 'asc' | 'desc';
 
@@ -188,6 +189,11 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
   const [editingJobTypeId, setEditingJobTypeId] = useState<string | null>(null);
   const JOB_TYPE_EDIT_OPTIONS = JOB_TYPE_OPTIONS.filter(o => o !== 'All');
 
+  // Per-job detail dialog. viewingJobId === id renders <JobDetailDialog>
+  // showing every field on the row including the full description text.
+  const [viewingJobId, setViewingJobId] = useState<string | null>(null);
+  const viewingJob = viewingJobId ? jobs.find(j => j.id === viewingJobId) : null;
+
 
   // Close filter dropdown when clicking outside
   React.useEffect(() => {
@@ -274,6 +280,20 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
         const aP = a.high_priority ? 1 : 0;
         const bP = b.high_priority ? 1 : 0;
         const cmp = aP - bP;
+        return sortDir === 'asc' ? cmp : -cmp;
+      }
+      // Boolean sort for "has description" (empty-or-null = false).
+      if (sortField === 'has_description') {
+        const aD = (a.description && String(a.description).trim().length > 0) ? 1 : 0;
+        const bD = (b.description && String(b.description).trim().length > 0) ? 1 : 0;
+        const cmp = aD - bD;
+        return sortDir === 'asc' ? cmp : -cmp;
+      }
+      // Numeric sort for date_posted (older first when asc).
+      if (sortField === 'date_posted') {
+        const aT = a.date_posted ? new Date(a.date_posted).getTime() : 0;
+        const bT = b.date_posted ? new Date(b.date_posted).getTime() : 0;
+        const cmp = aT - bT;
         return sortDir === 'asc' ? cmp : -cmp;
       }
 
@@ -1020,6 +1040,19 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
               <ColumnHeader field="job_category" label="Company Category" filterValue={filterCategory} filterOptions={CATEGORY_OPTIONS} onFilterChange={setFilterCategory} filterKey="category" />
               <ColumnHeader field="location" label="Location" filterValue={filterLocation} filterOptions={uniqueLocations} onFilterChange={setFilterLocation} filterKey="location" />
 
+              <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[110px]">
+                <button onClick={() => handleSort('date_posted')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
+                  Date Posted
+                  <SortIcon field="date_posted" />
+                </button>
+              </th>
+              <th className="text-center px-2 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[60px]" title="Job description scraped (Yes/No)">
+                <button onClick={() => handleSort('has_description')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
+                  Desc
+                  <SortIcon field="has_description" />
+                </button>
+              </th>
+
               <th className="text-center px-4 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[80px]">
                 <button
                   onClick={() => handleSort('high_priority')}
@@ -1037,14 +1070,14 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={9} className="text-center py-16">
+                <td colSpan={11} className="text-center py-16">
                   <Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400 mb-2" />
                   <span className="text-sm text-gray-400">Loading jobs...</span>
                 </td>
               </tr>
             ) : sortedJobs.length === 0 ? (
               <tr>
-                <td colSpan={9} className="text-center py-16">
+                <td colSpan={11} className="text-center py-16">
 
                   <div className="text-gray-400">
                     {searchTerm || activeFilterCount > 0 || filterHighPriority ? (
@@ -1130,6 +1163,24 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                         <span className="text-gray-300 text-xs">-</span>
                       )}
                     </td>
+                    {/* Date Posted */}
+                    <td className="px-3 py-3 text-gray-600 whitespace-nowrap">
+                      {j.date_posted ? (
+                        <span className="text-xs text-gray-700" title={new Date(j.date_posted).toLocaleString()}>
+                          {new Date(j.date_posted).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                        </span>
+                      ) : (
+                        <span className="text-gray-300 text-xs">—</span>
+                      )}
+                    </td>
+                    {/* Has Description */}
+                    <td className="px-2 py-3 text-center">
+                      {j.description && String(j.description).trim().length > 0 ? (
+                        <FileText className="w-4 h-4 text-emerald-600 inline-block" aria-label="Has description" />
+                      ) : (
+                        <Minus className="w-4 h-4 text-gray-300 inline-block" aria-label="No description" />
+                      )}
+                    </td>
                     {/* High Priority Star */}
                     <td className="px-4 py-3 text-center">
                       <button
@@ -1172,6 +1223,13 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
 
                     <td className="px-4 py-3 text-center">
                       <div className="inline-flex items-center gap-1">
+                        <button
+                          onClick={() => setViewingJobId(j.id)}
+                          className="inline-flex items-center justify-center p-1 rounded text-gray-500 hover:text-[#911406] hover:bg-red-50"
+                          title="View full job details"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                        </button>
                         {subTab === 'open' ? (
                           <button
                             onClick={() => handleMoveJob(j.id, true)}
@@ -1457,6 +1515,152 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
             <Button onClick={() => { setShowResultsDialog(false); setShowDetailedResults(false); }}>
               Done
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Per-job detail dialog (Eye icon in the Actions column opens this) */}
+      <Dialog open={!!viewingJobId} onOpenChange={(open) => { if (!open) setViewingJobId(null); }}>
+        <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col overflow-hidden">
+          <DialogHeader className="border-b pb-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <DialogTitle className="text-lg font-semibold text-gray-900 truncate">
+                  {viewingJob?.job_title || 'Job details'}
+                </DialogTitle>
+                <DialogDescription className="text-sm text-gray-600 mt-0.5 truncate">
+                  {viewingJob?.company_name || ''}
+                </DialogDescription>
+              </div>
+              {viewingJob && (
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {viewingJob.high_priority && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-medium">
+                      <Star className="w-3 h-3" fill="currentColor" /> Priority
+                    </span>
+                  )}
+                  {viewingJob.is_blocked && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-medium">
+                      <Ban className="w-3 h-3" /> Blocked
+                    </span>
+                  )}
+                  <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${isJobOpen(viewingJob) ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-700'}`}>
+                    {isJobOpen(viewingJob) ? 'Open' : 'Closed'}
+                  </span>
+                </div>
+              )}
+            </div>
+          </DialogHeader>
+
+          {viewingJob && (
+            <div className="flex-1 overflow-y-auto py-4 space-y-5">
+              {/* Key details grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-0.5">Job Type</div>
+                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${jobTypeBadgeColor(classifyJobType(viewingJob.job_title || '', viewingJob.job_type || viewingJob.opportunity_type || ''))}`}>
+                    {classifyJobType(viewingJob.job_title || '', viewingJob.job_type || viewingJob.opportunity_type || '')}
+                  </span>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-0.5">Company Category</div>
+                  <span className={`text-xs px-2 py-0.5 rounded-full ${categoryBadge(viewingJob.job_category)}`}>{viewingJob.job_category || '—'}</span>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-0.5">Location</div>
+                  <div className="text-gray-800">
+                    {viewingJob.city || viewingJob.state ? (
+                      <span className="flex items-center gap-1">
+                        <MapPin className="w-3 h-3 text-gray-400" />
+                        {viewingJob.city && viewingJob.state ? `${viewingJob.city}, ${viewingJob.state}` : viewingJob.state || viewingJob.city}
+                      </span>
+                    ) : <span className="text-gray-400">—</span>}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-0.5">Date Posted</div>
+                  <div className="text-gray-800 flex items-center gap-1">
+                    <Calendar className="w-3 h-3 text-gray-400" />
+                    {viewingJob.date_posted ? new Date(viewingJob.date_posted).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }) : <span className="text-gray-400">—</span>}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-0.5">Source</div>
+                  <div className="text-gray-700 text-xs truncate">{viewingJob.source || <span className="text-gray-400">—</span>}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-0.5">Last URL Check</div>
+                  <div className="text-gray-700 text-xs">{viewingJob.last_url_check ? new Date(viewingJob.last_url_check).toLocaleString() : <span className="text-gray-400">never</span>}</div>
+                </div>
+              </div>
+
+              {/* Job URLs */}
+              <div className="border-t pt-4">
+                <div className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-2">Job Posting Links</div>
+                <div className="flex flex-wrap gap-2">
+                  {getDirectJobUrl(viewingJob) && (
+                    <a href={getDirectJobUrl(viewingJob).startsWith('http') ? getDirectJobUrl(viewingJob) : `https://${getDirectJobUrl(viewingJob)}`} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200">
+                      <ExternalLink className="w-3 h-3" /> Direct posting
+                    </a>
+                  )}
+                  {viewingJob.indeed_url && (
+                    <a href={viewingJob.indeed_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200">
+                      <ExternalLink className="w-3 h-3" /> Indeed search
+                    </a>
+                  )}
+                  {viewingJob.linkedin_url && (
+                    <a href={viewingJob.linkedin_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-sky-50 text-sky-700 hover:bg-sky-100 border border-sky-200">
+                      <ExternalLink className="w-3 h-3" /> LinkedIn search
+                    </a>
+                  )}
+                  {viewingJob.google_jobs_url && (
+                    <a href={viewingJob.google_jobs_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200">
+                      <ExternalLink className="w-3 h-3" /> Google Jobs
+                    </a>
+                  )}
+                </div>
+                {viewingJob.url_check_result && (
+                  <p className="mt-2 text-[11px] text-gray-500 italic">{viewingJob.url_check_result}</p>
+                )}
+              </div>
+
+              {/* Description */}
+              <div className="border-t pt-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Description</div>
+                  {(!viewingJob.description || String(viewingJob.description).trim().length === 0) && (
+                    <span className="text-xs text-amber-600 italic">Not yet scraped — use "Scrape Descriptions" to fetch</span>
+                  )}
+                </div>
+                {viewingJob.description && String(viewingJob.description).trim().length > 0 ? (
+                  <div className="text-sm text-gray-800 whitespace-pre-wrap break-words bg-gray-50 border border-gray-200 rounded p-3 max-h-[300px] overflow-y-auto">
+                    {viewingJob.description}
+                  </div>
+                ) : (
+                  <div className="text-sm text-gray-400 italic">No description on file.</div>
+                )}
+              </div>
+
+              {/* Notes */}
+              {viewingJob.notes && (
+                <div className="border-t pt-4">
+                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-2">Notes</div>
+                  <div className="text-sm text-gray-800 whitespace-pre-wrap break-words bg-gray-50 border border-gray-200 rounded p-3">{viewingJob.notes}</div>
+                </div>
+              )}
+
+              {/* Footer metadata */}
+              <div className="border-t pt-3 text-[10px] text-gray-400 grid grid-cols-1 sm:grid-cols-2 gap-y-1 gap-x-4">
+                <div>Created: {viewingJob.created_at ? new Date(viewingJob.created_at).toLocaleString() : '—'}</div>
+                <div>Updated: {viewingJob.updated_at ? new Date(viewingJob.updated_at).toLocaleString() : '—'}</div>
+                <div className="font-mono truncate">id: {viewingJob.id}</div>
+                {viewingJob.tracker_run_id && <div className="font-mono truncate">run: {viewingJob.tracker_run_id}</div>}
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="border-t pt-3">
+            <Button variant="outline" onClick={() => setViewingJobId(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
