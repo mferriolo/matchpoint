@@ -14,8 +14,10 @@ const ROLES = ["Medical Director","Chief Medical Officer","Primary Care Physicia
 const JOB_BOARDS = ["Indeed","LinkedIn Jobs","ZipRecruiter","Google Jobs","Glassdoor","DocCafe","Health eCareers","PracticeLink","Monster","CareerBuilder","SimplyHired"];
 const PRIORITY_ORGS = ["Agilon Health","Oak Street Health","ChenMed","Iora Health","Aledade","Cityblock Health","Cano Health","Privia Health","Signify Health","Curana Health","VillageMD","Hopscotch Health","Cohere Health","CINQCARE","CenterWell","HarmonyCares","CareMax","P3 Health Partners","Wellvana","Bloom Healthcare","Pair Team","Firefly Health","Vera Whole Health","Everside Health","Marathon Health","Alignment Healthcare","Devoted Health","Clover Health","Bright Health","Carelon","Optum","UnitedHealth Group","InnovAge","Trinity Health PACE","myPlace Health","Element Care","Humana","CVS Health","Aetna","Elevance Health","Cigna","Molina Healthcare","Centene","SCAN Health Plan","Oscar Health","Point32Health","CommonSpirit Health","HCA Healthcare","Ascension","Providence","Trinity Health","Intermountain Health","Kaiser Permanente","Advocate Aurora Health","Atrium Health","Geisinger","Tenet Healthcare","Landmark Health","DispatchHealth","BrightSpring Health","Enhabit Home Health","Compassus","Main Street Health","Strive Health","Crossover Health","Pearl Health","Rush University System for Health","Evolent Health","Lumeris"];
 
-const STEP_WEIGHTS: Record<string, number> = { loading: 3, validating_urls: 15, searching_sources: 30, verifying_new_jobs: 22, deduplicating: 8, enriching_contacts: 10, updating_summaries: 6, generating_alerts: 3, completed: 3 };
-const STEP_ORDER = ['loading','validating_urls','searching_sources','verifying_new_jobs','deduplicating','enriching_contacts','updating_summaries','generating_alerts','completed'];
+// validating_urls and verifying_new_jobs removed in v78 — they were
+// no-ops after the v76 direct-SerpAPI rewrite.
+const STEP_WEIGHTS: Record<string, number> = { loading: 5, searching_sources: 50, deduplicating: 15, enriching_contacts: 15, updating_summaries: 8, generating_alerts: 4, completed: 3 };
+const STEP_ORDER = ['loading','searching_sources','deduplicating','enriching_contacts','updating_summaries','generating_alerts','completed'];
 
 function catCo(n: string): string {
   const l = n.toLowerCase();
@@ -501,13 +503,9 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
     const recSrc = allC.filter(c => (c.is_recurring_source || c.careers_url || c.job_board_url) && !c.is_blocked);
     log('loading', `${recSrc.length} recurring company career sources, ${blockedJobIds.size} jobs / ${blockedCompanyNames.size} companies blocked`);
 
-    // STEP 2: URL VALIDATION — disabled in v76. v75 telemetry showed this
-    // step closed 0 of 76 jobs because the AI defaults OPEN when uncertain
-    // and has no way to actually reach the posting URL. A real fetch()-based
-    // URL checker is a future enhancement; for now we skip entirely so the
-    // run is ~30s faster and a few tokens cheaper.
-    log('validating_urls', 'skipped (v76: AI-based validation produced 0 closures, replace with fetch()-based checker later)');
-    await progress.skipStep('validating_urls');
+    // (Former STEP 2: URL VALIDATION removed in v78 — v75 telemetry showed
+    // it was a no-op. A real fetch()-based URL checker can be added later
+    // as a separate step if needed.)
 
     // STEP 3: DIRECT DISCOVERY VIA SERPAPI GOOGLE JOBS (v76 rewrite)
     // Replaced the v75 multi-pass AI brainstorm — which produced 0 net-new
@@ -522,7 +520,6 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
       if (!serpKey) {
         log('searching_sources', 'No SerpAPI key configured — discovery skipped (set SERP_API_KEY in Supabase Edge Function secrets)');
         await progress.skipStep('searching_sources');
-        await progress.skipStep('verifying_new_jobs');
         await progress.skipStep('deduplicating');
       } else {
         // Build unified target list: priority orgs ∪ recurring sources,
@@ -645,10 +642,9 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         await progress.completeStep('searching_sources', `${candidates.length} jobs discovered via Google Jobs (${serpCalls} queries)`);
         await upd({ search_passes_completed: searchPasses, new_jobs_found: candidates.length });
 
-        // STEP 4: VERIFICATION — no longer a separate step. Results from
-        // Google Jobs are already current postings; the previous
-        // "verify candidates against SerpAPI" step is redundant.
-        await progress.skipStep('verifying_new_jobs');
+        // (Former STEP 4: VERIFICATION removed in v78 — results from
+        // Google Jobs are already current postings, no separate
+        // verification step needed. Stats are kept for back-compat.)
         jobsVerified = candidates.length;
         jobsRejected = 0;
         serpSearchCount = serpCalls;
@@ -743,8 +739,9 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
       await progress.completeStep('enriching_contacts', `${ctAdded} contacts added`);
       await upd({ contacts_added: ctAdded });
     } else {
-      await progress.skipStep('searching_sources'); await progress.skipStep('verifying_new_jobs');
-      await progress.skipStep('deduplicating'); await progress.skipStep('enriching_contacts');
+      await progress.skipStep('searching_sources');
+      await progress.skipStep('deduplicating');
+      await progress.skipStep('enriching_contacts');
     }
 
     // STEP 7: SUMMARIES

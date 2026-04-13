@@ -97,12 +97,11 @@ interface ProgressState {
 
 const WORKFLOW_STEPS = [
   { key: 'loading', label: 'Load Data', icon: Database, desc: 'Loading existing jobs, companies, and contacts from database' },
-  { key: 'validating_urls', label: 'Validate URLs', icon: Shield, desc: 'Checking if existing open jobs are still active' },
-  { key: 'searching_sources', label: 'Search Sources', icon: Globe, desc: 'Multi-pass search across job boards and career pages' },
-  { key: 'verifying_new_jobs', label: 'Verify Jobs', icon: ShieldCheck, desc: 'Verifying found jobs via SerpAPI Google Jobs - only verified jobs are added' },
-
-
-  { key: 'deduplicating', label: 'Insert Jobs', icon: RefreshCw, desc: 'Deduplicating and inserting verified jobs' },
+  // 'validating_urls' and 'verifying_new_jobs' removed in v78. v76 made
+  // them no-ops (URL validation was an AI no-op; verification is no
+  // longer needed since results come directly from Google Jobs).
+  { key: 'searching_sources', label: 'Search Sources', icon: Globe, desc: 'Direct Google Jobs queries per priority/recurring company plus broad role searches' },
+  { key: 'deduplicating', label: 'Insert Jobs', icon: RefreshCw, desc: 'Deduplicating and inserting discovered jobs' },
   { key: 'enriching_contacts', label: 'Enrich Contacts', icon: Users, desc: 'Finding hiring contacts for companies with open roles' },
   { key: 'updating_summaries', label: 'Update Counts', icon: BarChart3, desc: 'Updating company role counts and contact counts' },
   { key: 'generating_alerts', label: 'Auto-Prioritize', icon: Star, desc: 'Starring high-priority companies and their jobs' },
