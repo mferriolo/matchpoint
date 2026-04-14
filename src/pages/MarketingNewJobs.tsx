@@ -59,6 +59,11 @@ const MarketingNewJobs: React.FC = () => {
   // identifies which per-row spinner to show on the Companies tab.
   const [contactRun, setContactRun] = useState<any | null>(null);
   const [findingContactsForId, setFindingContactsForId] = useState<string | null>(null);
+  // Last completed run — kept around so the user can see results after
+  // the progress panel goes away. Auto-opens on completion; user can
+  // re-open via the "Last run details" button on the Contacts tab.
+  const [contactRunResult, setContactRunResult] = useState<any | null>(null);
+  const [showContactRunResult, setShowContactRunResult] = useState(false);
   const contactRunIsActive = !!contactRun && contactRun.status === 'running';
   const findingContactsAll = contactRunIsActive && contactRun?.mode === 'all';
 
@@ -157,10 +162,17 @@ const MarketingNewJobs: React.FC = () => {
               : `${data.target_company_name || 'Company'}: ${added} new contact${added === 1 ? '' : 's'}${skipped ? `, ${skipped} duplicates skipped` : ''}`,
           });
           setFindingContactsForId(null);
+          // Persist the final row so the dialog can show full details
+          // (per-source counts, per-company breakdown, errors) after the
+          // live progress panel disappears.
+          setContactRunResult(data);
+          setShowContactRunResult(true);
           loadData();
         } else if (data.status === 'failed') {
           toast({ title: 'Find Contacts failed', description: data.error_message || 'Unknown error', variant: 'destructive' });
           setFindingContactsForId(null);
+          setContactRunResult(data);
+          setShowContactRunResult(true);
         }
       } catch (e) {
         console.warn('contact_runs poll error:', e);
@@ -1229,6 +1241,17 @@ const MarketingNewJobs: React.FC = () => {
                     <><Users className="w-4 h-4 mr-2" /> Find Contacts</>
                   )}
                 </Button>
+                {contactRunResult && !contactRunIsActive && (
+                  <Button
+                    variant="outline"
+                    onClick={() => setShowContactRunResult(true)}
+                    className="text-gray-700"
+                    title="Show details from the last Find Contacts run"
+                  >
+                    <FileText className="w-4 h-4 mr-2" />
+                    Last run details
+                  </Button>
+                )}
                 <span className="text-sm text-gray-500">{filteredContacts.length} contacts</span>
               </div>
 
@@ -1490,6 +1513,183 @@ const MarketingNewJobs: React.FC = () => {
 
         </Tabs>
       </div>
+
+      {/* Find Contacts Results Dialog — shows the final breakdown for
+          the most recent completed (or failed) run. Auto-opens when a
+          run finishes; re-opens via the "Last run details" button. */}
+      {showContactRunResult && contactRunResult && (() => {
+        const r = contactRunResult;
+        const isAll = r.mode === 'all';
+        const succeeded = r.status === 'completed';
+        const per: any[] = Array.isArray(r.per_company) ? r.per_company : [];
+        const companiesWithAdds = per.filter(p => (p.ai_added + p.crelate_added + p.apollo_added + p.leadership_added) > 0);
+        const companiesWithErrors = per.filter(p => Array.isArray(p.errors) && p.errors.length > 0);
+        return (
+          <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => setShowContactRunResult(false)}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+              <div className="p-6 border-b">
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-full ${succeeded ? 'bg-emerald-100' : 'bg-red-100'} flex items-center justify-center`}>
+                    {succeeded
+                      ? <Users className="w-5 h-5 text-emerald-700" />
+                      : <AlertTriangle className="w-5 h-5 text-red-700" />}
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="text-lg font-bold text-gray-900">
+                      {succeeded ? 'Find Contacts complete' : 'Find Contacts failed'}
+                    </h3>
+                    <p className="text-sm text-gray-500">
+                      {isAll
+                        ? `${r.companies_processed || 0} of ${r.companies_total || 0} companies processed`
+                        : `Target: ${r.target_company_name || 'company'}`}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setShowContactRunResult(false)}
+                    className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-6 overflow-y-auto flex-1 space-y-4">
+                {/* Top-line counter */}
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4 text-center">
+                  <p className="text-4xl font-bold text-emerald-700 tabular-nums">{r.contacts_added || 0}</p>
+                  <p className="text-xs uppercase tracking-wider text-emerald-900/70 font-semibold mt-1">
+                    new contact{(r.contacts_added || 0) === 1 ? '' : 's'} added
+                  </p>
+                  {(r.duplicates_skipped || 0) > 0 && (
+                    <p className="text-xs text-emerald-900/60 mt-1">{r.duplicates_skipped} duplicate{r.duplicates_skipped === 1 ? '' : 's'} skipped</p>
+                  )}
+                </div>
+
+                {/* Per-source breakdown */}
+                <div>
+                  <h4 className="text-xs uppercase tracking-wider text-gray-500 font-semibold mb-2">By source</h4>
+                  <div className="grid grid-cols-5 gap-2">
+                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
+                      <p className="text-2xl font-bold text-slate-800 tabular-nums">{r.leadership_added || 0}</p>
+                      <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mt-0.5">Leadership</p>
+                    </div>
+                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
+                      <p className="text-2xl font-bold text-slate-800 tabular-nums">{r.apollo_added || 0}</p>
+                      <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mt-0.5">Apollo</p>
+                    </div>
+                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
+                      <p className="text-2xl font-bold text-slate-800 tabular-nums">{r.ai_added || 0}</p>
+                      <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mt-0.5">AI</p>
+                    </div>
+                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
+                      <p className="text-2xl font-bold text-slate-800 tabular-nums">{r.crelate_added || 0}</p>
+                      <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mt-0.5">Crelate</p>
+                    </div>
+                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
+                      <p className="text-2xl font-bold text-slate-800 tabular-nums">{r.emails_verified || 0}</p>
+                      <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mt-0.5">Hunter ✉️</p>
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-gray-500 mt-2">
+                    Hunter runs <em>after</em> the other sources and backfills verified emails onto contacts that came in with just a name.
+                  </p>
+                </div>
+
+                {/* Per-company detail. For mode=company there's just one. */}
+                {per.length > 0 && (
+                  <div>
+                    <h4 className="text-xs uppercase tracking-wider text-gray-500 font-semibold mb-2">
+                      Per company ({companiesWithAdds.length}/{per.length} produced contacts)
+                    </h4>
+                    <div className="border border-gray-200 rounded-lg overflow-hidden max-h-[260px] overflow-y-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 text-gray-500 uppercase tracking-wider text-[10px]">
+                          <tr>
+                            <th className="text-left px-3 py-2 font-semibold">Company</th>
+                            <th className="text-right px-2 py-2 font-semibold" title="Leadership page">Lead</th>
+                            <th className="text-right px-2 py-2 font-semibold">Apollo</th>
+                            <th className="text-right px-2 py-2 font-semibold">AI</th>
+                            <th className="text-right px-2 py-2 font-semibold">Crelate</th>
+                            <th className="text-right px-2 py-2 font-semibold" title="Hunter-verified emails">Email</th>
+                            <th className="text-right px-2 py-2 font-semibold" title="Duplicates skipped">Dup</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {per.map((p, i) => {
+                            const total = (p.ai_added || 0) + (p.crelate_added || 0) + (p.apollo_added || 0) + (p.leadership_added || 0);
+                            return (
+                              <tr key={i} className={`border-t border-gray-100 ${total === 0 ? 'text-gray-400' : 'text-gray-800'}`}>
+                                <td className="px-3 py-1.5 truncate max-w-[200px]" title={p.company}>{p.company}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums">{p.leadership_added || '—'}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums">{p.apollo_added || '—'}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums">{p.ai_added || '—'}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums">{p.crelate_added || '—'}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums">{p.emails_verified || '—'}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums text-gray-500">{p.duplicates_skipped || '—'}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Errors surfacing — e.g. Apollo 401 / credit exhaustion */}
+                {(companiesWithErrors.length > 0 || r.error_message) && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                    <h4 className="text-xs uppercase tracking-wider text-amber-800 font-semibold mb-2 flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5" /> Issues
+                    </h4>
+                    {r.error_message && (
+                      <p className="text-xs text-amber-900 font-mono bg-white/60 p-2 rounded mb-2">{r.error_message}</p>
+                    )}
+                    {companiesWithErrors.length > 0 && (
+                      <ul className="text-xs text-amber-900 space-y-1 max-h-[120px] overflow-y-auto">
+                        {companiesWithErrors.slice(0, 15).map((p, i) => (
+                          <li key={i}>
+                            <span className="font-medium">{p.company}:</span> {(p.errors as string[]).join(' · ')}
+                          </li>
+                        ))}
+                        {companiesWithErrors.length > 15 && (
+                          <li className="italic">…and {companiesWithErrors.length - 15} more</li>
+                        )}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="p-4 border-t bg-gray-50 flex items-center justify-between">
+                <p className="text-[11px] text-gray-500">
+                  {r.started_at && `Started ${new Date(r.started_at).toLocaleTimeString()}`}
+                  {r.completed_at && r.started_at && ` · duration ${Math.max(1, Math.round((new Date(r.completed_at).getTime() - new Date(r.started_at).getTime()) / 1000))}s`}
+                </p>
+                <div className="flex items-center gap-2">
+                  {!isAll && r.target_company_name && (
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setSearchContacts(r.target_company_name);
+                        setActiveTab('contacts');
+                        setShowContactRunResult(false);
+                      }}
+                    >
+                      View contacts at {r.target_company_name}
+                    </Button>
+                  )}
+                  <Button
+                    onClick={() => setShowContactRunResult(false)}
+                    className="bg-[#911406] hover:bg-[#7a1005] text-white"
+                  >
+                    Close
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Import Tool Dialog */}
       {showImportTool && (
