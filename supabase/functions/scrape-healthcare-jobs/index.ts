@@ -571,23 +571,23 @@ function matchJobInSerpResults(serpResults: CompanySearchResult, jobTitle: strin
   return { verified: false, bestUrl: '', reason: `Company has ${companyJobs.length} jobs in Google Jobs but no title match for "${jobTitle}"`, matchingJobs: 0 };
 }
 
-async function batchVerifyWithSerpApi(candidateJobs: any[], logFn: (step: string, msg: string) => void, progress?: ReturnType<typeof createProgressTracker>): Promise<{ verified: any[]; rejected: any[]; stats: { serpSearches: number; serpMatches: number; serpErrors: number } }> {
+async function batchVerifyWithSerpApi(foundJobs: any[], logFn: (step: string, msg: string) => void, progress?: ReturnType<typeof createProgressTracker>): Promise<{ verified: any[]; rejected: any[]; stats: { serpSearches: number; serpMatches: number; serpErrors: number } }> {
   const serpKey = Deno.env.get("SERP_API_KEY");
   const verified: any[] = [], rejected: any[] = [];
   const stats = { serpSearches: 0, serpMatches: 0, serpErrors: 0 };
 
   if (!serpKey) {
-    logFn('verifying_new_jobs', 'SerpAPI key not configured - cannot verify jobs. ALL candidate jobs will be REJECTED.');
-    for (const j of candidateJobs) {
+    logFn('verifying_new_jobs', 'SerpAPI key not configured - cannot verify jobs. ALL found jobs will be REJECTED.');
+    for (const j of foundJobs) {
       rejected.push({ ...j, _verifyReason: 'Rejected: SerpAPI key not configured, cannot verify job is active', _verifiedUrl: '' });
     }
     return { verified: [], rejected, stats };
   }
 
   const companyGroups = new Map<string, any[]>();
-  for (const j of candidateJobs) { const key = (j.company || '').toLowerCase().trim(); if (!companyGroups.has(key)) companyGroups.set(key, []); companyGroups.get(key)!.push(j); }
+  for (const j of foundJobs) { const key = (j.company || '').toLowerCase().trim(); if (!companyGroups.has(key)) companyGroups.set(key, []); companyGroups.get(key)!.push(j); }
   const uniqueCompanies = Array.from(companyGroups.keys());
-  logFn('verifying_new_jobs', `Grouped ${candidateJobs.length} jobs into ${uniqueCompanies.length} unique companies for SerpAPI verification (strict mode: only verified jobs will be added)`);
+  logFn('verifying_new_jobs', `Grouped ${foundJobs.length} jobs into ${uniqueCompanies.length} unique companies for SerpAPI verification (strict mode: only verified jobs will be added)`);
   if (progress) await progress.updateStep('verifying_new_jobs', { items_total: uniqueCompanies.length, items_processed: 0, sub_step: `Searching ${uniqueCompanies.length} companies via SerpAPI Google Jobs...` });
 
   let companiesProcessed = 0, totalVerified = 0, totalRejected = 0;
@@ -764,7 +764,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
     const coMap = new Map(allC.map(c => [(c.company_name||'').toLowerCase().trim(), c]));
     const ctKeys = new Set(allT.map(c => `${(c.first_name||'').toLowerCase().trim()}|${(c.last_name||'').toLowerCase().trim()}|${(c.company_name||'').toLowerCase().trim()}`));
     // Blocked items the user has explicitly excluded from future scraping.
-    // Used to skip URL revalidation, drop AI-found candidates whose company
+    // Used to skip URL revalidation, drop AI-found jobs whose company
     // is blocked, and prune blocked companies from Pass 2 / Pass 3.
     const blockedJobIds = new Set(allJ.filter(j => j.is_blocked).map(j => j.id));
     const blockedCompanyNames = new Set(allC.filter(c => c.is_blocked).map(c => (c.company_name||'').toLowerCase().trim()));
@@ -815,12 +815,12 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         await progress.updateStep('searching_sources', { items_total: totalUnits, items_processed: 0 });
         // discover_via_serpapi telemetry step is started below, after Phase A.
 
-        const candidates: any[] = [];
-        const candidateKeys = new Set<string>();
+        const foundJobs: any[] = [];
+        const foundJobKeys = new Set<string>();
         let serpCalls = 0, serpErrors = 0, processed = 0;
 
         // Reusable role-match check. Same dual-mode logic as the legacy
-        // candidate filter: strict normalizeRole+ROLES.includes in default
+        // filter: strict normalizeRole+ROLES.includes in default
         // mode; loose substring match against effectiveRoles in custom mode.
         const titleMatches = (title: string): { passes: boolean; normalized: string } => {
           if (useDefaultMode) {
@@ -847,10 +847,10 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           const city = locParts[0] || '';
           const state = locParts[1] || '';
           const dk = `${company.toLowerCase().trim()}|${m.normalized.toLowerCase().trim()}|${city.toLowerCase()}|${state.toLowerCase()}`;
-          if (jKeys.has(dk) || candidateKeys.has(dk)) { dupes++; return; }
-          candidateKeys.add(dk);
+          if (jKeys.has(dk) || foundJobKeys.has(dk)) { dupes++; return; }
+          foundJobKeys.add(dk);
           const url = sj.apply_urls?.[0] || '';
-          candidates.push({
+          foundJobs.push({
             company,
             job_title: title,
             _normalizedTitle: m.normalized,
@@ -865,7 +865,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         // ---------- Phase A: Direct career-page scraping (v80) ----------
         // For each target with a careers_url, fetch the page (or its ATS
         // JSON API) BEFORE running SerpAPI. Career-page jobs land in the
-        // candidate set first, so when SerpAPI later returns the same
+        // found-job set first, so when SerpAPI later returns the same
         // posting it gets deduped — keeping the canonical career-page URL
         // as the stored job_url instead of an aggregator URL.
         const targetsWithCareerUrl = targets
@@ -874,7 +874,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         if (targetsWithCareerUrl.length > 0) {
           telem.startStep('scrape_career_pages', targetsWithCareerUrl.length);
           log('searching_sources', `Phase A: scraping ${targetsWithCareerUrl.length} career pages directly`);
-          let cpFetched = 0, cpErrors = 0, cpJobsBefore = candidates.length;
+          let cpFetched = 0, cpErrors = 0, cpJobsBefore = foundJobs.length;
           const atsCounts: Record<string, number> = {};
           for (let i = 0; i < targetsWithCareerUrl.length; i++) {
             if (Date.now() - runStartMs > 25 * 60 * 1000) {
@@ -904,11 +904,11 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
               }
             }
             if ((i + 1) % 5 === 0 || i + 1 === targetsWithCareerUrl.length) {
-              await progress.updateStep('searching_sources', { sub_step: `Phase A: ${cpFetched}/${targetsWithCareerUrl.length} career pages, ${candidates.length} candidates so far` });
+              await progress.updateStep('searching_sources', { sub_step: `Phase A: ${cpFetched}/${targetsWithCareerUrl.length} career pages, ${foundJobs.length} found jobs so far` });
             }
             await new Promise(r2 => setTimeout(r2, 200));
           }
-          const cpJobsAdded = candidates.length - cpJobsBefore;
+          const cpJobsAdded = foundJobs.length - cpJobsBefore;
           const atsBreakdown = Object.entries(atsCounts).map(([k, v]) => `${k}:${v}`).join(' ');
           log('searching_sources', `Phase A complete: ${cpFetched} pages fetched, ${cpJobsAdded} matching jobs added [${atsBreakdown}], ${cpErrors} errors`);
           telem.endStep(cpJobsAdded, `${cpFetched} career pages fetched [${atsBreakdown}], ${cpJobsAdded} matching jobs added (${cpErrors} errors)`);
@@ -924,7 +924,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         const PHASE_B_CONCURRENCY = 5;
         for (let i = 0; i < targets.length; i += PHASE_B_CONCURRENCY) {
           if (Date.now() - runStartMs > 25 * 60 * 1000) {
-            log('searching_sources', `Time budget exhausted after ${processed} queries (${candidates.length} candidates so far)`);
+            log('searching_sources', `Time budget exhausted after ${processed} queries (${foundJobs.length} found jobs so far)`);
             break;
           }
           const batch = targets.slice(i, i + PHASE_B_CONCURRENCY);
@@ -939,7 +939,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             }
             processed++;
           }
-          await progress.updateStep('searching_sources', { items_processed: processed, sub_step: `${processed}/${totalUnits} queries, ${candidates.length} matching jobs found` });
+          await progress.updateStep('searching_sources', { items_processed: processed, sub_step: `${processed}/${totalUnits} queries, ${foundJobs.length} matching jobs found` });
           // Tiny pause between batches as a courtesy to SerpAPI.
           if (i + PHASE_B_CONCURRENCY < targets.length) await new Promise(r2 => setTimeout(r2, 100));
         }
@@ -959,12 +959,12 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             for (const sj of r.jobsFound) ingestSerpResult(sj, '', `broad: ${role}`);
           }
           processed++;
-          await progress.updateStep('searching_sources', { items_processed: processed, sub_step: `${processed}/${totalUnits} queries, ${candidates.length} matching jobs found` });
+          await progress.updateStep('searching_sources', { items_processed: processed, sub_step: `${processed}/${totalUnits} queries, ${foundJobs.length} matching jobs found` });
           await new Promise(r2 => setTimeout(r2, 150));
         }
 
         telem.recordSerpCalls(serpCalls);
-        telem.endStep(candidates.length, `${targets.length} companies + ${effectiveRoles.length} broad role searches → ${candidates.length} matching candidates (${serpErrors} SerpAPI errors)`);
+        telem.endStep(foundJobs.length, `${targets.length} companies + ${effectiveRoles.length} broad role searches → ${foundJobs.length} matching jobs found (${serpErrors} SerpAPI errors)`);
 
         // ---------- Phase D: Healthcare-specific board queries (v84) ----------
         // For each board domain in HEALTHCARE_BOARDS, run one SerpAPI Google
@@ -974,7 +974,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         if (HEALTHCARE_BOARDS.length > 0 && effectiveRoles.length > 0) {
           telem.startStep('discover_healthcare_boards', HEALTHCARE_BOARDS.length);
           log('searching_sources', `Phase D: ${HEALTHCARE_BOARDS.length} healthcare-specific boards via SerpAPI site: queries`);
-          const candBefore = candidates.length;
+          const foundJobsBefore = foundJobs.length;
           let dCalls = 0, dErrors = 0;
           const perBoardCounts: Record<string, number> = {};
           // Build one OR'd role clause used across all board queries
@@ -988,7 +988,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
                 log('searching_sources', `Phase D: time budget exhausted after ${dCalls} board queries`);
                 break;
               }
-              const before = candidates.length;
+              const before = foundJobs.length;
               const r = await searchSerpApiBroad(`(${roleClause}) site:${board}`);
               dCalls++;
               if (!r.searchSuccess) {
@@ -997,40 +997,40 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
               } else {
                 for (const sj of r.jobsFound) ingestSerpResult(sj, '', `board: ${board}`);
               }
-              perBoardCounts[board] = candidates.length - before;
+              perBoardCounts[board] = foundJobs.length - before;
               await new Promise(r2 => setTimeout(r2, 150));
             }
           }
-          const dAdded = candidates.length - candBefore;
+          const dAdded = foundJobs.length - foundJobsBefore;
           telem.recordSerpCalls(dCalls);
           serpCalls += dCalls;
           serpErrors += dErrors;
           const breakdown = Object.entries(perBoardCounts).filter(([,n]) => n > 0).map(([b,n]) => `${b.split('.')[0]}:${n}`).join(' ') || '(no matches)';
-          log('searching_sources', `Phase D complete: ${dAdded} candidates added from ${dCalls} board queries [${breakdown}], ${dErrors} errors`);
-          telem.endStep(dAdded, `${HEALTHCARE_BOARDS.length} boards × OR'd roles, ${dAdded} candidates added [${breakdown}], ${dErrors} errors`);
+          log('searching_sources', `Phase D complete: ${dAdded} found jobs added from ${dCalls} board queries [${breakdown}], ${dErrors} errors`);
+          telem.endStep(dAdded, `${HEALTHCARE_BOARDS.length} boards × OR'd roles, ${dAdded} found jobs added [${breakdown}], ${dErrors} errors`);
         }
 
-        log('searching_sources', `Discovery complete: ${candidates.length} candidates from ${serpCalls} SerpAPI calls (${serpErrors} errors)`);
+        log('searching_sources', `Discovery complete: ${foundJobs.length} found jobs from ${serpCalls} SerpAPI calls (${serpErrors} errors)`);
         searchPasses = 1;
-        await progress.completeStep('searching_sources', `${candidates.length} jobs discovered via Google Jobs + healthcare boards (${serpCalls} queries)`);
-        await upd({ search_passes_completed: searchPasses, new_jobs_found: candidates.length });
+        await progress.completeStep('searching_sources', `${foundJobs.length} jobs discovered via Google Jobs + healthcare boards (${serpCalls} queries)`);
+        await upd({ search_passes_completed: searchPasses, new_jobs_found: foundJobs.length });
 
         // (Former STEP 4: VERIFICATION removed in v78 — results from
         // Google Jobs are already current postings, no separate
         // verification step needed. Stats are kept for back-compat.)
-        jobsVerified = candidates.length;
+        jobsVerified = foundJobs.length;
         jobsRejected = 0;
         serpSearchCount = serpCalls;
         await upd({ jobs_verified: jobsVerified, jobs_rejected: jobsRejected });
 
         // STEP 5: INSERT discovered jobs
-        telem.startStep('insert_candidates', candidates.length);
-        await progress.startStep('deduplicating', `Inserting ${candidates.length} discovered jobs...`);
-        await progress.updateStep('deduplicating', { items_total: candidates.length, items_processed: 0 });
-        log('deduplicating', `Inserting ${candidates.length} discovered jobs from direct Google Jobs queries`);
+        telem.startStep('insert_found_jobs', foundJobs.length);
+        await progress.startStep('deduplicating', `Inserting ${foundJobs.length} discovered jobs...`);
+        await progress.updateStep('deduplicating', { items_total: foundJobs.length, items_processed: 0 });
+        log('deduplicating', `Inserting ${foundJobs.length} discovered jobs from direct Google Jobs queries`);
 
         let processedInsert = 0;
-        for (const j of candidates) {
+        for (const j of foundJobs) {
           processedInsert++;
           const nt = j._normalizedTitle, dk = j._dedupKey;
           if (jKeys.has(dk)) { dupes++; continue; }
@@ -1068,10 +1068,10 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             last_url_check: new Date().toISOString()
           });
           if (!error) { added++; roleB[nt] = (roleB[nt] || 0) + 1; }
-          if (processedInsert % 10 === 0) await progress.updateStep('deduplicating', { items_processed: processedInsert, sub_step: `Inserted ${added}/${candidates.length} jobs (${coAdded} new companies)` });
+          if (processedInsert % 10 === 0) await progress.updateStep('deduplicating', { items_processed: processedInsert, sub_step: `Inserted ${added}/${foundJobs.length} jobs (${coAdded} new companies)` });
         }
         log('deduplicating', `Added ${added} jobs from direct Google Jobs discovery, ${coAdded} new companies`);
-        telem.endStep(added, `${candidates.length} candidates → ${added} jobs inserted, ${coAdded} new companies`);
+        telem.endStep(added, `${foundJobs.length} found jobs → ${added} jobs inserted, ${coAdded} new companies`);
         await progress.completeStep('deduplicating', `${added} jobs added, ${coAdded} new companies`);
         await upd({ new_jobs_added: added, duplicates_skipped: dupes, new_companies_added: coAdded, new_roles_by_type: roleB });
       }
