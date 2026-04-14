@@ -961,7 +961,7 @@ const MarketingNewJobs: React.FC = () => {
                           MD/CMO <CompanySortIcon field="has_md_cmo" />
                         </button>
                       </th>
-                      <th className="text-center px-4 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[80px]">Actions</th>
+                      <th className="text-center px-4 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[140px]">Actions</th>
                     </tr>
                   </thead>
                   <tbody>

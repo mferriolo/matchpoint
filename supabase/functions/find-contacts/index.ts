@@ -199,10 +199,14 @@ async function searchApollo(co: { company_name: string; website?: string|null },
   // mixed_people/search supports either q_organization_names or
   // q_organization_domains. Domain matches are far more precise when we
   // have a website on file; fall back to name otherwise.
+  //
+  // per_page=5 keeps usage gentle on Apollo's free tier (60 credits/mo).
+  // Bump to 25 if you upgrade — most companies have only a handful of
+  // matching recruiting/CMO titles anyway, so 5 is usually enough.
   const domain = extractDomain(co.website);
   const body: Record<string, any> = {
     page: 1,
-    per_page: 25,
+    per_page: 5,
     person_titles: TARGET_TITLES,
   };
   if (domain) body.q_organization_domains = [domain];
