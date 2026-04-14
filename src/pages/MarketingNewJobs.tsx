@@ -60,6 +60,11 @@ const MarketingNewJobs: React.FC = () => {
   const [filterPhoneHomePresence, setFilterPhoneHomePresence] = useState<Set<string>>(new Set());
   const [filterPhoneCellPresence, setFilterPhoneCellPresence] = useState<Set<string>>(new Set());
   const [filterLinkedInPresence, setFilterLinkedInPresence] = useState<Set<string>>(new Set());
+  // Cross-phone filter: "has ANY phone populated" vs "has NO phones".
+  // Stored separately from the per-column filters so the user can mix them
+  // (e.g. "has any phone but no cell").
+  const [filterAnyPhonePresence, setFilterAnyPhonePresence] = useState<Set<string>>(new Set());
+  const [anyPhoneFilterOpen, setAnyPhoneFilterOpen] = useState(false);
 
   const handleContactSort = (f: ContactSortField) => {
     if (contactSortField === f) setContactSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -95,7 +100,26 @@ const MarketingNewJobs: React.FC = () => {
     const ids = Array.from(selectedContactIds);
     try {
       const { data, error } = await supabase.functions.invoke('enrich-contacts', { body: { contactIds: ids } });
-      if (error) throw error;
+      // supabase-js wraps 4xx/5xx responses in a FunctionsHttpError whose
+      // `context` is the raw Response. Unwrap it so the toast shows the
+      // actual error from the edge function, not just "non 2xx status".
+      if (error) {
+        let detail = error.message || 'Unknown error';
+        try {
+          const ctx: any = (error as any).context;
+          if (ctx && typeof ctx.text === 'function') {
+            const raw = await ctx.text();
+            try {
+              const parsed = JSON.parse(raw);
+              if (parsed?.error) detail = parsed.error;
+              else if (raw) detail = raw.slice(0, 500);
+            } catch {
+              if (raw) detail = raw.slice(0, 500);
+            }
+          }
+        } catch {}
+        throw new Error(detail);
+      }
       if (!data?.success || !data?.run_id) throw new Error(data?.error || 'No run id returned');
       setContactRun({
         id: data.run_id,
@@ -213,7 +237,18 @@ const MarketingNewJobs: React.FC = () => {
     try {
       const body = isAll ? { mode: 'all' } : { mode: 'company', companyId: opts.companyId };
       const { data, error } = await supabase.functions.invoke('find-contacts', { body });
-      if (error) throw error;
+      if (error) {
+        let detail = error.message || 'Unknown error';
+        try {
+          const ctx: any = (error as any).context;
+          if (ctx && typeof ctx.text === 'function') {
+            const raw = await ctx.text();
+            try { const parsed = JSON.parse(raw); if (parsed?.error) detail = parsed.error; else if (raw) detail = raw.slice(0, 500); }
+            catch { if (raw) detail = raw.slice(0, 500); }
+          }
+        } catch {}
+        throw new Error(detail);
+      }
       if (!data?.success || !data?.run_id) throw new Error(data?.error || 'No run id returned');
 
       // Seed the polled-row state so the progress UI shows up on the
@@ -657,6 +692,14 @@ const MarketingNewJobs: React.FC = () => {
       if (!presencePasses(c.phone_home, filterPhoneHomePresence)) return false;
       if (!presencePasses(c.phone_cell, filterPhoneCellPresence)) return false;
       if (!presencePasses(getLinkedin(c), filterLinkedInPresence)) return false;
+      // "Any phone" cross-column check: filter option labels map to
+      // presence semantics — Has data = any of the 3 phones populated,
+      // No data = all 3 empty.
+      if (filterAnyPhonePresence.size === 1) {
+        const anyPhone = (c.phone_work || c.phone_home || c.phone_cell || '').toString().trim();
+        if (filterAnyPhonePresence.has('Has data') && !anyPhone) return false;
+        if (filterAnyPhonePresence.has('No data') && anyPhone) return false;
+      }
       return true;
     });
 
@@ -686,7 +729,7 @@ const MarketingNewJobs: React.FC = () => {
       filterFirstName, filterLastName, filterContactCompany, filterContactTitle,
       filterContactSource, filterDateAdded, filterEmailPresence,
       filterPhoneWorkPresence, filterPhoneHomePresence, filterPhoneCellPresence,
-      filterLinkedInPresence]);
+      filterLinkedInPresence, filterAnyPhonePresence]);
 
   const openJobsCount = jobs.filter(j => !j.is_closed && j.status !== 'Closed').length;
   const closedJobsCount = jobs.filter(j => j.is_closed || j.status === 'Closed').length;
@@ -1426,6 +1469,79 @@ const MarketingNewJobs: React.FC = () => {
                   <Input placeholder="Search contacts by name, company, title, email..." value={searchContacts} onChange={e => setSearchContacts(e.target.value)} className="pl-9" />
                 </div>
                 {/* Source filter moved into the Source column header below. */}
+                {/* Cross-column filter: "Any Phone" — complements the per-
+                    phone filters in the column headers. Uses the same
+                    Has data / No data options as the per-column presence
+                    filters. */}
+                <Popover open={anyPhoneFilterOpen} onOpenChange={setAnyPhoneFilterOpen}>
+                  <PopoverTrigger asChild>
+                    <button
+                      className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-sm border transition-colors ${
+                        filterAnyPhonePresence.size > 0
+                          ? 'border-[#911406] text-[#911406] bg-red-50 font-medium'
+                          : 'border-gray-200 text-gray-700 hover:bg-gray-50'
+                      }`}
+                      title="Filter by whether the contact has ANY phone populated"
+                    >
+                      <Phone className="w-3.5 h-3.5" />
+                      Any Phone
+                      {filterAnyPhonePresence.size > 0 && (
+                        <span className="ml-0.5 text-[10px] font-semibold bg-[#911406] text-white px-1.5 py-0.5 rounded tabular-nums">
+                          {filterAnyPhonePresence.size}
+                        </span>
+                      )}
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    align="start"
+                    sideOffset={4}
+                    className="p-0 w-[240px] flex flex-col border-gray-200"
+                    onOpenAutoFocus={(e) => e.preventDefault()}
+                  >
+                    <div className="p-2 border-b border-gray-100">
+                      <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Filter by any phone</p>
+                      <p className="text-[11px] text-gray-500 mt-0.5">Checks Work OR Home OR Cell.</p>
+                    </div>
+                    <div className="py-1">
+                      {['Has data', 'No data'].map(opt => {
+                        const checked = filterAnyPhonePresence.has(opt);
+                        return (
+                          <label
+                            key={opt}
+                            className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors flex items-center gap-2 cursor-pointer ${checked ? 'bg-red-50/50 text-[#911406] font-medium' : 'text-gray-700'}`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => {
+                                const next = new Set(filterAnyPhonePresence);
+                                if (next.has(opt)) next.delete(opt); else next.add(opt);
+                                setFilterAnyPhonePresence(next);
+                              }}
+                              className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
+                            />
+                            <span>{opt === 'Has data' ? 'Has any phone' : 'Has no phones'}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <div className="border-t border-gray-100 px-3 py-2 flex items-center justify-between gap-2 bg-gray-50/50">
+                      <button
+                        onClick={() => setFilterAnyPhonePresence(new Set())}
+                        className="text-[11px] text-gray-600 hover:text-[#911406] font-medium disabled:opacity-40"
+                        disabled={filterAnyPhonePresence.size === 0}
+                      >
+                        Clear
+                      </button>
+                      <button
+                        onClick={() => setAnyPhoneFilterOpen(false)}
+                        className="text-[11px] text-white bg-[#911406] hover:bg-[#7a1005] px-2.5 py-1 rounded font-medium"
+                      >
+                        Done
+                      </button>
+                    </div>
+                  </PopoverContent>
+                </Popover>
                 <Button
                   onClick={() => handleFindContacts({ mode: 'all' })}
                   disabled={contactRunIsActive}
