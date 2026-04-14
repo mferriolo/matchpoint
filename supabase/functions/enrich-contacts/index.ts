@@ -305,7 +305,22 @@ Deno.serve(async (req) => {
     const apolloKey = Deno.env.get('APOLLO_API_KEY');
     const hunterKey = Deno.env.get('HUNTER_API_KEY');
     if (!apolloKey && !hunterKey) {
-      return new Response(JSON.stringify({ success: false, error: 'Neither APOLLO_API_KEY nor HUNTER_API_KEY is configured' }), {
+      // Report which other secrets we can see so the user can tell
+      // whether the edge-function env is loaded at all or specifically
+      // the Apollo/Hunter names are missing. Secret *presence* is
+      // reported, never values.
+      const seen = {
+        APOLLO_API_KEY: !!Deno.env.get('APOLLO_API_KEY'),
+        HUNTER_API_KEY: !!Deno.env.get('HUNTER_API_KEY'),
+        OPENAI_API_KEY: !!Deno.env.get('OPENAI_API_KEY'),
+        CRELATE_API_KEY: !!Deno.env.get('CRELATE_API_KEY'),
+        SERP_API_KEY: !!Deno.env.get('SERP_API_KEY'),
+        SUPABASE_URL: !!Deno.env.get('SUPABASE_URL'),
+      };
+      return new Response(JSON.stringify({
+        success: false,
+        error: `Neither APOLLO_API_KEY nor HUNTER_API_KEY is configured. Secrets this function can see: ${JSON.stringify(seen)}. If other keys show false too, the deploy didn't pick up the secrets — run "supabase functions deploy enrich-contacts" again. If only Apollo/Hunter show false, the secret names in the Supabase dashboard may be spelled differently (the function reads them as APOLLO_API_KEY and HUNTER_API_KEY).`,
+      }), {
         status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     }

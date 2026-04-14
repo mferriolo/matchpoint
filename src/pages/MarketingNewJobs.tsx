@@ -1468,80 +1468,9 @@ const MarketingNewJobs: React.FC = () => {
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                   <Input placeholder="Search contacts by name, company, title, email..." value={searchContacts} onChange={e => setSearchContacts(e.target.value)} className="pl-9" />
                 </div>
-                {/* Source filter moved into the Source column header below. */}
-                {/* Cross-column filter: "Any Phone" — complements the per-
-                    phone filters in the column headers. Uses the same
-                    Has data / No data options as the per-column presence
-                    filters. */}
-                <Popover open={anyPhoneFilterOpen} onOpenChange={setAnyPhoneFilterOpen}>
-                  <PopoverTrigger asChild>
-                    <button
-                      className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-sm border transition-colors ${
-                        filterAnyPhonePresence.size > 0
-                          ? 'border-[#911406] text-[#911406] bg-red-50 font-medium'
-                          : 'border-gray-200 text-gray-700 hover:bg-gray-50'
-                      }`}
-                      title="Filter by whether the contact has ANY phone populated"
-                    >
-                      <Phone className="w-3.5 h-3.5" />
-                      Any Phone
-                      {filterAnyPhonePresence.size > 0 && (
-                        <span className="ml-0.5 text-[10px] font-semibold bg-[#911406] text-white px-1.5 py-0.5 rounded tabular-nums">
-                          {filterAnyPhonePresence.size}
-                        </span>
-                      )}
-                    </button>
-                  </PopoverTrigger>
-                  <PopoverContent
-                    align="start"
-                    sideOffset={4}
-                    className="p-0 w-[240px] flex flex-col border-gray-200"
-                    onOpenAutoFocus={(e) => e.preventDefault()}
-                  >
-                    <div className="p-2 border-b border-gray-100">
-                      <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Filter by any phone</p>
-                      <p className="text-[11px] text-gray-500 mt-0.5">Checks Work OR Home OR Cell.</p>
-                    </div>
-                    <div className="py-1">
-                      {['Has data', 'No data'].map(opt => {
-                        const checked = filterAnyPhonePresence.has(opt);
-                        return (
-                          <label
-                            key={opt}
-                            className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors flex items-center gap-2 cursor-pointer ${checked ? 'bg-red-50/50 text-[#911406] font-medium' : 'text-gray-700'}`}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => {
-                                const next = new Set(filterAnyPhonePresence);
-                                if (next.has(opt)) next.delete(opt); else next.add(opt);
-                                setFilterAnyPhonePresence(next);
-                              }}
-                              className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
-                            />
-                            <span>{opt === 'Has data' ? 'Has any phone' : 'Has no phones'}</span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                    <div className="border-t border-gray-100 px-3 py-2 flex items-center justify-between gap-2 bg-gray-50/50">
-                      <button
-                        onClick={() => setFilterAnyPhonePresence(new Set())}
-                        className="text-[11px] text-gray-600 hover:text-[#911406] font-medium disabled:opacity-40"
-                        disabled={filterAnyPhonePresence.size === 0}
-                      >
-                        Clear
-                      </button>
-                      <button
-                        onClick={() => setAnyPhoneFilterOpen(false)}
-                        className="text-[11px] text-white bg-[#911406] hover:bg-[#7a1005] px-2.5 py-1 rounded font-medium"
-                      >
-                        Done
-                      </button>
-                    </div>
-                  </PopoverContent>
-                </Popover>
+                {/* Source filter moved into the Source column header below.
+                    Any Phone filter lives inside the Phone (Work) column
+                    header below — see the extraButton prop. */}
                 <Button
                   onClick={() => handleFindContacts({ mode: 'all' })}
                   disabled={contactRunIsActive}
@@ -1680,7 +1609,88 @@ const MarketingNewJobs: React.FC = () => {
                       <MultiSelectColumnHeader<ContactSortField> field="company_name" label="Company" filterValues={filterContactCompany} filterOptions={uniqueContactCompanies} onFilterChange={setFilterContactCompany} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
                       <MultiSelectColumnHeader<ContactSortField> field="title" label="Title" filterValues={filterContactTitle} filterOptions={uniqueContactTitles} onFilterChange={setFilterContactTitle} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
                       <MultiSelectColumnHeader<ContactSortField> field="email" label="Email" filterValues={filterEmailPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterEmailPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Email presence" />
-                      <MultiSelectColumnHeader<ContactSortField> field="phone_work" label="Phone (Work)" filterValues={filterPhoneWorkPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterPhoneWorkPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Work Phone presence" />
+                      <MultiSelectColumnHeader<ContactSortField>
+                        field="phone_work"
+                        label="Phone (Work)"
+                        filterValues={filterPhoneWorkPresence}
+                        filterOptions={PRESENCE_OPTIONS}
+                        onFilterChange={setFilterPhoneWorkPresence}
+                        sortField={contactSortField}
+                        sortDir={contactSortDir}
+                        onSort={handleContactSort}
+                        filterPanelLabel="Filter by Work Phone presence"
+                        extraButton={
+                          <Popover open={anyPhoneFilterOpen} onOpenChange={setAnyPhoneFilterOpen}>
+                            <PopoverTrigger asChild>
+                              <button
+                                className={`inline-flex items-center gap-0.5 text-[10px] uppercase tracking-wider font-semibold ml-1 px-1.5 py-0.5 rounded border transition-colors ${
+                                  filterAnyPhonePresence.size > 0
+                                    ? 'border-[#911406] text-[#911406] bg-red-50'
+                                    : 'border-gray-200 text-gray-500 hover:bg-gray-50'
+                                }`}
+                                title="Filter by whether the contact has ANY phone populated"
+                              >
+                                <Phone className="w-3 h-3" />
+                                Any
+                                {filterAnyPhonePresence.size > 0 && (
+                                  <span className="ml-0.5 text-[9px] font-bold bg-[#911406] text-white px-1 rounded tabular-nums">
+                                    {filterAnyPhonePresence.size}
+                                  </span>
+                                )}
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent
+                              align="start"
+                              sideOffset={4}
+                              className="p-0 w-[240px] flex flex-col border-gray-200"
+                              onOpenAutoFocus={(e) => e.preventDefault()}
+                            >
+                              <div className="p-2 border-b border-gray-100">
+                                <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Filter by any phone</p>
+                                <p className="text-[11px] text-gray-500 mt-0.5">Checks Work OR Home OR Cell.</p>
+                              </div>
+                              <div className="py-1">
+                                {['Has data', 'No data'].map(opt => {
+                                  const checked = filterAnyPhonePresence.has(opt);
+                                  return (
+                                    <label
+                                      key={opt}
+                                      className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors flex items-center gap-2 cursor-pointer ${checked ? 'bg-red-50/50 text-[#911406] font-medium' : 'text-gray-700'}`}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        onChange={() => {
+                                          const next = new Set(filterAnyPhonePresence);
+                                          if (next.has(opt)) next.delete(opt); else next.add(opt);
+                                          setFilterAnyPhonePresence(next);
+                                        }}
+                                        className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
+                                      />
+                                      <span>{opt === 'Has data' ? 'Has any phone' : 'Has no phones'}</span>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                              <div className="border-t border-gray-100 px-3 py-2 flex items-center justify-between gap-2 bg-gray-50/50">
+                                <button
+                                  onClick={() => setFilterAnyPhonePresence(new Set())}
+                                  className="text-[11px] text-gray-600 hover:text-[#911406] font-medium disabled:opacity-40"
+                                  disabled={filterAnyPhonePresence.size === 0}
+                                >
+                                  Clear
+                                </button>
+                                <button
+                                  onClick={() => setAnyPhoneFilterOpen(false)}
+                                  className="text-[11px] text-white bg-[#911406] hover:bg-[#7a1005] px-2.5 py-1 rounded font-medium"
+                                >
+                                  Done
+                                </button>
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+                        }
+                      />
                       <MultiSelectColumnHeader<ContactSortField> field="phone_home" label="Phone (Home)" filterValues={filterPhoneHomePresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterPhoneHomePresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Home Phone presence" />
                       <MultiSelectColumnHeader<ContactSortField> field="phone_cell" label="Phone (Cell)" filterValues={filterPhoneCellPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterPhoneCellPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Cell Phone presence" />
                       <MultiSelectColumnHeader<ContactSortField> field="source" label="Source" filterValues={filterContactSource} filterOptions={uniqueContactSourceValues} onFilterChange={setFilterContactSource} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
