@@ -2022,10 +2022,16 @@ const MarketingNewJobs: React.FC = () => {
       {showContactRunResult && contactRunResult && (() => {
         const r = contactRunResult;
         const isAll = r.mode === 'all';
+        const isEnrich = r.mode === 'enrich';
         const succeeded = r.status === 'completed';
         const per: any[] = Array.isArray(r.per_company) ? r.per_company : [];
         const companiesWithAdds = per.filter(p => (p.ai_added + p.crelate_added + p.apollo_added + p.leadership_added) > 0);
         const companiesWithErrors = per.filter(p => Array.isArray(p.errors) && p.errors.length > 0);
+        // Enrich-specific bookkeeping: a contact was enriched if at least
+        // one field was filled; otherwise we surface the per-contact
+        // skip_reason so the user knows why it was a no-op.
+        const enrichedCount = isEnrich ? per.filter(p => Array.isArray(p.fields_updated) && p.fields_updated.length > 0).length : 0;
+        const skippedContacts = isEnrich ? per.filter(p => !p.fields_updated || p.fields_updated.length === 0) : [];
         return (
           <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => setShowContactRunResult(false)}>
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
@@ -2038,12 +2044,16 @@ const MarketingNewJobs: React.FC = () => {
                   </div>
                   <div className="flex-1">
                     <h3 className="text-lg font-bold text-gray-900">
-                      {succeeded ? 'Find Contacts complete' : 'Find Contacts failed'}
+                      {succeeded
+                        ? (isEnrich ? 'Enrich complete' : 'Find Contacts complete')
+                        : (isEnrich ? 'Enrich failed' : 'Find Contacts failed')}
                     </h3>
                     <p className="text-sm text-gray-500">
-                      {isAll
-                        ? `${r.companies_processed || 0} of ${r.companies_total || 0} companies processed`
-                        : `Target: ${r.target_company_name || 'company'}`}
+                      {isEnrich
+                        ? `${r.companies_processed || 0} of ${r.companies_total || 0} contacts processed`
+                        : isAll
+                          ? `${r.companies_processed || 0} of ${r.companies_total || 0} companies processed`
+                          : `Target: ${r.target_company_name || 'company'}`}
                     </p>
                   </div>
                   <button
@@ -2058,11 +2068,20 @@ const MarketingNewJobs: React.FC = () => {
               <div className="p-6 overflow-y-auto flex-1 space-y-4">
                 {/* Top-line counter */}
                 <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4 text-center">
-                  <p className="text-4xl font-bold text-emerald-700 tabular-nums">{r.contacts_added || 0}</p>
-                  <p className="text-xs uppercase tracking-wider text-emerald-900/70 font-semibold mt-1">
-                    new contact{(r.contacts_added || 0) === 1 ? '' : 's'} added
+                  <p className="text-4xl font-bold text-emerald-700 tabular-nums">
+                    {isEnrich ? enrichedCount : (r.contacts_added || 0)}
                   </p>
-                  {(r.duplicates_skipped || 0) > 0 && (
+                  <p className="text-xs uppercase tracking-wider text-emerald-900/70 font-semibold mt-1">
+                    {isEnrich
+                      ? `contact${enrichedCount === 1 ? '' : 's'} enriched${r.companies_total ? ` of ${r.companies_total}` : ''}`
+                      : `new contact${(r.contacts_added || 0) === 1 ? '' : 's'} added`}
+                  </p>
+                  {isEnrich && enrichedCount === 0 && r.companies_total > 0 && (
+                    <p className="text-xs text-amber-700 mt-1 font-medium">
+                      No fields were filled — scroll down to see why per contact.
+                    </p>
+                  )}
+                  {!isEnrich && (r.duplicates_skipped || 0) > 0 && (
                     <p className="text-xs text-emerald-900/60 mt-1">{r.duplicates_skipped} duplicate{r.duplicates_skipped === 1 ? '' : 's'} skipped</p>
                   )}
                 </div>
@@ -2097,8 +2116,72 @@ const MarketingNewJobs: React.FC = () => {
                   </p>
                 </div>
 
-                {/* Per-company detail. For mode=company there's just one. */}
-                {per.length > 0 && (
+                {/* Per-row detail. For enrich: one row per contact with
+                    the specific fields that got filled OR a reason why
+                    nothing happened. For find: one row per company with
+                    source-column counters. */}
+                {per.length > 0 && isEnrich && (
+                  <div>
+                    <h4 className="text-xs uppercase tracking-wider text-gray-500 font-semibold mb-2">
+                      Per contact ({enrichedCount}/{per.length} enriched)
+                    </h4>
+                    <div className="border border-gray-200 rounded-lg overflow-hidden max-h-[320px] overflow-y-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 text-gray-500 uppercase tracking-wider text-[10px]">
+                          <tr>
+                            <th className="text-left px-3 py-2 font-semibold">Contact</th>
+                            <th className="text-left px-3 py-2 font-semibold">Fields filled / Skip reason</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {per.map((p, i) => {
+                            const filled: string[] = Array.isArray(p.fields_updated) ? p.fields_updated : [];
+                            const wasEnriched = filled.length > 0;
+                            return (
+                              <tr key={i} className={`border-t border-gray-100 align-top ${wasEnriched ? 'text-gray-800' : 'text-gray-500'}`}>
+                                <td className="px-3 py-2 font-medium truncate max-w-[200px]" title={p.company}>{p.company}</td>
+                                <td className="px-3 py-2">
+                                  {wasEnriched ? (
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      {filled.map(f => (
+                                        <span key={f} className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-medium">
+                                          {f}
+                                        </span>
+                                      ))}
+                                      {p.apollo_matched && (
+                                        <span className="text-[10px] text-gray-400">via Apollo</span>
+                                      )}
+                                      {p.hunter_matched && (
+                                        <span className="text-[10px] text-gray-400">· Hunter email</span>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span className="text-[11px] italic">
+                                      {p.skip_reason || (Array.isArray(p.errors) && p.errors.length > 0 ? p.errors.join(' · ') : 'no change')}
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    {/* Helpful context when nothing was enriched. */}
+                    {enrichedCount === 0 && per.length > 0 && (
+                      <div className="mt-3 bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">
+                        <p className="font-semibold mb-1">Why are zero contacts enriched?</p>
+                        <ul className="list-disc list-inside space-y-0.5 text-amber-900/90">
+                          <li>Apollo's <strong>free tier</strong> returns a profile but locks the email/phone behind credits — so those fields don't flow through. LinkedIn URL and title <em>should</em> still come through on free.</li>
+                          <li>If your companies don't have a <strong>website</strong> set, matching falls back to organization name which is noisier. Set the company's website on the Companies tab and re-run.</li>
+                          <li>The person may genuinely not be in Apollo's database, or their Apollo profile has no data to add beyond what you already have.</li>
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {per.length > 0 && !isEnrich && (
                   <div>
                     <h4 className="text-xs uppercase tracking-wider text-gray-500 font-semibold mb-2">
                       Per company ({companiesWithAdds.length}/{per.length} produced contacts)

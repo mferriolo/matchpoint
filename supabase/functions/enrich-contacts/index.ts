@@ -122,6 +122,12 @@ type EnrichResult = {
   fieldsUpdated: string[];
   apolloHit: boolean;
   hunterHit: boolean;
+  apolloAttempted: boolean;
+  apolloMatched: boolean;       // Apollo returned a person object
+  apolloHadDomain: boolean;     // we passed a domain (vs. org name) to Apollo
+  hunterAttempted: boolean;
+  hunterMatched: boolean;       // Hunter returned an email
+  skipReason: string | null;    // populated when fieldsUpdated.length === 0
   errors: string[];
 };
 
@@ -137,25 +143,33 @@ async function enrichContact(
     fieldsUpdated: [],
     apolloHit: false,
     hunterHit: false,
+    apolloAttempted: false,
+    apolloMatched: false,
+    apolloHadDomain: !!companyDomain,
+    hunterAttempted: false,
+    hunterMatched: false,
+    skipReason: null,
     errors: [],
   };
 
   const fn = (c.first_name || '').trim();
   const ln = (c.last_name || '').trim();
-  if (!fn && !ln) return res;
-  if (!c.company_name) return res;
+  if (!fn && !ln) { res.skipReason = 'no first or last name on record'; return res; }
+  if (!c.company_name) { res.skipReason = 'no company_name on record'; return res; }
 
   const updates: Record<string, any> = {};
   const notes: string[] = [];
 
   // 1. Apollo people/match — one call can fill multiple fields.
   if (apolloKey) {
+    res.apolloAttempted = true;
     const p = await withTimeout(
       apolloMatch(fn, ln, c.company_name, companyDomain, apolloKey),
       15_000,
       `Apollo-match(${fn} ${ln})`
     );
     if (p) {
+      res.apolloMatched = true;
       if (!c.email && p.email && typeof p.email === 'string') {
         updates.email = p.email;
         res.fieldsUpdated.push('email');
@@ -186,12 +200,14 @@ async function enrichContact(
 
   // 2. Hunter as fallback for email if still missing.
   if (!updates.email && !c.email && hunterKey && companyDomain && fn && ln) {
+    res.hunterAttempted = true;
     const h = await withTimeout(
       hunterFinder(fn, ln, companyDomain, hunterKey),
       8_000,
       `Hunter(${fn} ${ln}@${companyDomain})`
     );
     if (h?.email) {
+      res.hunterMatched = true;
       updates.email = h.email;
       res.fieldsUpdated.push('email');
       res.hunterHit = true;
@@ -199,7 +215,16 @@ async function enrichContact(
     }
   }
 
-  if (Object.keys(updates).length === 0) return res;
+  if (Object.keys(updates).length === 0) {
+    // Build a specific reason so the UI can explain what to try next.
+    if (!res.apolloAttempted && !res.hunterAttempted) res.skipReason = 'no enrichment sources were configured';
+    else if (res.apolloAttempted && !res.apolloMatched && !res.hunterAttempted) res.skipReason = `Apollo had no match for ${fn} ${ln}${companyDomain ? ` @ ${companyDomain}` : ` at "${c.company_name}"`}`;
+    else if (res.apolloAttempted && !res.apolloMatched && res.hunterAttempted && !res.hunterMatched) res.skipReason = `no match in Apollo or Hunter (domain: ${companyDomain || 'not set — add a website to the company to improve matching'})`;
+    else if (res.apolloMatched && !res.hunterAttempted) res.skipReason = 'Apollo match found, but every field it returned was already filled on this contact';
+    else if (res.apolloMatched && res.hunterAttempted && !res.hunterMatched) res.skipReason = 'Apollo had no new fields to add; Hunter could not find an email';
+    else res.skipReason = 'no new information available';
+    return res;
+  }
 
   // Append a note but don't clobber existing notes.
   const existingNotesRow = await supabase.from('marketing_contacts').select('notes').eq('id', c.id).maybeSingle();
@@ -267,6 +292,12 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
           duplicates_skipped: r.fieldsUpdated.length === 0 ? 1 : 0,
           errors: r.errors,
           fields_updated: r.fieldsUpdated,
+          skip_reason: r.skipReason,
+          apollo_attempted: r.apolloAttempted,
+          apollo_matched: r.apolloMatched,
+          hunter_attempted: r.hunterAttempted,
+          hunter_matched: r.hunterMatched,
+          had_domain: r.apolloHadDomain,
         })),
       }).eq('id', runId);
     }
