@@ -1,18 +1,26 @@
-// find-contacts — standalone contact enrichment, split out of the
-// Tracker run. Two modes:
+// find-contacts — standalone contact enrichment.
 //
-//   { mode: 'all' }                      → enrich every company with at
-//                                          least one open job
-//   { mode: 'company', companyId: '...' } → enrich a single company
+//   Request body: { mode: 'all' }
+//                 { mode: 'company', companyId: '...' }
 //
-// Unlike the old Tracker path, this does NOT skip companies that already
-// have >= 2 contacts. When the button is pressed the user is asking for
-// MORE — so we explicitly tell the AI which contacts we already have and
-// ask it to find different people, and we also run the Crelate search.
+// The function creates a contact_runs row, hands work to a background
+// task via EdgeRuntime.waitUntil, and returns the run_id immediately.
+// The client polls contact_runs for live progress (same pattern the
+// Tracker uses with tracker_runs). This avoids the request-timeout
+// problem we hit when trying to run a 100-company enrichment pass
+// synchronously inside a single HTTP call.
 //
-// Returns per-company breakdown so the UI can show a toast with results.
+// "Find MORE" semantics: we do NOT skip companies that already have
+// contacts. The AI prompt is seeded with a list of contacts we already
+// have for each target so gpt-4o-mini returns different people.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+// Deno's EdgeRuntime.waitUntil isn't in lib.deno.d.ts — declare it so
+// TypeScript doesn't complain. This is the documented way to keep work
+// running after the HTTP response has been sent on Supabase Edge
+// Functions (and Deno Deploy).
+declare const EdgeRuntime: { waitUntil: (p: Promise<unknown>) => void };
 
 export const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -25,9 +33,9 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 const CRELATE_BASE = "https://app.crelate.com/api3";
 
-// ----------------- helpers shared with the Tracker -----------------
+// ----------------- helpers -----------------
 
-async function aiCall(key: string, prompt: string, maxTok = 5000): Promise<string> {
+async function aiCall(key: string, prompt: string, maxTok = 3000): Promise<string> {
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
@@ -54,16 +62,12 @@ async function crelateGet(path: string, apiKey: string, params: Record<string, s
     method: 'GET',
     headers: { 'X-Api-Key': apiKey, 'Accept': 'application/json' }
   });
-  if (!res.ok) {
-    console.error(`Crelate ${res.status} on ${path}`);
-    return { Data: [] };
-  }
+  if (!res.ok) { console.error(`Crelate ${res.status} on ${path}`); return { Data: [] }; }
   return await res.json();
 }
 
 const buildCrelateContactUrl = (cid: string) =>
   `https://app.crelate.com/go#stage/_Contacts/DefaultView/${cid}/summary`;
-
 const extractEmail = (c: any) =>
   c.EmailAddresses_Work?.Value || c.EmailAddresses_Personal?.Value || c.EmailAddresses_Other?.Value || '';
 const extractPhone = (c: any, type: 'work'|'mobile'|'home') => {
@@ -81,30 +85,17 @@ const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 type CompanyRow = { id: string; company_name: string };
 type ContactRow = { id: string; company_id: string|null; company_name: string|null; first_name: string|null; last_name: string|null; crelate_contact_id: string|null };
-
-type PerCompanyResult = {
-  company: string;
-  ai_added: number;
-  crelate_added: number;
-  duplicates_skipped: number;
-  errors: string[];
-};
+type PerCompany = { company: string; ai_added: number; crelate_added: number; duplicates_skipped: number; errors: string[] };
 
 async function enrichCompany(
   co: CompanyRow,
-  existing: ContactRow[],
+  existingKeys: Set<string>,
+  existingCrelateIds: Set<string>,
+  here: ContactRow[],
   openaiKey: string | undefined,
   crelateKey: string | undefined,
-): Promise<PerCompanyResult> {
-  const result: PerCompanyResult = { company: co.company_name, ai_added: 0, crelate_added: 0, duplicates_skipped: 0, errors: [] };
-
-  // Existing contacts for THIS company (so we can (a) dedupe inserts, (b)
-  // tell the AI who NOT to return when asked to "find more").
-  const here = existing.filter(c => (c.company_name || '').toLowerCase().trim() === co.company_name.toLowerCase().trim());
-  const existingKeys = new Set(existing.map(c =>
-    `${(c.first_name||'').toLowerCase().trim()}|${(c.last_name||'').toLowerCase().trim()}|${(c.company_name||'').toLowerCase().trim()}`
-  ));
-  const existingCrelateIds = new Set(existing.map(c => c.crelate_contact_id).filter(Boolean) as string[]);
+): Promise<PerCompany> {
+  const result: PerCompany = { company: co.company_name, ai_added: 0, crelate_added: 0, duplicates_skipped: 0, errors: [] };
 
   // -------- AI pass --------
   if (openaiKey) {
@@ -153,8 +144,7 @@ async function enrichCompany(
     try {
       const searchName = co.company_name.replace(/\s*\/\s*/g, ' ').replace(/\s*\(.*?\)\s*/g, ' ').trim();
       const compRes = await crelateGet('/companies', crelateKey, { search: searchName, take: '10' });
-      const crelateCompanies = compRes?.Data || [];
-      for (const cc of crelateCompanies) {
+      for (const cc of (compRes?.Data || [])) {
         if (!cc.Id) continue;
         const contactsRes = await crelateGet('/contacts', crelateKey, { companyId: cc.Id, take: '50' });
         for (const contact of (contactsRes?.Data || [])) {
@@ -169,8 +159,7 @@ async function enrichCompany(
           const { error } = await supabase.from('marketing_contacts').insert({
             company_id: co.id,
             company_name: co.company_name,
-            first_name: fn,
-            last_name: ln,
+            first_name: fn, last_name: ln,
             email: extractEmail(contact),
             phone_work: extractPhone(contact, 'work'),
             phone_home: extractPhone(contact, 'home'),
@@ -184,14 +173,11 @@ async function enrichCompany(
             notes: `From Crelate (API v3). Company: ${cc.Name || searchName}`,
           });
           if (!error) { result.crelate_added++; existingCrelateIds.add(cid); existingKeys.add(dk); }
-          await delay(250);
+          await delay(200);
         }
-        await delay(250);
+        await delay(200);
       }
 
-      // Also direct contact search by company name — catches people whose
-      // CurrentPosition points at the right company but aren't linked via
-      // Crelate's company record.
       const directRes = await crelateGet('/contacts', crelateKey, { search: searchName, take: '20' });
       for (const contact of (directRes?.Data || [])) {
         const cid = contact.Id;
@@ -208,8 +194,7 @@ async function enrichCompany(
         const { error } = await supabase.from('marketing_contacts').insert({
           company_id: co.id,
           company_name: co.company_name,
-          first_name: fn,
-          last_name: ln,
+          first_name: fn, last_name: ln,
           email: extractEmail(contact),
           phone_work: extractPhone(contact, 'work'),
           phone_home: extractPhone(contact, 'home'),
@@ -223,7 +208,7 @@ async function enrichCompany(
           notes: 'From Crelate contact search (API v3).',
         });
         if (!error) { result.crelate_added++; existingCrelateIds.add(cid); existingKeys.add(dk); }
-        await delay(250);
+        await delay(200);
       }
     } catch (e) {
       result.errors.push(`Crelate: ${(e as Error).message}`);
@@ -235,6 +220,74 @@ async function enrichCompany(
   await supabase.from('marketing_companies').update({ contact_count: count || 0, updated_at: new Date().toISOString() }).eq('id', co.id);
 
   return result;
+}
+
+// ----------------- background task -----------------
+
+async function processRun(runId: string, targets: CompanyRow[], openaiKey: string | undefined, crelateKey: string | undefined) {
+  const startedAt = Date.now();
+  try {
+    // Snapshot of existing contacts, used for dedup + "find different people"
+    const { data: existingContacts } = await supabase.from('marketing_contacts')
+      .select('id, company_id, company_name, first_name, last_name, crelate_contact_id');
+    const existing: ContactRow[] = (existingContacts || []) as ContactRow[];
+    const existingKeys = new Set(existing.map(c =>
+      `${(c.first_name||'').toLowerCase().trim()}|${(c.last_name||'').toLowerCase().trim()}|${(c.company_name||'').toLowerCase().trim()}`
+    ));
+    const existingCrelateIds = new Set(existing.map(c => c.crelate_contact_id).filter(Boolean) as string[]);
+
+    const per: PerCompany[] = [];
+    let aiTotal = 0, crelateTotal = 0, skippedTotal = 0;
+
+    for (let i = 0; i < targets.length; i++) {
+      const co = targets[i];
+      await supabase.from('contact_runs').update({
+        current_company: co.company_name,
+        companies_processed: i,
+      }).eq('id', runId);
+
+      const here = existing.filter(c =>
+        (c.company_name || '').toLowerCase().trim() === co.company_name.toLowerCase().trim()
+      );
+
+      const r = await enrichCompany(co, existingKeys, existingCrelateIds, here, openaiKey, crelateKey);
+      per.push(r);
+      aiTotal += r.ai_added;
+      crelateTotal += r.crelate_added;
+      skippedTotal += r.duplicates_skipped;
+
+      // Partial update after each company so the UI progress bar moves.
+      await supabase.from('contact_runs').update({
+        companies_processed: i + 1,
+        ai_added: aiTotal,
+        crelate_added: crelateTotal,
+        contacts_added: aiTotal + crelateTotal,
+        duplicates_skipped: skippedTotal,
+        per_company: per,
+      }).eq('id', runId);
+    }
+
+    await supabase.from('contact_runs').update({
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+      current_company: null,
+      companies_processed: targets.length,
+      ai_added: aiTotal,
+      crelate_added: crelateTotal,
+      contacts_added: aiTotal + crelateTotal,
+      duplicates_skipped: skippedTotal,
+      per_company: per,
+    }).eq('id', runId);
+    console.log(`find-contacts run ${runId} completed in ${Math.round((Date.now() - startedAt) / 1000)}s: ${aiTotal + crelateTotal} added, ${skippedTotal} skipped`);
+  } catch (e) {
+    const msg = (e as Error).message || String(e);
+    console.error(`find-contacts run ${runId} failed:`, msg);
+    await supabase.from('contact_runs').update({
+      status: 'failed',
+      completed_at: new Date().toISOString(),
+      error_message: msg,
+    }).eq('id', runId);
+  }
 }
 
 // ----------------- HTTP handler -----------------
@@ -259,6 +312,7 @@ Deno.serve(async (req) => {
 
     // Resolve target companies.
     let targets: CompanyRow[] = [];
+    let targetCompanyName: string | null = null;
     if (mode === 'company') {
       if (!companyId) {
         return new Response(JSON.stringify({ success: false, error: 'companyId is required for mode=company' }), {
@@ -272,10 +326,9 @@ Deno.serve(async (req) => {
         });
       }
       targets = [data as CompanyRow];
+      targetCompanyName = data.company_name;
     } else {
-      // mode === 'all': every non-blocked company that has at least one
-      // non-closed job. No <2-contacts threshold — the point of this
-      // button is to pull MORE contacts for every active company.
+      // mode === 'all': every non-blocked company with at least one open job.
       const { data: companies } = await supabase.from('marketing_companies')
         .select('id, company_name, is_blocked')
         .order('is_high_priority', { ascending: false });
@@ -283,46 +336,39 @@ Deno.serve(async (req) => {
         .select('company_id, company_name, is_closed, status')
         .or('is_closed.is.false,is_closed.is.null')
         .neq('status', 'Closed');
-      const activeCompanyIds = new Set((openJobs || []).map(j => j.company_id).filter(Boolean));
-      const activeCompanyNames = new Set((openJobs || []).map(j => (j.company_name || '').toLowerCase().trim()));
+      const activeIds = new Set((openJobs || []).map(j => j.company_id).filter(Boolean));
+      const activeNames = new Set((openJobs || []).map(j => (j.company_name || '').toLowerCase().trim()));
       targets = (companies || [])
         .filter(c => !c.is_blocked)
-        .filter(c => activeCompanyIds.has(c.id) || activeCompanyNames.has((c.company_name || '').toLowerCase().trim()))
+        .filter(c => activeIds.has(c.id) || activeNames.has((c.company_name || '').toLowerCase().trim()))
         .map(c => ({ id: c.id, company_name: c.company_name }));
     }
 
-    // Existing contacts (once) for dedup + "find different people" hints.
-    const { data: existingContacts } = await supabase.from('marketing_contacts')
-      .select('id, company_id, company_name, first_name, last_name, crelate_contact_id');
-    const existing: ContactRow[] = (existingContacts || []) as ContactRow[];
-
-    // Walk targets serially — this keeps per-company AI cost legible and
-    // well within rate limits. With ~100 companies and ~4s per company
-    // this finishes in under 7 minutes, well below edge-function limits.
-    const results: PerCompanyResult[] = [];
-    let totalAi = 0, totalCrelate = 0, totalSkipped = 0;
-    for (const co of targets) {
-      const r = await enrichCompany(co, existing, openaiKey, crelateKey);
-      results.push(r);
-      totalAi += r.ai_added;
-      totalCrelate += r.crelate_added;
-      totalSkipped += r.duplicates_skipped;
-      // Seed the existing list with anything we just added so the next
-      // iteration sees it and won't re-fetch the same person.
-      // (The inserts already updated the DB; we just keep the in-memory
-      // list roughly in sync by re-fetching contacts for this company.)
+    // Insert run row synchronously so we have an id to return.
+    const { data: runRow, error: insertErr } = await supabase.from('contact_runs').insert({
+      status: 'running',
+      mode,
+      target_company_id: mode === 'company' ? companyId : null,
+      target_company_name: targetCompanyName,
+      companies_total: targets.length,
+      companies_processed: 0,
+    }).select('id').single();
+    if (insertErr || !runRow) {
+      return new Response(JSON.stringify({ success: false, error: `Failed to create run: ${insertErr?.message || 'unknown'}` }), {
+        status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
     }
+
+    // Hand the actual work off to a background task. The HTTP response
+    // returns immediately with the run id; the client polls contact_runs
+    // for progress instead of waiting on this request.
+    EdgeRuntime.waitUntil(processRun(runRow.id, targets, openaiKey, crelateKey));
 
     return new Response(JSON.stringify({
       success: true,
+      run_id: runRow.id,
       mode,
-      companies_processed: results.length,
-      contacts_added: totalAi + totalCrelate,
-      ai_added: totalAi,
-      crelate_added: totalCrelate,
-      duplicates_skipped: totalSkipped,
-      per_company: results,
-      timestamp: new Date().toISOString(),
+      companies_total: targets.length,
     }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 
   } catch (error) {

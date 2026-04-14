@@ -52,12 +52,15 @@ const MarketingNewJobs: React.FC = () => {
   const [scrapingDescs, setScrapingDescs] = useState(false);
   const [scrapeResult, setScrapeResult] = useState<any>(null);
 
-  // Contact enrichment state. `findingContactsAll` is set while the
-  // page-level "Find Contacts for All Companies" run is in flight;
-  // `findingContactsForId` stores the company id for a per-row run so
-  // only that row's button shows a spinner.
-  const [findingContactsAll, setFindingContactsAll] = useState(false);
+  // Contact enrichment state. The find-contacts edge function runs in
+  // the background via EdgeRuntime.waitUntil — the HTTP call returns
+  // immediately with a contact_runs row id, and we poll that row for
+  // live progress. contactRun holds the polled row; findingContactsForId
+  // identifies which per-row spinner to show on the Companies tab.
+  const [contactRun, setContactRun] = useState<any | null>(null);
   const [findingContactsForId, setFindingContactsForId] = useState<string | null>(null);
+  const contactRunIsActive = !!contactRun && contactRun.status === 'running';
+  const findingContactsAll = contactRunIsActive && contactRun?.mode === 'all';
 
 
 
@@ -93,34 +96,81 @@ const MarketingNewJobs: React.FC = () => {
   const [filterCompanyCategory, setFilterCompanyCategory] = useState<Set<string>>(new Set());
   const [companyCategoryFilterOpen, setCompanyCategoryFilterOpen] = useState(false);
 
-  // Invoke the find-contacts edge function. mode='all' crawls every
-  // non-blocked company with open jobs; mode='company' targets a single
-  // company. The function returns per-company stats so we surface a
-  // useful toast regardless of which mode ran.
+  // Kick off a find-contacts run. The edge function returns a run_id
+  // immediately and continues processing in the background. We then
+  // poll the contact_runs row every 2s until it hits completed/failed.
   const handleFindContacts = async (opts: { mode: 'all' } | { mode: 'company'; companyId: string; companyName?: string }) => {
     const isAll = opts.mode === 'all';
-    if (isAll) setFindingContactsAll(true);
-    else setFindingContactsForId(opts.companyId);
+    if (!isAll) setFindingContactsForId(opts.companyId);
     try {
       const body = isAll ? { mode: 'all' } : { mode: 'company', companyId: opts.companyId };
       const { data, error } = await supabase.functions.invoke('find-contacts', { body });
       if (error) throw error;
-      if (!data?.success) throw new Error(data?.error || 'Unknown error');
-      const added = data.contacts_added ?? 0;
-      const skipped = data.duplicates_skipped ?? 0;
-      const processed = data.companies_processed ?? 0;
-      const label = isAll
-        ? `Find Contacts: ${added} added across ${processed} companies${skipped ? `, ${skipped} duplicates skipped` : ''}`
-        : `${opts.companyName || 'Company'}: ${added} new contact${added === 1 ? '' : 's'}${skipped ? `, ${skipped} duplicates skipped` : ''}`;
-      toast({ title: label });
-      loadData();
+      if (!data?.success || !data?.run_id) throw new Error(data?.error || 'No run id returned');
+
+      // Seed the polled-row state so the progress UI shows up on the
+      // first render even before the first poll.
+      setContactRun({
+        id: data.run_id,
+        status: 'running',
+        mode: data.mode,
+        companies_total: data.companies_total || 0,
+        companies_processed: 0,
+        contacts_added: 0,
+        ai_added: 0,
+        crelate_added: 0,
+        duplicates_skipped: 0,
+        current_company: null,
+        target_company_name: isAll ? null : (opts.companyName || null),
+        per_company: [],
+      });
+      // Per-row spinner is cleared by the poller when status != 'running'.
     } catch (err: any) {
-      toast({ title: 'Find Contacts failed', description: err.message, variant: 'destructive' });
-    } finally {
-      if (isAll) setFindingContactsAll(false);
-      else setFindingContactsForId(null);
+      if (!isAll) setFindingContactsForId(null);
+      toast({ title: 'Find Contacts failed', description: err.message || String(err), variant: 'destructive' });
     }
   };
+
+  // Poll the active contact_runs row for progress. Started whenever we
+  // have a run id with status === 'running'; cleared when it terminates.
+  useEffect(() => {
+    if (!contactRun?.id || contactRun.status !== 'running') return;
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const { data } = await supabase
+          .from('contact_runs')
+          .select('*')
+          .eq('id', contactRun.id)
+          .maybeSingle();
+        if (!data || cancelled) return;
+        setContactRun(data);
+        if (data.status === 'completed') {
+          const added = data.contacts_added ?? 0;
+          const skipped = data.duplicates_skipped ?? 0;
+          const processed = data.companies_processed ?? 0;
+          const isAll = data.mode === 'all';
+          toast({
+            title: isAll
+              ? `Find Contacts: ${added} added across ${processed} companies${skipped ? `, ${skipped} duplicates skipped` : ''}`
+              : `${data.target_company_name || 'Company'}: ${added} new contact${added === 1 ? '' : 's'}${skipped ? `, ${skipped} duplicates skipped` : ''}`,
+          });
+          setFindingContactsForId(null);
+          loadData();
+        } else if (data.status === 'failed') {
+          toast({ title: 'Find Contacts failed', description: data.error_message || 'Unknown error', variant: 'destructive' });
+          setFindingContactsForId(null);
+        }
+      } catch (e) {
+        console.warn('contact_runs poll error:', e);
+      }
+    };
+    const interval = setInterval(tick, 2000);
+    // Poll once immediately so the user sees counters start moving fast.
+    tick();
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [contactRun?.id, contactRun?.status, toast]);
 
   const handleSaveCompanyType = async (id: string, newType: string) => {
     try {
@@ -1050,11 +1100,11 @@ const MarketingNewJobs: React.FC = () => {
                             <div className="inline-flex items-center gap-1">
                               <button
                                 onClick={() => handleFindContacts({ mode: 'company', companyId: c.id, companyName: c.company_name })}
-                                disabled={findingContactsAll || findingContactsForId === c.id}
+                                disabled={contactRunIsActive || findingContactsForId === c.id}
                                 className="inline-flex items-center justify-center p-1.5 rounded text-emerald-700 hover:bg-emerald-50 disabled:opacity-40"
                                 title={`Find more hiring contacts at ${c.company_name} (AI + Crelate)`}
                               >
-                                {findingContactsForId === c.id
+                                {(findingContactsForId === c.id) || (contactRunIsActive && contactRun?.target_company_id === c.id)
                                   ? <Loader2 className="w-4 h-4 animate-spin" />
                                   : <Users className="w-4 h-4" />}
                               </button>
@@ -1169,7 +1219,7 @@ const MarketingNewJobs: React.FC = () => {
                 </select>
                 <Button
                   onClick={() => handleFindContacts({ mode: 'all' })}
-                  disabled={findingContactsAll}
+                  disabled={contactRunIsActive}
                   className="bg-[#911406] hover:bg-[#7a1005] text-white"
                   title="Find more contacts (AI + Crelate) for every company with open jobs"
                 >
@@ -1181,6 +1231,47 @@ const MarketingNewJobs: React.FC = () => {
                 </Button>
                 <span className="text-sm text-gray-500">{filteredContacts.length} contacts</span>
               </div>
+
+              {/* Live progress panel — visible while a find-contacts run
+                  is in flight. Polls contact_runs every 2s. */}
+              {contactRunIsActive && contactRun && (
+                <div className="px-4 py-3 border-b bg-emerald-50/50">
+                  <div className="flex items-center justify-between mb-2 text-sm">
+                    <div className="flex items-center gap-2 text-emerald-900 font-medium">
+                      <Loader2 className="w-4 h-4 animate-spin text-emerald-700" />
+                      {contactRun.mode === 'all'
+                        ? `Finding contacts across ${contactRun.companies_total} companies…`
+                        : `Finding contacts for ${contactRun.target_company_name || 'company'}…`}
+                    </div>
+                    <div className="flex items-center gap-4 text-xs text-emerald-900/80 tabular-nums">
+                      <span><strong>{contactRun.companies_processed || 0}</strong>/{contactRun.companies_total || 0} companies</span>
+                      <span>·</span>
+                      <span><strong className="text-emerald-800">{contactRun.contacts_added || 0}</strong> contacts added</span>
+                      {(contactRun.duplicates_skipped || 0) > 0 && (
+                        <>
+                          <span>·</span>
+                          <span>{contactRun.duplicates_skipped} duplicates skipped</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div className="w-full h-2 bg-emerald-100 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-emerald-600 transition-all duration-500 ease-out"
+                      style={{
+                        width: `${contactRun.companies_total > 0
+                          ? Math.min(100, Math.round(((contactRun.companies_processed || 0) / contactRun.companies_total) * 100))
+                          : 0}%`
+                      }}
+                    />
+                  </div>
+                  {contactRun.current_company && (
+                    <p className="mt-1.5 text-[11px] text-emerald-900/70 truncate">
+                      Processing: <span className="font-medium">{contactRun.current_company}</span>
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* Spreadsheet-style table */}
               <div className="overflow-x-auto">
