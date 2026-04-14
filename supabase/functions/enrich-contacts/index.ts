@@ -304,12 +304,23 @@ Deno.serve(async (req) => {
 
     // Try multiple common env-var names so the function picks up the
     // key regardless of how the user spelled it in the Supabase
-    // dashboard. We log which name matched (name only, never the value)
-    // so the diagnostic error makes it clear if the user used an alias.
+    // dashboard. ENV var names are case-sensitive on Linux, so we ALSO
+    // do a case-insensitive sweep over every visible env var as a final
+    // fallback — catches secrets like "Apollo_API_Key" that have
+    // mixed-case names. We log which name matched (name only, never the
+    // value) so the diagnostic error makes it clear if the user used an
+    // alias or weird casing.
+    const allEnv = Deno.env.toObject();
     const pickEnv = (...names: string[]): { value: string | undefined; matched: string | null } => {
+      // Fast path: exact match on any alias
       for (const n of names) {
         const v = Deno.env.get(n);
         if (v) return { value: v, matched: n };
+      }
+      // Fallback: case-insensitive scan over all env vars
+      const upperNames = names.map(n => n.toUpperCase());
+      for (const [k, v] of Object.entries(allEnv)) {
+        if (v && upperNames.includes(k.toUpperCase())) return { value: v, matched: k };
       }
       return { value: undefined, matched: null };
     };

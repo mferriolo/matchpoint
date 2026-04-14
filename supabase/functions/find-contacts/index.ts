@@ -633,10 +633,17 @@ Deno.serve(async (req) => {
 
     const openaiKey = Deno.env.get('OPENAI_API_KEY');
     const crelateKey = Deno.env.get('CRELATE_API_KEY');
-    // Pick up Apollo / Hunter keys under several common names so a
-    // dashboard secret named e.g. APOLLO_KEY still works.
+    // Pick up Apollo / Hunter keys under several common names AND
+    // case-insensitively, so a dashboard secret named APOLLO_KEY or
+    // Apollo_API_Key still works (env var names are case-sensitive on
+    // Linux, so an exact Deno.env.get won't catch mixed-case names).
+    const allEnv = Deno.env.toObject();
     const pickEnv = (...names: string[]): string | undefined => {
       for (const n of names) { const v = Deno.env.get(n); if (v) return v; }
+      const upperNames = names.map(n => n.toUpperCase());
+      for (const [k, v] of Object.entries(allEnv)) {
+        if (v && upperNames.includes(k.toUpperCase())) return v;
+      }
       return undefined;
     };
     const apolloKey = pickEnv('APOLLO_API_KEY', 'APOLLO_KEY', 'APOLLO_TOKEN', 'APOLLO_IO_API_KEY', 'APOLLO_IO_KEY');
