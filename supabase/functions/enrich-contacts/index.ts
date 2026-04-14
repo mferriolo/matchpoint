@@ -302,28 +302,41 @@ Deno.serve(async (req) => {
       });
     }
 
-    const apolloKey = Deno.env.get('APOLLO_API_KEY');
-    const hunterKey = Deno.env.get('HUNTER_API_KEY');
+    // Try multiple common env-var names so the function picks up the
+    // key regardless of how the user spelled it in the Supabase
+    // dashboard. We log which name matched (name only, never the value)
+    // so the diagnostic error makes it clear if the user used an alias.
+    const pickEnv = (...names: string[]): { value: string | undefined; matched: string | null } => {
+      for (const n of names) {
+        const v = Deno.env.get(n);
+        if (v) return { value: v, matched: n };
+      }
+      return { value: undefined, matched: null };
+    };
+    const apolloPick = pickEnv('APOLLO_API_KEY', 'APOLLO_KEY', 'APOLLO_TOKEN', 'APOLLO_IO_API_KEY', 'APOLLO_IO_KEY');
+    const hunterPick = pickEnv('HUNTER_API_KEY', 'HUNTER_KEY', 'HUNTER_TOKEN', 'HUNTER_IO_API_KEY', 'HUNTER_IO_KEY');
+    const apolloKey = apolloPick.value;
+    const hunterKey = hunterPick.value;
     if (!apolloKey && !hunterKey) {
-      // Report which other secrets we can see so the user can tell
-      // whether the edge-function env is loaded at all or specifically
-      // the Apollo/Hunter names are missing. Secret *presence* is
-      // reported, never values.
-      const seen = {
-        APOLLO_API_KEY: !!Deno.env.get('APOLLO_API_KEY'),
-        HUNTER_API_KEY: !!Deno.env.get('HUNTER_API_KEY'),
-        OPENAI_API_KEY: !!Deno.env.get('OPENAI_API_KEY'),
-        CRELATE_API_KEY: !!Deno.env.get('CRELATE_API_KEY'),
-        SERP_API_KEY: !!Deno.env.get('SERP_API_KEY'),
-        SUPABASE_URL: !!Deno.env.get('SUPABASE_URL'),
-      };
+      // Report presence of every env var the function can see (all
+      // non-internal ones). This makes misnamed secrets obvious.
+      const envKeys = Object.keys(Deno.env.toObject()).sort();
+      const visible = envKeys
+        .filter(k => !/^(PATH|HOME|PWD|USER|HOSTNAME|LANG|TERM|DENO_|SUPABASE_INTERNAL_)/.test(k));
       return new Response(JSON.stringify({
         success: false,
-        error: `Neither APOLLO_API_KEY nor HUNTER_API_KEY is configured. Secrets this function can see: ${JSON.stringify(seen)}. If other keys show false too, the deploy didn't pick up the secrets — run "supabase functions deploy enrich-contacts" again. If only Apollo/Hunter show false, the secret names in the Supabase dashboard may be spelled differently (the function reads them as APOLLO_API_KEY and HUNTER_API_KEY).`,
+        error: 'Neither APOLLO_API_KEY nor HUNTER_API_KEY is configured.',
+        hint: 'If your secret is named differently, rename it in Supabase → Edge Functions → Secrets to APOLLO_API_KEY or HUNTER_API_KEY (the function will also auto-detect APOLLO_KEY, APOLLO_TOKEN, HUNTER_KEY, HUNTER_TOKEN as fallbacks).',
+        tried_names: {
+          apollo: ['APOLLO_API_KEY', 'APOLLO_KEY', 'APOLLO_TOKEN', 'APOLLO_IO_API_KEY', 'APOLLO_IO_KEY'],
+          hunter: ['HUNTER_API_KEY', 'HUNTER_KEY', 'HUNTER_TOKEN', 'HUNTER_IO_API_KEY', 'HUNTER_IO_KEY'],
+        },
+        visible_env_var_names: visible,
       }), {
         status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     }
+    console.log(`enrich-contacts using Apollo via ${apolloPick.matched || '(none)'}, Hunter via ${hunterPick.matched || '(none)'}`);
 
     // Auto-clear stuck runs older than 15 min.
     const staleCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();

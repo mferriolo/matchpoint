@@ -633,8 +633,14 @@ Deno.serve(async (req) => {
 
     const openaiKey = Deno.env.get('OPENAI_API_KEY');
     const crelateKey = Deno.env.get('CRELATE_API_KEY');
-    const apolloKey = Deno.env.get('APOLLO_API_KEY');
-    const hunterKey = Deno.env.get('HUNTER_API_KEY');
+    // Pick up Apollo / Hunter keys under several common names so a
+    // dashboard secret named e.g. APOLLO_KEY still works.
+    const pickEnv = (...names: string[]): string | undefined => {
+      for (const n of names) { const v = Deno.env.get(n); if (v) return v; }
+      return undefined;
+    };
+    const apolloKey = pickEnv('APOLLO_API_KEY', 'APOLLO_KEY', 'APOLLO_TOKEN', 'APOLLO_IO_API_KEY', 'APOLLO_IO_KEY');
+    const hunterKey = pickEnv('HUNTER_API_KEY', 'HUNTER_KEY', 'HUNTER_TOKEN', 'HUNTER_IO_API_KEY', 'HUNTER_IO_KEY');
 
     if (!openaiKey && !crelateKey && !apolloKey) {
       return new Response(JSON.stringify({ success: false, error: 'No contact-discovery secrets configured (need at least one of OPENAI_API_KEY, APOLLO_API_KEY, CRELATE_API_KEY)' }), {

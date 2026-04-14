@@ -111,13 +111,23 @@ const MarketingNewJobs: React.FC = () => {
             const raw = await ctx.text();
             try {
               const parsed = JSON.parse(raw);
-              if (parsed?.error) detail = parsed.error;
-              else if (raw) detail = raw.slice(0, 500);
+              if (parsed?.error) {
+                detail = parsed.error;
+                // The enrich function attaches a `visible_env_var_names`
+                // array when keys are missing — surface it so the user
+                // can spot a rename at a glance.
+                if (parsed.visible_env_var_names) {
+                  detail += ` · Env vars visible to the function: ${parsed.visible_env_var_names.join(', ')}`;
+                }
+                if (parsed.hint) detail += ` · ${parsed.hint}`;
+              }
+              else if (raw) detail = raw.slice(0, 800);
             } catch {
-              if (raw) detail = raw.slice(0, 500);
+              if (raw) detail = raw.slice(0, 800);
             }
           }
         } catch {}
+        console.error('enrich-contacts error detail:', detail);
         throw new Error(detail);
       }
       if (!data?.success || !data?.run_id) throw new Error(data?.error || 'No run id returned');
