@@ -69,6 +69,28 @@ function parseArr(text: string): any[] {
 
 const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+// Race a promise against a timeout. Returns null on timeout rather than
+// throwing so a single slow source can't kill the whole run. Every
+// source in this file is wrapped in one of these so one misbehaving
+// vendor (Crelate returning 2500 rows, Apollo stalling, a leadership
+// page taking forever to load) doesn't eat the whole edge-function
+// budget.
+async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T | null> {
+  let timer: number | undefined;
+  const timeout = new Promise<null>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms);
+  });
+  try {
+    const result = await Promise.race([p, timeout]);
+    return result as T;
+  } catch (e) {
+    console.warn(`${label} timed out or errored:`, (e as Error).message);
+    return null;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 function extractDomain(url: string | null | undefined): string | null {
   if (!url) return null;
   try {
@@ -316,17 +338,26 @@ async function aiBrainstorm(co: { company_name: string }, here: ContactRow[], op
 
 // ----------------- Crelate pass -----------------
 
-async function searchCrelate(co: CompanyRow, crelateKey: string): Promise<ContactCandidate[]> {
+async function searchCrelate(co: CompanyRow, crelateKey: string, existingCrelateIds: Set<string>): Promise<ContactCandidate[]> {
+  // IMPORTANT: we filter out contacts that are already in
+  // existingCrelateIds *before* pushing them as candidates. Previously
+  // we added all 2,500+ Crelate contacts per big-company search and
+  // then dedup'd in the caller with a 150ms delay per candidate — that
+  // alone ate 6+ minutes for one company and timed out the function.
+  //
+  // This function also uses much smaller `take` values: Crelate's
+  // regular-contact-sync function already pulls the full set. Here we
+  // only want a handful of leads we might have missed.
   const out: ContactCandidate[] = [];
   try {
     const searchName = co.company_name.replace(/\s*\/\s*/g, ' ').replace(/\s*\(.*?\)\s*/g, ' ').trim();
-    const compRes = await crelateGet('/companies', crelateKey, { search: searchName, take: '10' });
+    const compRes = await crelateGet('/companies', crelateKey, { search: searchName, take: '5' });
     for (const cc of (compRes?.Data || [])) {
       if (!cc.Id) continue;
-      const contactsRes = await crelateGet('/contacts', crelateKey, { companyId: cc.Id, take: '50' });
+      const contactsRes = await crelateGet('/contacts', crelateKey, { companyId: cc.Id, take: '20' });
       for (const contact of (contactsRes?.Data || [])) {
         const cid = contact.Id;
-        if (!cid) continue;
+        if (!cid || existingCrelateIds.has(cid)) continue; // ← early filter
         const fn = contact.FirstName || '';
         const ln = contact.LastName || '';
         if (!fn && !ln) continue;
@@ -345,14 +376,12 @@ async function searchCrelate(co: CompanyRow, crelateKey: string): Promise<Contac
           crelate_url: crelateUrl,
           notes: `From Crelate (API v3). Company: ${cc.Name || searchName}`,
         });
-        await delay(150);
       }
-      await delay(150);
     }
-    const directRes = await crelateGet('/contacts', crelateKey, { search: searchName, take: '20' });
+    const directRes = await crelateGet('/contacts', crelateKey, { search: searchName, take: '10' });
     for (const contact of (directRes?.Data || [])) {
       const cid = contact.Id;
-      if (!cid) continue;
+      if (!cid || existingCrelateIds.has(cid)) continue;
       const fn = contact.FirstName || '';
       const ln = contact.LastName || '';
       if (!fn && !ln) continue;
@@ -374,7 +403,6 @@ async function searchCrelate(co: CompanyRow, crelateKey: string): Promise<Contac
         crelate_url: crelateUrl,
         notes: 'From Crelate contact search (API v3).',
       });
-      await delay(150);
     }
   } catch (e) {
     console.warn(`Crelate error for ${co.company_name}:`, (e as Error).message);
@@ -416,36 +444,34 @@ async function enrichCompany(
 
   const candidates: ContactCandidate[] = [];
 
+  // Every source is wrapped in withTimeout so one hung API can't eat
+  // the entire edge-function budget. Timeouts are generous but finite.
   // 1. Leadership pages (free; needs website)
   if (openaiKey && co.website) {
-    try {
-      const lp = await scrapeLeadershipPages(co, openaiKey);
-      candidates.push(...lp);
-    } catch (e) { result.errors.push(`Leadership: ${(e as Error).message}`); }
+    const lp = await withTimeout(scrapeLeadershipPages(co, openaiKey), 45_000, `Leadership(${co.company_name})`);
+    if (lp) candidates.push(...lp);
+    else result.errors.push('Leadership: timed out or failed');
   }
 
   // 2. Apollo
   if (apolloKey) {
-    try {
-      const ap = await searchApollo(co, apolloKey);
-      candidates.push(...ap);
-    } catch (e) { result.errors.push(`Apollo: ${(e as Error).message}`); }
+    const ap = await withTimeout(searchApollo(co, apolloKey), 20_000, `Apollo(${co.company_name})`);
+    if (ap) candidates.push(...ap);
+    else result.errors.push('Apollo: timed out or failed');
   }
 
-  // 3. AI brainstorm (existing)
+  // 3. AI brainstorm
   if (openaiKey) {
-    try {
-      const ai = await aiBrainstorm(co, here, openaiKey);
-      candidates.push(...ai);
-    } catch (e) { result.errors.push(`AI: ${(e as Error).message}`); }
+    const ai = await withTimeout(aiBrainstorm(co, here, openaiKey), 30_000, `AI(${co.company_name})`);
+    if (ai) candidates.push(...ai);
+    else result.errors.push('AI: timed out or failed');
   }
 
-  // 4. Crelate
+  // 4. Crelate (now skips already-synced contacts up-front)
   if (crelateKey) {
-    try {
-      const cr = await searchCrelate(co, crelateKey);
-      candidates.push(...cr);
-    } catch (e) { result.errors.push(`Crelate: ${(e as Error).message}`); }
+    const cr = await withTimeout(searchCrelate(co, crelateKey, existingCrelateIds), 90_000, `Crelate(${co.company_name})`);
+    if (cr) candidates.push(...cr);
+    else result.errors.push('Crelate: timed out or failed');
   }
 
   // 5. Hunter email enrichment + insert pass.
@@ -465,7 +491,11 @@ async function enrichCompany(
     let email = cand.email || '';
     let hunterNote = '';
     if (!email && hunterKey && domain && fn && ln) {
-      const h = await hunterEmailFinder(fn, ln, domain, hunterKey);
+      const h = await withTimeout(
+        hunterEmailFinder(fn, ln, domain, hunterKey),
+        8_000,
+        `Hunter(${fn} ${ln}@${domain})`
+      );
       if (h?.email) {
         email = h.email;
         hunterNote = ` Hunter score=${h.score}.`;
@@ -643,6 +673,15 @@ Deno.serve(async (req) => {
         .filter(c => activeIds.has(c.id) || activeNames.has((c.company_name || '').toLowerCase().trim()))
         .map(c => ({ id: c.id, company_name: c.company_name, website: c.website }));
     }
+
+    // Mark any orphaned "running" runs older than 15 min as failed so
+    // they don't block the UI indefinitely. The previous version of
+    // this function could crash mid-run without updating its row.
+    const staleCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    await supabase.from('contact_runs')
+      .update({ status: 'failed', completed_at: new Date().toISOString(), error_message: 'Timed out (>15 min without completion)' })
+      .eq('status', 'running')
+      .lt('started_at', staleCutoff);
 
     const { data: runRow, error: insertErr } = await supabase.from('contact_runs').insert({
       status: 'running',

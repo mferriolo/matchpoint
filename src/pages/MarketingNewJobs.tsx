@@ -1266,7 +1266,7 @@ const MarketingNewJobs: React.FC = () => {
                         ? `Finding contacts across ${contactRun.companies_total} companies…`
                         : `Finding contacts for ${contactRun.target_company_name || 'company'}…`}
                     </div>
-                    <div className="flex items-center gap-4 text-xs text-emerald-900/80 tabular-nums">
+                    <div className="flex items-center gap-3 text-xs text-emerald-900/80 tabular-nums">
                       <span><strong>{contactRun.companies_processed || 0}</strong>/{contactRun.companies_total || 0} companies</span>
                       <span>·</span>
                       <span><strong className="text-emerald-800">{contactRun.contacts_added || 0}</strong> contacts added</span>
@@ -1276,6 +1276,19 @@ const MarketingNewJobs: React.FC = () => {
                           <span>{contactRun.duplicates_skipped} duplicates skipped</span>
                         </>
                       )}
+                      <button
+                        onClick={async () => {
+                          if (!contactRun?.id) return;
+                          await supabase.from('contact_runs')
+                            .update({ status: 'failed', completed_at: new Date().toISOString(), error_message: 'Cancelled by user' })
+                            .eq('id', contactRun.id);
+                          toast({ title: 'Run cancelled', description: 'The UI stopped polling; work in flight on the server may still finish in the background.' });
+                        }}
+                        className="ml-2 text-[11px] px-2 py-0.5 border border-emerald-300 rounded hover:bg-white text-emerald-900"
+                        title="Mark this run as failed so you can start a new one. Work already in flight on the server will still finish."
+                      >
+                        Cancel
+                      </button>
                     </div>
                   </div>
                   <div className="w-full h-2 bg-emerald-100 rounded-full overflow-hidden">
