@@ -1334,14 +1334,15 @@ const MarketingNewJobs: React.FC = () => {
                       <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[130px]">Phone (Home)</th>
                       <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[130px]">Phone (Cell)</th>
                       <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[120px]">Source</th>
+                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[160px]">Date / Time Added</th>
                       <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider min-w-[200px]">LinkedIn URL</th>
                     </tr>
                   </thead>
                   <tbody>
                     {loading ? (
-                      <tr><td colSpan={10} className="text-center py-12"><Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400" /></td></tr>
+                      <tr><td colSpan={11} className="text-center py-12"><Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400" /></td></tr>
                     ) : filteredContacts.length === 0 ? (
-                      <tr><td colSpan={10} className="text-center py-12 text-gray-500">No contacts found. Run the tracker or import data to add contacts.</td></tr>
+                      <tr><td colSpan={11} className="text-center py-12 text-gray-500">No contacts found. Run the tracker or import data to add contacts.</td></tr>
                     ) : filteredContacts.map((c, idx) => {
                       // Derive LinkedIn URL: prefer linkedin_url field, then check source_url for LinkedIn links
                       const linkedinUrl = c.linkedin_url || 
@@ -1404,6 +1405,27 @@ const MarketingNewJobs: React.FC = () => {
                                 {sourceIcon(c.source)}
                                 {c.source === 'Crelate ATS' ? 'Crelate' : c.source?.includes('Sweep') ? 'AI Sweep' : c.source?.includes('AI') ? 'AI' : c.source || ''}
                               </span>
+                            ) : (
+                              <span className="text-gray-300">—</span>
+                            )}
+                          </td>
+                          {/* Date / Time Added — from marketing_contacts.created_at.
+                              Rendered in the viewer's local timezone; hovering
+                              reveals the full ISO timestamp. */}
+                          <td
+                            className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm tabular-nums"
+                            title={c.created_at || ''}
+                          >
+                            {c.created_at ? (
+                              (() => {
+                                const d = new Date(c.created_at);
+                                return (
+                                  <span>
+                                    <span className="font-medium text-gray-800">{d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</span>
+                                    <span className="text-gray-500 ml-1.5">{d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</span>
+                                  </span>
+                                );
+                              })()
                             ) : (
                               <span className="text-gray-300">—</span>
                             )}
