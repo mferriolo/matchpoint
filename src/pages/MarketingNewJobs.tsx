@@ -83,6 +83,45 @@ const MarketingNewJobs: React.FC = () => {
   };
   const clearContactSelection = () => setSelectedContactIds(new Set());
 
+  // Enrich selected contacts by invoking the enrich-contacts edge
+  // function. It reuses the contact_runs table (mode='enrich') so the
+  // existing progress panel + dialog picks it up without extra wiring.
+  const handleEnrichSelectedContacts = async () => {
+    if (selectedContactIds.size === 0) return;
+    if (contactRunIsActive) {
+      toast({ title: 'Another run is active', description: 'Wait for the current run to finish before starting another.', variant: 'destructive' });
+      return;
+    }
+    const ids = Array.from(selectedContactIds);
+    try {
+      const { data, error } = await supabase.functions.invoke('enrich-contacts', { body: { contactIds: ids } });
+      if (error) throw error;
+      if (!data?.success || !data?.run_id) throw new Error(data?.error || 'No run id returned');
+      setContactRun({
+        id: data.run_id,
+        status: 'running',
+        mode: 'enrich',
+        companies_total: data.companies_total || ids.length,
+        companies_processed: 0,
+        contacts_added: 0,
+        ai_added: 0,
+        crelate_added: 0,
+        apollo_added: 0,
+        leadership_added: 0,
+        emails_verified: 0,
+        duplicates_skipped: 0,
+        current_company: null,
+        target_company_name: null,
+        per_company: [],
+      });
+      // Clear selection so the bulk bar disappears; the progress panel
+      // takes over.
+      clearContactSelection();
+    } catch (err: any) {
+      toast({ title: 'Enrich failed', description: err.message || String(err), variant: 'destructive' });
+    }
+  };
+
   const handleDeleteSelectedContacts = async () => {
     if (selectedContactIds.size === 0) return;
     setDeletingContacts(true);
@@ -220,10 +259,13 @@ const MarketingNewJobs: React.FC = () => {
           const skipped = data.duplicates_skipped ?? 0;
           const processed = data.companies_processed ?? 0;
           const isAll = data.mode === 'all';
+          const isEnrich = data.mode === 'enrich';
           toast({
-            title: isAll
-              ? `Find Contacts: ${added} added across ${processed} companies${skipped ? `, ${skipped} duplicates skipped` : ''}`
-              : `${data.target_company_name || 'Company'}: ${added} new contact${added === 1 ? '' : 's'}${skipped ? `, ${skipped} duplicates skipped` : ''}`,
+            title: isEnrich
+              ? `Enriched ${added} of ${processed} contacts${skipped ? ` (${skipped} had nothing to add)` : ''}`
+              : isAll
+                ? `Find Contacts: ${added} added across ${processed} companies${skipped ? `, ${skipped} duplicates skipped` : ''}`
+                : `${data.target_company_name || 'Company'}: ${added} new contact${added === 1 ? '' : 's'}${skipped ? `, ${skipped} duplicates skipped` : ''}`,
           });
           setFindingContactsForId(null);
           // Persist the final row so the dialog can show full details
@@ -1426,6 +1468,15 @@ const MarketingNewJobs: React.FC = () => {
                       Clear selection
                     </Button>
                     <Button
+                      onClick={handleEnrichSelectedContacts}
+                      disabled={contactRunIsActive}
+                      className="bg-emerald-700 hover:bg-emerald-800 text-white"
+                      title="Fill in missing fields (email, LinkedIn, phone, title) via Apollo + Hunter"
+                    >
+                      <Zap className="w-4 h-4 mr-1.5" />
+                      Enrich {selectedContactIds.size}
+                    </Button>
+                    <Button
                       onClick={() => setShowDeleteContactsConfirm(true)}
                       className="bg-[#911406] hover:bg-[#7a1005] text-white"
                     >
@@ -1443,14 +1494,16 @@ const MarketingNewJobs: React.FC = () => {
                   <div className="flex items-center justify-between mb-2 text-sm">
                     <div className="flex items-center gap-2 text-emerald-900 font-medium">
                       <Loader2 className="w-4 h-4 animate-spin text-emerald-700" />
-                      {contactRun.mode === 'all'
-                        ? `Finding contacts across ${contactRun.companies_total} companies…`
-                        : `Finding contacts for ${contactRun.target_company_name || 'company'}…`}
+                      {contactRun.mode === 'enrich'
+                        ? `Enriching ${contactRun.companies_total} contact${contactRun.companies_total === 1 ? '' : 's'}…`
+                        : contactRun.mode === 'all'
+                          ? `Finding contacts across ${contactRun.companies_total} companies…`
+                          : `Finding contacts for ${contactRun.target_company_name || 'company'}…`}
                     </div>
                     <div className="flex items-center gap-3 text-xs text-emerald-900/80 tabular-nums">
-                      <span><strong>{contactRun.companies_processed || 0}</strong>/{contactRun.companies_total || 0} companies</span>
+                      <span><strong>{contactRun.companies_processed || 0}</strong>/{contactRun.companies_total || 0} {contactRun.mode === 'enrich' ? 'contacts' : 'companies'}</span>
                       <span>·</span>
-                      <span><strong className="text-emerald-800">{contactRun.contacts_added || 0}</strong> contacts added</span>
+                      <span><strong className="text-emerald-800">{contactRun.contacts_added || 0}</strong> {contactRun.mode === 'enrich' ? 'enriched' : 'contacts added'}</span>
                       {(contactRun.duplicates_skipped || 0) > 0 && (
                         <>
                           <span>·</span>
