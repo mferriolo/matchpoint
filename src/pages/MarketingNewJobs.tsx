@@ -79,8 +79,9 @@ const MarketingNewJobs: React.FC = () => {
   ];
   const [editingCompanyTypeId, setEditingCompanyTypeId] = useState<string | null>(null);
 
-  // Category column filter on the Companies tab.
-  const [filterCompanyCategory, setFilterCompanyCategory] = useState<string>('All');
+  // Category column filter on the Companies tab. Multi-select: empty set
+  // == "no filter"; any non-empty set restricts to the listed categories.
+  const [filterCompanyCategory, setFilterCompanyCategory] = useState<Set<string>>(new Set());
   const [companyCategoryFilterOpen, setCompanyCategoryFilterOpen] = useState(false);
   const companyCategoryFilterRef = React.useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -356,7 +357,7 @@ const MarketingNewJobs: React.FC = () => {
         // Hide blocked companies unless the user opts in via the toggle.
         if (!showBlockedCompanies && c.is_blocked) return false;
         if (filterHighPriorityCompanies && !c.is_high_priority) return false;
-        if (filterCompanyCategory !== 'All' && (c.company_type || '') !== filterCompanyCategory) return false;
+        if (filterCompanyCategory.size > 0 && !filterCompanyCategory.has(c.company_type || '')) return false;
         if (!searchCompanies) return true;
         const s = searchCompanies.toLowerCase();
         return c.company_name?.toLowerCase().includes(s) ||
@@ -782,41 +783,80 @@ const MarketingNewJobs: React.FC = () => {
                           </button>
                           <button
                             onClick={(e) => { e.stopPropagation(); setCompanyCategoryFilterOpen(o => !o); }}
-                            className={`p-0.5 rounded transition-colors ml-0.5 ${filterCompanyCategory !== 'All' ? 'text-[#911406] bg-red-50' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
-                            title="Filter by Category"
+                            className={`p-0.5 rounded transition-colors ml-0.5 ${filterCompanyCategory.size > 0 ? 'text-[#911406] bg-red-50' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
+                            title={`Filter by Category${filterCompanyCategory.size > 0 ? ` (${filterCompanyCategory.size} selected)` : ''}`}
                           >
                             <Filter className="w-3 h-3" />
                           </button>
-                          {filterCompanyCategory !== 'All' && (
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setFilterCompanyCategory('All'); }}
-                              className="p-0.5 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
-                              title="Clear filter"
-                            >
-                              <X className="w-3 h-3" />
-                            </button>
+                          {filterCompanyCategory.size > 0 && (
+                            <>
+                              <span className="text-[10px] font-semibold text-[#911406] bg-red-50 px-1 rounded tabular-nums">{filterCompanyCategory.size}</span>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setFilterCompanyCategory(new Set()); }}
+                                className="p-0.5 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                                title="Clear filter"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            </>
                           )}
                         </div>
                         {companyCategoryFilterOpen && (
                           <div
                             ref={companyCategoryFilterRef}
-                            className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-xl z-50 min-w-[220px] max-h-[360px] flex flex-col"
+                            className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-xl z-50 min-w-[240px] max-h-[400px] flex flex-col"
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <div className="p-2 border-b border-gray-100 sticky top-0 bg-white z-10">
+                            <div className="p-2 border-b border-gray-100 sticky top-0 bg-white z-10 flex items-center justify-between">
                               <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Filter by Category</p>
+                              {filterCompanyCategory.size > 0 && (
+                                <span className="text-[10px] text-[#911406] font-semibold">{filterCompanyCategory.size} selected</span>
+                              )}
                             </div>
                             <div className="py-1 overflow-y-auto flex-1">
-                              {['All', ...COMPANY_CATEGORY_OPTIONS].map(opt => (
-                                <button
-                                  key={opt}
-                                  onClick={() => { setFilterCompanyCategory(opt); setCompanyCategoryFilterOpen(false); }}
-                                  className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors flex items-center justify-between ${filterCompanyCategory === opt ? 'bg-red-50 text-[#911406] font-medium' : 'text-gray-700'}`}
-                                >
-                                  <span className="truncate">{opt}</span>
-                                  {filterCompanyCategory === opt && <span className="w-1.5 h-1.5 rounded-full bg-[#911406] flex-shrink-0 ml-2" />}
-                                </button>
-                              ))}
+                              {COMPANY_CATEGORY_OPTIONS.map(opt => {
+                                const checked = filterCompanyCategory.has(opt);
+                                return (
+                                  <label
+                                    key={opt}
+                                    className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors flex items-center gap-2 cursor-pointer ${checked ? 'bg-red-50/50 text-[#911406] font-medium' : 'text-gray-700'}`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={checked}
+                                      onChange={() => {
+                                        const next = new Set(filterCompanyCategory);
+                                        if (next.has(opt)) next.delete(opt);
+                                        else next.add(opt);
+                                        setFilterCompanyCategory(next);
+                                      }}
+                                      className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
+                                    />
+                                    <span className="truncate flex-1">{opt}</span>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                            <div className="border-t border-gray-100 px-3 py-2 flex items-center justify-between gap-2 bg-gray-50/50">
+                              <button
+                                onClick={() => setFilterCompanyCategory(new Set(COMPANY_CATEGORY_OPTIONS))}
+                                className="text-[11px] text-gray-600 hover:text-[#911406] font-medium"
+                              >
+                                Select all
+                              </button>
+                              <button
+                                onClick={() => setFilterCompanyCategory(new Set())}
+                                className="text-[11px] text-gray-600 hover:text-[#911406] font-medium"
+                                disabled={filterCompanyCategory.size === 0}
+                              >
+                                Clear
+                              </button>
+                              <button
+                                onClick={() => setCompanyCategoryFilterOpen(false)}
+                                className="text-[11px] text-white bg-[#911406] hover:bg-[#7a1005] px-2.5 py-1 rounded font-medium"
+                              >
+                                Done
+                              </button>
                             </div>
                           </div>
                         )}

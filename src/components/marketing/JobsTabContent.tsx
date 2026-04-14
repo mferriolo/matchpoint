@@ -144,12 +144,14 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
 
 
 
-  // Column filters
-  const [filterCategory, setFilterCategory] = useState('All');
-  const [filterJobType, setFilterJobType] = useState('All');
-  const [filterJobTitle, setFilterJobTitle] = useState('All');
-  const [filterCompany, setFilterCompany] = useState('All');
-  const [filterLocation, setFilterLocation] = useState('All');
+  // Column filters. Multi-select: empty set == "no filter applied" (all
+  // values pass). Any non-empty set restricts the column to the listed
+  // values via .has() checks below.
+  const [filterCategory, setFilterCategory] = useState<Set<string>>(new Set());
+  const [filterJobType, setFilterJobType] = useState<Set<string>>(new Set());
+  const [filterJobTitle, setFilterJobTitle] = useState<Set<string>>(new Set());
+  const [filterCompany, setFilterCompany] = useState<Set<string>>(new Set());
+  const [filterLocation, setFilterLocation] = useState<Set<string>>(new Set());
 
   // Dropdown open state
   const [openFilter, setOpenFilter] = useState<string | null>(null);
@@ -206,11 +208,12 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Derive unique values for filter dropdowns
+  // Derive unique values for filter dropdowns. No 'All' sentinel: the
+  // multi-select checkbox list uses an empty set to mean "no filter".
   const uniqueCompanies = useMemo(() => {
     const set = new Set<string>();
     jobs.forEach(j => { if (j.company_name) set.add(j.company_name); });
-    return ['All', ...Array.from(set).sort()];
+    return Array.from(set).sort();
   }, [jobs]);
 
   const uniqueLocations = useMemo(() => {
@@ -219,13 +222,13 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
       const loc = j.city && j.state ? `${j.city}, ${j.state}` : j.state || j.city;
       if (loc) set.add(loc);
     });
-    return ['All', ...Array.from(set).sort()];
+    return Array.from(set).sort();
   }, [jobs]);
 
   const uniqueJobTitles = useMemo(() => {
     const set = new Set<string>();
     jobs.forEach(j => { if (j.job_title) set.add(j.job_title); });
-    return ['All', ...Array.from(set).sort()];
+    return Array.from(set).sort();
   }, [jobs]);
 
   // Split jobs into open and closed
@@ -256,16 +259,16 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
           (j.job_category || '').toLowerCase().includes(s);
         if (!matchesSearch) return false;
       }
-      if (filterCategory !== 'All' && j.job_category !== filterCategory) return false;
-      if (filterJobTitle !== 'All' && j.job_title !== filterJobTitle) return false;
-      if (filterJobType !== 'All') {
+      if (filterCategory.size > 0 && !filterCategory.has(j.job_category || '')) return false;
+      if (filterJobTitle.size > 0 && !filterJobTitle.has(j.job_title || '')) return false;
+      if (filterJobType.size > 0) {
         const classified = classifyJobType(j.job_title || '', j.job_type || j.opportunity_type || '');
-        if (filterJobType !== classified) return false;
+        if (!filterJobType.has(classified)) return false;
       }
-      if (filterCompany !== 'All' && j.company_name !== filterCompany) return false;
-      if (filterLocation !== 'All') {
+      if (filterCompany.size > 0 && !filterCompany.has(j.company_name || '')) return false;
+      if (filterLocation.size > 0) {
         const loc = j.city && j.state ? `${j.city}, ${j.state}` : j.state || j.city || '';
-        if (loc !== filterLocation) return false;
+        if (!filterLocation.has(loc)) return false;
       }
       return true;
     });
@@ -690,15 +693,16 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
 
 
 
-  // Active filter count
-  const activeFilterCount = [filterCategory, filterJobType, filterJobTitle, filterCompany, filterLocation].filter(f => f !== 'All').length;
+  // Active filter count — counts each column that has at least one value
+  // selected (not the total number of selected values across columns).
+  const activeFilterCount = [filterCategory, filterJobType, filterJobTitle, filterCompany, filterLocation].filter(s => s.size > 0).length;
 
   const clearAllFilters = () => {
-    setFilterCategory('All');
-    setFilterJobType('All');
-    setFilterJobTitle('All');
-    setFilterCompany('All');
-    setFilterLocation('All');
+    setFilterCategory(new Set());
+    setFilterJobType(new Set());
+    setFilterJobTitle(new Set());
+    setFilterCompany(new Set());
+    setFilterLocation(new Set());
     setFilterHighPriority(false);
     setSearchTerm('');
   };
@@ -711,26 +715,40 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
       : <ArrowDown className="w-3 h-3 ml-1 text-[#911406] flex-shrink-0" />;
   };
 
-  // Column header with sort + filter
+  // Column header with sort + multi-select filter. filterValues is a Set
+  // of currently-selected values for this column; an empty set means "no
+  // filter" (all rows pass). Checking/unchecking a row toggles it in the
+  // set. The "Select all" / "Clear" links in the footer are convenience
+  // shortcuts over the currently-visible (search-filtered) options.
   const ColumnHeader = ({
-    field, label, filterValue, filterOptions, onFilterChange, filterKey
+    field, label, filterValues, filterOptions, onFilterChange, filterKey
   }: {
-    field: SortField; label: string; filterValue: string; filterOptions: string[];
-    onFilterChange: (val: string) => void; filterKey: string;
+    field: SortField; label: string; filterValues: Set<string>; filterOptions: string[];
+    onFilterChange: (next: Set<string>) => void; filterKey: string;
   }) => {
     const isFilterOpen = openFilter === filterKey;
-    const hasFilter = filterValue !== 'All';
+    const hasFilter = filterValues.size > 0;
     const [filterSearch, setFilterSearch] = useState('');
 
+    // Hide the legacy 'All' sentinel from options if a call site still passes it.
+    const cleanOptions = useMemo(() => filterOptions.filter(o => o !== 'All'), [filterOptions]);
+
     const displayOptions = useMemo(() => {
-      if (!filterSearch) return filterOptions;
+      if (!filterSearch) return cleanOptions;
       const s = filterSearch.toLowerCase();
-      return filterOptions.filter(opt => opt === 'All' || opt.toLowerCase().includes(s));
-    }, [filterOptions, filterSearch]);
+      return cleanOptions.filter(opt => opt.toLowerCase().includes(s));
+    }, [cleanOptions, filterSearch]);
 
     React.useEffect(() => {
       if (!isFilterOpen) setFilterSearch('');
     }, [isFilterOpen]);
+
+    const toggleOption = (opt: string) => {
+      const next = new Set(filterValues);
+      if (next.has(opt)) next.delete(opt);
+      else next.add(opt);
+      onFilterChange(next);
+    };
 
     return (
       <th className="text-left px-4 py-3 font-medium text-gray-600 relative select-none">
@@ -745,29 +763,37 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
           <button
             onClick={(e) => { e.stopPropagation(); setOpenFilter(isFilterOpen ? null : filterKey); }}
             className={`p-0.5 rounded transition-colors ml-0.5 ${hasFilter ? 'text-[#911406] bg-red-50' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
-            title={`Filter by ${label}`}
+            title={`Filter by ${label}${hasFilter ? ` (${filterValues.size} selected)` : ''}`}
           >
             <Filter className="w-3 h-3" />
           </button>
           {hasFilter && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onFilterChange('All'); }}
-              className="p-0.5 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
-              title="Clear filter"
-            >
-              <X className="w-3 h-3" />
-            </button>
+            <>
+              <span className="text-[10px] font-semibold text-[#911406] bg-red-50 px-1 rounded tabular-nums">{filterValues.size}</span>
+              <button
+                onClick={(e) => { e.stopPropagation(); onFilterChange(new Set()); }}
+                className="p-0.5 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                title="Clear filter"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </>
           )}
         </div>
         {isFilterOpen && (
           <div
             ref={filterRef}
-            className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-xl z-50 min-w-[220px] max-h-[360px] flex flex-col"
+            className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-xl z-50 min-w-[240px] max-h-[400px] flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="p-2 border-b border-gray-100 sticky top-0 bg-white z-10">
-              <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-1.5">Filter by {label}</p>
-              {filterOptions.length > 8 && (
+              <div className="flex items-center justify-between mb-1.5">
+                <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Filter by {label}</p>
+                {hasFilter && (
+                  <span className="text-[10px] text-[#911406] font-semibold">{filterValues.size} selected</span>
+                )}
+              </div>
+              {cleanOptions.length > 8 && (
                 <input
                   type="text"
                   placeholder={`Search ${label.toLowerCase()}...`}
@@ -779,19 +805,47 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
               )}
             </div>
             <div className="py-1 overflow-y-auto flex-1">
-              {displayOptions.map(opt => (
-                <button
-                  key={opt}
-                  onClick={() => { onFilterChange(opt); setOpenFilter(null); }}
-                  className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors flex items-center justify-between ${filterValue === opt ? 'bg-red-50 text-[#911406] font-medium' : 'text-gray-700'}`}
-                >
-                  <span className="truncate">{opt}</span>
-                  {filterValue === opt && <span className="w-1.5 h-1.5 rounded-full bg-[#911406] flex-shrink-0 ml-2" />}
-                </button>
-              ))}
+              {displayOptions.map(opt => {
+                const checked = filterValues.has(opt);
+                return (
+                  <label
+                    key={opt}
+                    className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors flex items-center gap-2 cursor-pointer ${checked ? 'bg-red-50/50 text-[#911406] font-medium' : 'text-gray-700'}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleOption(opt)}
+                      className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
+                    />
+                    <span className="truncate flex-1">{opt}</span>
+                  </label>
+                );
+              })}
               {displayOptions.length === 0 && (
                 <p className="text-xs text-gray-400 px-3 py-2 italic">No matches</p>
               )}
+            </div>
+            <div className="border-t border-gray-100 px-3 py-2 flex items-center justify-between gap-2 bg-gray-50/50">
+              <button
+                onClick={() => onFilterChange(new Set(displayOptions))}
+                className="text-[11px] text-gray-600 hover:text-[#911406] font-medium"
+              >
+                Select all{filterSearch ? ' (visible)' : ''}
+              </button>
+              <button
+                onClick={() => onFilterChange(new Set())}
+                className="text-[11px] text-gray-600 hover:text-[#911406] font-medium"
+                disabled={!hasFilter}
+              >
+                Clear
+              </button>
+              <button
+                onClick={() => setOpenFilter(null)}
+                className="text-[11px] text-white bg-[#911406] hover:bg-[#7a1005] px-2.5 py-1 rounded font-medium"
+              >
+                Done
+              </button>
             </div>
           </div>
         )}
@@ -1040,11 +1094,11 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                   title={allVisibleSelected ? 'Deselect all visible' : 'Select all visible'}
                 />
               </th>
-              <ColumnHeader field="company_name" label="Company" filterValue={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} filterKey="company" />
-              <ColumnHeader field="job_title" label="Job Title" filterValue={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} filterKey="title" />
-              <ColumnHeader field="job_type" label="Job Type" filterValue={filterJobType} filterOptions={JOB_TYPE_OPTIONS} onFilterChange={setFilterJobType} filterKey="jobtype" />
-              <ColumnHeader field="job_category" label="Company Category" filterValue={filterCategory} filterOptions={CATEGORY_OPTIONS} onFilterChange={setFilterCategory} filterKey="category" />
-              <ColumnHeader field="location" label="Location" filterValue={filterLocation} filterOptions={uniqueLocations} onFilterChange={setFilterLocation} filterKey="location" />
+              <ColumnHeader field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} filterKey="company" />
+              <ColumnHeader field="job_title" label="Job Title" filterValues={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} filterKey="title" />
+              <ColumnHeader field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={JOB_TYPE_OPTIONS} onFilterChange={setFilterJobType} filterKey="jobtype" />
+              <ColumnHeader field="job_category" label="Company Category" filterValues={filterCategory} filterOptions={CATEGORY_OPTIONS} onFilterChange={setFilterCategory} filterKey="category" />
+              <ColumnHeader field="location" label="Location" filterValues={filterLocation} filterOptions={uniqueLocations} onFilterChange={setFilterLocation} filterKey="location" />
 
               <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[110px]">
                 <button onClick={() => handleSort('date_posted')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
