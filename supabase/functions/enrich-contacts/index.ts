@@ -32,6 +32,62 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 const APOLLO_BASE = "https://api.apollo.io/v1";
 const HUNTER_BASE = "https://api.hunter.io/v2";
+const SERP_BASE = "https://serpapi.com/search.json";
+
+// Target Google result pages we'll read. LinkedIn is tried first
+// because it's the most reliable single source for a hiring contact.
+async function serpSearch(query: string, serpKey: string, num = 10): Promise<any[]> {
+  const url = `${SERP_BASE}?q=${encodeURIComponent(query)}&api_key=${encodeURIComponent(serpKey)}&num=${num}&engine=google`;
+  const r = await fetch(url);
+  if (!r.ok) {
+    console.warn(`SerpAPI ${r.status} for "${query}"`);
+    return [];
+  }
+  const d = await r.json();
+  return d.organic_results || [];
+}
+
+// gpt-4o-mini snippet extractor. Given a bundle of Google result
+// snippets about a specific person, return only verifiable data.
+async function aiExtractFromSnippets(fn: string, ln: string, companyName: string, snippets: string, openaiKey: string): Promise<{
+  title?: string; email?: string; phone?: string; linkedin_url?: string;
+} | null> {
+  const prompt = `You are extracting contact information about a specific person from Google search result snippets.
+
+PERSON: ${fn} ${ln}
+COMPANY: ${companyName}
+
+SEARCH RESULT SNIPPETS:
+${snippets.slice(0, 6000)}
+
+Return a JSON object with ONLY fields that are DIRECTLY VERIFIABLE in the snippets above. Omit any field you can't confirm.
+- title: their current job title at the named company (do not invent)
+- email: an email address literally visible in the snippets (do not construct from a pattern)
+- phone: a phone number literally visible
+- linkedin_url: a linkedin.com/in/ URL literally visible
+
+Return JSON only, no commentary. Example: {"title":"Chief Medical Officer","linkedin_url":"https://linkedin.com/in/janedoe"}
+Return {} if you can't verify anything.`;
+  try {
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        max_tokens: 500,
+        response_format: { type: 'json_object' },
+      }),
+    });
+    const d = await r.json();
+    const text = d.choices?.[0]?.message?.content || '{}';
+    return JSON.parse(text);
+  } catch (e) {
+    console.warn(`AI extract error for ${fn} ${ln}:`, (e as Error).message);
+    return null;
+  }
+}
 
 // ----------------- helpers -----------------
 
@@ -120,14 +176,17 @@ type EnrichResult = {
   contactId: string;
   contactName: string;
   fieldsUpdated: string[];
+  serpHit: boolean;             // SerpAPI + AI extract produced a field
   apolloHit: boolean;
   hunterHit: boolean;
+  serpAttempted: boolean;
+  serpResultsCount: number;     // how many Google organic results came back
   apolloAttempted: boolean;
-  apolloMatched: boolean;       // Apollo returned a person object
-  apolloHadDomain: boolean;     // we passed a domain (vs. org name) to Apollo
+  apolloMatched: boolean;
+  apolloHadDomain: boolean;
   hunterAttempted: boolean;
-  hunterMatched: boolean;       // Hunter returned an email
-  skipReason: string | null;    // populated when fieldsUpdated.length === 0
+  hunterMatched: boolean;
+  skipReason: string | null;
   errors: string[];
 };
 
@@ -136,13 +195,18 @@ async function enrichContact(
   companyDomain: string | null,
   apolloKey: string | undefined,
   hunterKey: string | undefined,
+  serpKey: string | undefined,
+  openaiKey: string | undefined,
 ): Promise<EnrichResult> {
   const res: EnrichResult = {
     contactId: c.id,
     contactName: `${c.first_name || ''} ${c.last_name || ''}`.trim() || '(unnamed)',
     fieldsUpdated: [],
+    serpHit: false,
     apolloHit: false,
     hunterHit: false,
+    serpAttempted: false,
+    serpResultsCount: 0,
     apolloAttempted: false,
     apolloMatched: false,
     apolloHadDomain: !!companyDomain,
@@ -160,7 +224,82 @@ async function enrichContact(
   const updates: Record<string, any> = {};
   const notes: string[] = [];
 
-  // 1. Apollo people/match — one call can fill multiple fields.
+  // 1. SerpAPI + AI — primary source. Runs Google queries and asks
+  //    gpt-4o-mini to extract verifiable fields from the result
+  //    snippets. Reliable on any plan; costs pennies per contact.
+  if (serpKey && openaiKey) {
+    res.serpAttempted = true;
+    try {
+      // First: direct LinkedIn lookup via `site:linkedin.com/in "<name>" "<company>"`.
+      const existingLinkedin = c.linkedin_url || (isLinkedInUrl(c.source_url) ? c.source_url : '');
+      if (!existingLinkedin) {
+        const liResults = await withTimeout(
+          serpSearch(`site:linkedin.com/in "${fn} ${ln}" "${c.company_name}"`, serpKey, 5),
+          10_000,
+          `SerpAPI-linkedin(${fn} ${ln})`
+        );
+        if (liResults && liResults.length > 0) {
+          const first = liResults.find((r2: any) => typeof r2.link === 'string' && r2.link.includes('linkedin.com/in/'));
+          if (first?.link) {
+            updates.linkedin_url = first.link;
+            res.fieldsUpdated.push('linkedin_url');
+            res.serpHit = true;
+            notes.push('SerpAPI found LinkedIn');
+          }
+        }
+      }
+
+      // Then: broader search + AI extract for title / email / phone.
+      // Only if any of those fields are missing on the contact.
+      const needsExtra = !c.title || !c.email || !c.phone_work;
+      if (needsExtra) {
+        const general = await withTimeout(
+          serpSearch(`"${fn} ${ln}" "${c.company_name}"`, serpKey, 10),
+          10_000,
+          `SerpAPI-general(${fn} ${ln})`
+        );
+        res.serpResultsCount = general?.length || 0;
+        if (general && general.length > 0) {
+          const snippetText = general
+            .slice(0, 10)
+            .map((r2: any) => `${r2.title || ''} — ${r2.snippet || ''} (source: ${r2.link || ''})`)
+            .join('\n');
+          const extracted = await withTimeout(
+            aiExtractFromSnippets(fn, ln, c.company_name!, snippetText, openaiKey),
+            20_000,
+            `AI-extract(${fn} ${ln})`
+          );
+          if (extracted) {
+            if (!c.title && extracted.title && typeof extracted.title === 'string') {
+              updates.title = extracted.title;
+              if (!res.fieldsUpdated.includes('title')) res.fieldsUpdated.push('title');
+              res.serpHit = true;
+            }
+            if (!c.email && extracted.email && typeof extracted.email === 'string' && extracted.email.includes('@')) {
+              updates.email = extracted.email;
+              if (!res.fieldsUpdated.includes('email')) res.fieldsUpdated.push('email');
+              res.serpHit = true;
+            }
+            if (!c.phone_work && extracted.phone && typeof extracted.phone === 'string') {
+              updates.phone_work = extracted.phone;
+              if (!res.fieldsUpdated.includes('phone_work')) res.fieldsUpdated.push('phone_work');
+              res.serpHit = true;
+            }
+            if (!updates.linkedin_url && !existingLinkedin && extracted.linkedin_url && isLinkedInUrl(extracted.linkedin_url)) {
+              updates.linkedin_url = extracted.linkedin_url;
+              if (!res.fieldsUpdated.includes('linkedin_url')) res.fieldsUpdated.push('linkedin_url');
+              res.serpHit = true;
+            }
+            if (res.serpHit) notes.push(`SerpAPI/AI filled: ${res.fieldsUpdated.join(', ')}`);
+          }
+        }
+      }
+    } catch (e) {
+      res.errors.push(`SerpAPI: ${(e as Error).message}`);
+    }
+  }
+
+  // 2. Apollo people/match — one call can fill multiple fields.
   if (apolloKey) {
     res.apolloAttempted = true;
     const p = await withTimeout(
@@ -217,12 +356,21 @@ async function enrichContact(
 
   if (Object.keys(updates).length === 0) {
     // Build a specific reason so the UI can explain what to try next.
-    if (!res.apolloAttempted && !res.hunterAttempted) res.skipReason = 'no enrichment sources were configured';
-    else if (res.apolloAttempted && !res.apolloMatched && !res.hunterAttempted) res.skipReason = `Apollo had no match for ${fn} ${ln}${companyDomain ? ` @ ${companyDomain}` : ` at "${c.company_name}"`}`;
-    else if (res.apolloAttempted && !res.apolloMatched && res.hunterAttempted && !res.hunterMatched) res.skipReason = `no match in Apollo or Hunter (domain: ${companyDomain || 'not set — add a website to the company to improve matching'})`;
-    else if (res.apolloMatched && !res.hunterAttempted) res.skipReason = 'Apollo match found, but every field it returned was already filled on this contact';
-    else if (res.apolloMatched && res.hunterAttempted && !res.hunterMatched) res.skipReason = 'Apollo had no new fields to add; Hunter could not find an email';
-    else res.skipReason = 'no new information available';
+    const parts: string[] = [];
+    if (res.serpAttempted) {
+      if (res.serpResultsCount === 0) parts.push(`Google returned 0 results for "${fn} ${ln} ${c.company_name}"`);
+      else parts.push(`Google returned ${res.serpResultsCount} results but nothing verifiable could be extracted`);
+    }
+    if (res.apolloAttempted && !res.apolloMatched) {
+      parts.push(`Apollo had no match${companyDomain ? ` @ ${companyDomain}` : ` at "${c.company_name}"`}`);
+    } else if (res.apolloMatched) {
+      parts.push('Apollo matched but returned no new fields (may be paywalled — free tier locks email/phone)');
+    }
+    if (res.hunterAttempted && !res.hunterMatched) {
+      parts.push(`Hunter could not find an email${!companyDomain ? ' (no company website on file)' : ''}`);
+    }
+    if (!res.serpAttempted && !res.apolloAttempted && !res.hunterAttempted) parts.push('no enrichment sources were configured');
+    res.skipReason = parts.join(' · ') || 'no new information available';
     return res;
   }
 
@@ -240,7 +388,7 @@ async function enrichContact(
 
 // ----------------- background task -----------------
 
-async function processRun(runId: string, contactIds: string[], apolloKey: string|undefined, hunterKey: string|undefined) {
+async function processRun(runId: string, contactIds: string[], apolloKey: string|undefined, hunterKey: string|undefined, serpKey: string|undefined, openaiKey: string|undefined) {
   const startedAt = Date.now();
   try {
     // Load the contacts + their companies' websites in two queries so
@@ -258,7 +406,7 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
     }
 
     const results: EnrichResult[] = [];
-    const totals = { enriched: 0, apollo: 0, hunter: 0, skipped: 0 };
+    const totals = { enriched: 0, serp: 0, apollo: 0, hunter: 0, skipped: 0 };
 
     for (let i = 0; i < rows.length; i++) {
       const c = rows[i];
@@ -268,10 +416,11 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
       }).eq('id', runId);
 
       const domain = c.company_id ? (domainByCoId.get(c.company_id) || null) : null;
-      const r = await enrichContact(c, domain, apolloKey, hunterKey);
+      const r = await enrichContact(c, domain, apolloKey, hunterKey, serpKey, openaiKey);
       results.push(r);
       if (r.fieldsUpdated.length > 0) totals.enriched++;
       else totals.skipped++;
+      if (r.serpHit) totals.serp++;
       if (r.apolloHit) totals.apollo++;
       if (r.hunterHit) totals.hunter++;
 
@@ -279,12 +428,14 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
       await supabase.from('contact_runs').update({
         companies_processed: i + 1,
         contacts_added: totals.enriched,
+        // ai_added is reused as the SerpAPI+AI counter for enrich runs
+        ai_added: totals.serp,
         apollo_added: totals.apollo,
         emails_verified: totals.hunter,
         duplicates_skipped: totals.skipped,
         per_company: results.map(r => ({
           company: r.contactName,
-          ai_added: 0,
+          ai_added: r.serpHit ? 1 : 0,
           crelate_added: 0,
           apollo_added: r.apolloHit ? 1 : 0,
           leadership_added: 0,
@@ -293,6 +444,8 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
           errors: r.errors,
           fields_updated: r.fieldsUpdated,
           skip_reason: r.skipReason,
+          serp_attempted: r.serpAttempted,
+          serp_results: r.serpResultsCount,
           apollo_attempted: r.apolloAttempted,
           apollo_matched: r.apolloMatched,
           hunter_attempted: r.hunterAttempted,
@@ -307,7 +460,7 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
       completed_at: new Date().toISOString(),
       current_company: null,
     }).eq('id', runId);
-    console.log(`enrich-contacts run ${runId} done in ${Math.round((Date.now() - startedAt) / 1000)}s — enriched ${totals.enriched} of ${rows.length}, Apollo:${totals.apollo} Hunter:${totals.hunter}`);
+    console.log(`enrich-contacts run ${runId} done in ${Math.round((Date.now() - startedAt) / 1000)}s — enriched ${totals.enriched} of ${rows.length}, SerpAPI:${totals.serp} Apollo:${totals.apollo} Hunter:${totals.hunter}`);
   } catch (e) {
     const msg = (e as Error).message || String(e);
     console.error(`enrich-contacts run ${runId} failed:`, msg);
@@ -357,9 +510,16 @@ Deno.serve(async (req) => {
     };
     const apolloPick = pickEnv('APOLLO_API_KEY', 'APOLLO_KEY', 'APOLLO_TOKEN', 'APOLLO_IO_API_KEY', 'APOLLO_IO_KEY');
     const hunterPick = pickEnv('HUNTER_API_KEY', 'HUNTER_KEY', 'HUNTER_TOKEN', 'HUNTER_IO_API_KEY', 'HUNTER_IO_KEY');
+    const serpPick = pickEnv('SERP_API_KEY', 'SERPAPI_API_KEY', 'SERPAPI_KEY', 'SERP_KEY');
+    const openaiPick = pickEnv('OPENAI_API_KEY', 'OPENAI_KEY', 'OPENAI_TOKEN');
     const apolloKey = apolloPick.value;
     const hunterKey = hunterPick.value;
-    if (!apolloKey && !hunterKey) {
+    const serpKey = serpPick.value;
+    const openaiKey = openaiPick.value;
+    // The function can enrich with any combo — SerpAPI+OpenAI is the
+    // primary source and runs on existing credentials; Apollo/Hunter are
+    // fallbacks. Only bail if NONE of the four are available.
+    if (!apolloKey && !hunterKey && !(serpKey && openaiKey)) {
       // Report presence of every env var the function can see (all
       // non-internal ones). This makes misnamed secrets obvious.
       const envKeys = Object.keys(Deno.env.toObject()).sort();
@@ -378,7 +538,7 @@ Deno.serve(async (req) => {
         status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     }
-    console.log(`enrich-contacts using Apollo via ${apolloPick.matched || '(none)'}, Hunter via ${hunterPick.matched || '(none)'}`);
+    console.log(`enrich-contacts keys: SerpAPI=${serpPick.matched || '(none)'}, OpenAI=${openaiPick.matched || '(none)'}, Apollo=${apolloPick.matched || '(none)'}, Hunter=${hunterPick.matched || '(none)'}`);
 
     // Auto-clear stuck runs older than 15 min.
     const staleCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
@@ -401,14 +561,19 @@ Deno.serve(async (req) => {
       });
     }
 
-    EdgeRuntime.waitUntil(processRun(runRow.id, contactIds, apolloKey, hunterKey));
+    EdgeRuntime.waitUntil(processRun(runRow.id, contactIds, apolloKey, hunterKey, serpKey, openaiKey));
 
     return new Response(JSON.stringify({
       success: true,
       run_id: runRow.id,
       mode: 'enrich',
       companies_total: contactIds.length,
-      sources_active: { apollo: !!apolloKey, hunter: !!hunterKey },
+      sources_active: {
+        serpapi: !!serpKey,
+        openai: !!openaiKey,
+        apollo: !!apolloKey,
+        hunter: !!hunterKey,
+      },
     }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 
   } catch (error) {
