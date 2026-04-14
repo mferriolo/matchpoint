@@ -15,6 +15,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter
 } from '@/components/ui/dialog';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { useToast } from '@/hooks/use-toast';
 
 interface JobsTabContentProps {
@@ -29,51 +30,31 @@ type SortDir = 'asc' | 'desc';
 
 const JOB_TYPE_OPTIONS = ['All', 'CMO', 'Medical Director', 'PCP', 'APP', 'Other'];
 
-// Multi-select column header extracted to MODULE scope so it isn't
-// remounted on every parent re-render. When this was defined inside the
-// parent component body, checking a checkbox caused parent state to
-// change → parent re-render → React saw a new function reference and
-// unmounted + remounted the whole dropdown. That remount briefly
-// detached the click-outside ref and closed the popup before the user
-// could select a second option. Keeping this at module scope means the
-// component type is stable across parent renders; only props change.
+// Multi-select column header. Uses Radix Popover (portal-based) for the
+// dropdown — this takes care of focus management, click-outside, escape
+// key handling, and (crucially) keeps the popover DOM stable across
+// parent re-renders so that checking one checkbox doesn't tear down and
+// rebuild the popup.
 type MultiSelectColumnHeaderProps<Field extends string> = {
   field: Field;
   label: string;
   filterValues: Set<string>;
   filterOptions: string[];
   onFilterChange: (next: Set<string>) => void;
-  filterKey: string;
-  openFilter: string | null;
-  setOpenFilter: (k: string | null) => void;
   sortField: Field;
   sortDir: 'asc' | 'desc';
   onSort: (f: Field) => void;
 };
 
 function MultiSelectColumnHeader<Field extends string>(props: MultiSelectColumnHeaderProps<Field>) {
-  const { field, label, filterValues, filterOptions, onFilterChange, filterKey,
-    openFilter, setOpenFilter, sortField, sortDir, onSort } = props;
-  const isFilterOpen = openFilter === filterKey;
+  const { field, label, filterValues, filterOptions, onFilterChange,
+    sortField, sortDir, onSort } = props;
   const hasFilter = filterValues.size > 0;
+  const [open, setOpen] = useState(false);
   const [filterSearch, setFilterSearch] = useState('');
-  const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Reset the search box when the dropdown closes.
-  React.useEffect(() => { if (!isFilterOpen) setFilterSearch(''); }, [isFilterOpen]);
-
-  // Per-dropdown click-outside handler. Only armed while open, so it
-  // can't fire stale-ref checks during other re-renders.
-  React.useEffect(() => {
-    if (!isFilterOpen) return;
-    const onDocMouseDown = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setOpenFilter(null);
-      }
-    };
-    document.addEventListener('mousedown', onDocMouseDown);
-    return () => document.removeEventListener('mousedown', onDocMouseDown);
-  }, [isFilterOpen, setOpenFilter]);
+  React.useEffect(() => { if (!open) setFilterSearch(''); }, [open]);
 
   // Hide the legacy 'All' sentinel from options if a call site still passes it.
   const cleanOptions = useMemo(() => filterOptions.filter(o => o !== 'All'), [filterOptions]);
@@ -105,18 +86,88 @@ function MultiSelectColumnHeader<Field extends string>(props: MultiSelectColumnH
           {label}
           {sortIcon}
         </button>
-        <button
-          onClick={(e) => { e.stopPropagation(); setOpenFilter(isFilterOpen ? null : filterKey); }}
-          className={`p-0.5 rounded transition-colors ml-0.5 ${hasFilter ? 'text-[#911406] bg-red-50' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
-          title={`Filter by ${label}${hasFilter ? ` (${filterValues.size} selected)` : ''}`}
-        >
-          <Filter className="w-3 h-3" />
-        </button>
+        <Popover open={open} onOpenChange={setOpen}>
+          <PopoverTrigger asChild>
+            <button
+              className={`p-0.5 rounded transition-colors ml-0.5 ${hasFilter ? 'text-[#911406] bg-red-50' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
+              title={`Filter by ${label}${hasFilter ? ` (${filterValues.size} selected)` : ''}`}
+            >
+              <Filter className="w-3 h-3" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent
+            align="start"
+            sideOffset={4}
+            className="p-0 w-[260px] max-h-[420px] flex flex-col border-gray-200"
+            onOpenAutoFocus={(e) => e.preventDefault()}
+          >
+            <div className="p-2 border-b border-gray-100">
+              <div className="flex items-center justify-between mb-1.5">
+                <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Filter by {label}</p>
+                {hasFilter && (
+                  <span className="text-[10px] text-[#911406] font-semibold">{filterValues.size} selected</span>
+                )}
+              </div>
+              {cleanOptions.length > 8 && (
+                <input
+                  type="text"
+                  placeholder={`Search ${label.toLowerCase()}...`}
+                  value={filterSearch}
+                  onChange={e => setFilterSearch(e.target.value)}
+                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#911406]/30 focus:border-[#911406]/30"
+                />
+              )}
+            </div>
+            <div className="py-1 overflow-y-auto flex-1">
+              {displayOptions.map(opt => {
+                const checked = filterValues.has(opt);
+                return (
+                  <label
+                    key={opt}
+                    className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors flex items-center gap-2 cursor-pointer ${checked ? 'bg-red-50/50 text-[#911406] font-medium' : 'text-gray-700'}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleOption(opt)}
+                      className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
+                    />
+                    <span className="truncate flex-1">{opt}</span>
+                  </label>
+                );
+              })}
+              {displayOptions.length === 0 && (
+                <p className="text-xs text-gray-400 px-3 py-2 italic">No matches</p>
+              )}
+            </div>
+            <div className="border-t border-gray-100 px-3 py-2 flex items-center justify-between gap-2 bg-gray-50/50">
+              <button
+                onClick={() => onFilterChange(new Set(displayOptions))}
+                className="text-[11px] text-gray-600 hover:text-[#911406] font-medium"
+              >
+                Select all{filterSearch ? ' (visible)' : ''}
+              </button>
+              <button
+                onClick={() => onFilterChange(new Set())}
+                className="text-[11px] text-gray-600 hover:text-[#911406] font-medium disabled:opacity-40"
+                disabled={!hasFilter}
+              >
+                Clear
+              </button>
+              <button
+                onClick={() => setOpen(false)}
+                className="text-[11px] text-white bg-[#911406] hover:bg-[#7a1005] px-2.5 py-1 rounded font-medium"
+              >
+                Done
+              </button>
+            </div>
+          </PopoverContent>
+        </Popover>
         {hasFilter && (
           <>
             <span className="text-[10px] font-semibold text-[#911406] bg-red-50 px-1 rounded tabular-nums">{filterValues.size}</span>
             <button
-              onClick={(e) => { e.stopPropagation(); onFilterChange(new Set()); }}
+              onClick={() => onFilterChange(new Set())}
               className="p-0.5 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
               title="Clear filter"
             >
@@ -125,75 +176,6 @@ function MultiSelectColumnHeader<Field extends string>(props: MultiSelectColumnH
           </>
         )}
       </div>
-      {isFilterOpen && (
-        <div
-          ref={dropdownRef}
-          className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-xl z-50 min-w-[240px] max-h-[400px] flex flex-col"
-          onClick={(e) => e.stopPropagation()}
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          <div className="p-2 border-b border-gray-100 sticky top-0 bg-white z-10">
-            <div className="flex items-center justify-between mb-1.5">
-              <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Filter by {label}</p>
-              {hasFilter && (
-                <span className="text-[10px] text-[#911406] font-semibold">{filterValues.size} selected</span>
-              )}
-            </div>
-            {cleanOptions.length > 8 && (
-              <input
-                type="text"
-                placeholder={`Search ${label.toLowerCase()}...`}
-                value={filterSearch}
-                onChange={e => setFilterSearch(e.target.value)}
-                className="w-full text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#911406]/30 focus:border-[#911406]/30"
-              />
-            )}
-          </div>
-          <div className="py-1 overflow-y-auto flex-1">
-            {displayOptions.map(opt => {
-              const checked = filterValues.has(opt);
-              return (
-                <label
-                  key={opt}
-                  className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors flex items-center gap-2 cursor-pointer ${checked ? 'bg-red-50/50 text-[#911406] font-medium' : 'text-gray-700'}`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleOption(opt)}
-                    className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
-                  />
-                  <span className="truncate flex-1">{opt}</span>
-                </label>
-              );
-            })}
-            {displayOptions.length === 0 && (
-              <p className="text-xs text-gray-400 px-3 py-2 italic">No matches</p>
-            )}
-          </div>
-          <div className="border-t border-gray-100 px-3 py-2 flex items-center justify-between gap-2 bg-gray-50/50">
-            <button
-              onClick={() => onFilterChange(new Set(displayOptions))}
-              className="text-[11px] text-gray-600 hover:text-[#911406] font-medium"
-            >
-              Select all{filterSearch ? ' (visible)' : ''}
-            </button>
-            <button
-              onClick={() => onFilterChange(new Set())}
-              className="text-[11px] text-gray-600 hover:text-[#911406] font-medium"
-              disabled={!hasFilter}
-            >
-              Clear
-            </button>
-            <button
-              onClick={() => setOpenFilter(null)}
-              className="text-[11px] text-white bg-[#911406] hover:bg-[#7a1005] px-2.5 py-1 rounded font-medium"
-            >
-              Done
-            </button>
-          </div>
-        </div>
-      )}
     </th>
   );
 }
@@ -322,9 +304,8 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
   const [filterCompany, setFilterCompany] = useState<Set<string>>(new Set());
   const [filterLocation, setFilterLocation] = useState<Set<string>>(new Set());
 
-  // Dropdown open state. Click-outside handling lives inside the
-  // MultiSelectColumnHeader itself now (per-dropdown).
-  const [openFilter, setOpenFilter] = useState<string | null>(null);
+  // Dropdown open state is managed inside each MultiSelectColumnHeader
+  // via Radix Popover — no parent-level coordination needed.
 
   // Scrub state
   const [isScrubbing, setIsScrubbing] = useState(false);
@@ -1115,11 +1096,11 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                   title={allVisibleSelected ? 'Deselect all visible' : 'Select all visible'}
                 />
               </th>
-              <MultiSelectColumnHeader<SortField> field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} filterKey="company" openFilter={openFilter} setOpenFilter={setOpenFilter} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="job_title" label="Job Title" filterValues={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} filterKey="title" openFilter={openFilter} setOpenFilter={setOpenFilter} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={JOB_TYPE_OPTIONS} onFilterChange={setFilterJobType} filterKey="jobtype" openFilter={openFilter} setOpenFilter={setOpenFilter} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="job_category" label="Company Category" filterValues={filterCategory} filterOptions={CATEGORY_OPTIONS} onFilterChange={setFilterCategory} filterKey="category" openFilter={openFilter} setOpenFilter={setOpenFilter} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="location" label="Location" filterValues={filterLocation} filterOptions={uniqueLocations} onFilterChange={setFilterLocation} filterKey="location" openFilter={openFilter} setOpenFilter={setOpenFilter} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="job_title" label="Job Title" filterValues={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={JOB_TYPE_OPTIONS} onFilterChange={setFilterJobType} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="job_category" label="Company Category" filterValues={filterCategory} filterOptions={CATEGORY_OPTIONS} onFilterChange={setFilterCategory} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="location" label="Location" filterValues={filterLocation} filterOptions={uniqueLocations} onFilterChange={setFilterLocation} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
 
               <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[110px]">
                 <button onClick={() => handleSort('date_posted')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
