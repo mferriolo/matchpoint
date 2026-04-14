@@ -1,25 +1,27 @@
-// find-contacts — standalone contact enrichment.
+// find-contacts — standalone contact enrichment with five sources.
 //
 //   Request body: { mode: 'all' }
 //                 { mode: 'company', companyId: '...' }
 //
-// The function creates a contact_runs row, hands work to a background
-// task via EdgeRuntime.waitUntil, and returns the run_id immediately.
-// The client polls contact_runs for live progress (same pattern the
-// Tracker uses with tracker_runs). This avoids the request-timeout
-// problem we hit when trying to run a 100-company enrichment pass
-// synchronously inside a single HTTP call.
+// Per company, sources run in this order (cheapest/freest first):
 //
-// "Find MORE" semantics: we do NOT skip companies that already have
-// contacts. The AI prompt is seeded with a list of contacts we already
-// have for each target so gpt-4o-mini returns different people.
+//   1. Leadership-page scrape  (free; requires a company website)
+//   2. Apollo.io people search (cheap; requires APOLLO_API_KEY)
+//   3. AI brainstorm           (gpt-4o-mini; existing)
+//   4. Crelate ATS sync        (existing)
+//   5. Hunter.io email finder  (cheap; requires HUNTER_API_KEY)
+//      — runs LAST as an enrichment pass on contacts found above that
+//        have a name + a company domain but no verified email.
+//
+// Background-runs via EdgeRuntime.waitUntil; the client polls
+// contact_runs for live progress (see MarketingNewJobs.tsx).
+//
+// "Find MORE" semantics: we never short-circuit on the existing-contact
+// count. Sources dedupe against the in-memory existingKeys set so a
+// re-run finds different people each time.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-// Deno's EdgeRuntime.waitUntil isn't in lib.deno.d.ts — declare it so
-// TypeScript doesn't complain. This is the documented way to keep work
-// running after the HTTP response has been sent on Supabase Edge
-// Functions (and Deno Deploy).
 declare const EdgeRuntime: { waitUntil: (p: Promise<unknown>) => void };
 
 export const corsHeaders = {
@@ -32,8 +34,18 @@ const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 const CRELATE_BASE = "https://app.crelate.com/api3";
+const APOLLO_BASE = "https://api.apollo.io/v1";
+const HUNTER_BASE = "https://api.hunter.io/v2";
 
-// ----------------- helpers -----------------
+// Target titles used for both AI prompts and Apollo's person_titles param.
+const TARGET_TITLES = [
+  'Talent Acquisition', 'Recruiter', 'Senior Recruiter', 'Physician Recruiter',
+  'HR Director', 'Director of Human Resources', 'VP HR', 'VP of Human Resources',
+  'Chief People Officer', 'Chief Human Resources Officer',
+  'Medical Director', 'Chief Medical Officer', 'CMO',
+];
+
+// ----------------- shared helpers -----------------
 
 async function aiCall(key: string, prompt: string, maxTok = 3000): Promise<string> {
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -54,6 +66,34 @@ function parseArr(text: string): any[] {
   try { const m = text.match(/\[[\s\S]*\]/); if (m) return JSON.parse(m[0]); } catch {}
   return [];
 }
+
+const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+function extractDomain(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url.startsWith('http') ? url : `https://${url}`);
+    return u.hostname.replace(/^www\./, '').toLowerCase();
+  } catch { return null; }
+}
+
+// Strip HTML tags + collapse whitespace, capped at maxLen so the AI input
+// stays small. Kept inline so we don't pull a parsing library.
+function htmlToText(html: string, maxLen = 12000): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+}
+
+// ----------------- Crelate -----------------
 
 async function crelateGet(path: string, apiKey: string, params: Record<string, string> = {}): Promise<any> {
   const url = new URL(`${CRELATE_BASE}${path}`);
@@ -79,121 +119,215 @@ const extractPhone = (c: any, type: 'work'|'mobile'|'home') => {
 const extractTitle = (c: any) => c.CurrentPosition?.JobTitle || '';
 const extractCompanyName = (c: any) => c.CurrentPosition?.CompanyId?.Title || '';
 
-const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+// ----------------- Leadership-page scrape -----------------
 
-// ----------------- per-company enrichment -----------------
+const LEADERSHIP_PATHS = [
+  '/leadership', '/about/leadership', '/about-us/leadership',
+  '/team', '/about/team', '/about-us/team',
+  '/our-team', '/our-leadership', '/about/our-team',
+  '/people', '/executives', '/about/executives',
+];
 
-type CompanyRow = { id: string; company_name: string };
-type ContactRow = { id: string; company_id: string|null; company_name: string|null; first_name: string|null; last_name: string|null; crelate_contact_id: string|null };
-type PerCompany = { company: string; ai_added: number; crelate_added: number; duplicates_skipped: number; errors: string[] };
+type ContactCandidate = {
+  first_name: string; last_name: string;
+  email?: string; phone_work?: string; phone_cell?: string; phone_home?: string;
+  title?: string;
+  source: 'AI Intelligence Engine' | 'Crelate ATS' | 'Apollo' | 'Leadership Page';
+  source_url?: string|null;
+  is_verified?: boolean;
+  notes?: string;
+  apollo_id?: string;
+  crelate_contact_id?: string;
+  crelate_url?: string;
+};
 
-async function enrichCompany(
-  co: CompanyRow,
-  existingKeys: Set<string>,
-  existingCrelateIds: Set<string>,
-  here: ContactRow[],
-  openaiKey: string | undefined,
-  crelateKey: string | undefined,
-): Promise<PerCompany> {
-  const result: PerCompany = { company: co.company_name, ai_added: 0, crelate_added: 0, duplicates_skipped: 0, errors: [] };
+async function fetchPage(url: string, timeoutMs = 8000): Promise<string | null> {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const r = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 MatchPoint Contact Discovery' }
+    });
+    clearTimeout(t);
+    if (!r.ok) return null;
+    return await r.text();
+  } catch { return null; }
+}
 
-  // -------- AI pass --------
-  if (openaiKey) {
-    const knownList = here.length > 0
-      ? `\n\nWe already have these contacts — do NOT return them, find OTHER people:\n${here.map(c => `- ${c.first_name} ${c.last_name}`).join('\n')}\n`
-      : '';
+async function scrapeLeadershipPages(co: { company_name: string; website?: string|null }, openaiKey: string|undefined): Promise<ContactCandidate[]> {
+  if (!openaiKey || !co.website) return [];
+  const base = co.website.startsWith('http') ? co.website.replace(/\/+$/, '') : `https://${co.website.replace(/\/+$/, '')}`;
+  for (const path of LEADERSHIP_PATHS) {
+    const url = `${base}${path}`;
+    const html = await fetchPage(url);
+    if (!html || html.length < 500) continue;
+    const text = htmlToText(html);
+    if (text.length < 200) continue;
     const prompt =
-      `Find hiring-related contacts at "${co.company_name}". Target roles: Talent Acquisition, Recruiters, HR Directors, Chief People Officers, VPs of HR, Medical Directors, CMOs, Physician Recruiters.` +
-      knownList +
-      `\nONLY return real, publicly verifiable information (LinkedIn profile, company staff page, press release, etc.). No guessed emails, no fabricated names.` +
-      `\nReturn a JSON array. Each item: {"first_name":"","last_name":"","email":"","phone_work":"","phone_cell":"","phone_home":"","title":"","source":"","source_url":""}` +
-      `\nReturn only JSON.`;
+      `From the leadership/team page below for "${co.company_name}", extract people whose roles relate to hiring, HR, talent acquisition, recruiting, or clinical leadership (Medical Director, Chief Medical Officer, etc.). Skip board members and investors unless they hold an operating role.\n` +
+      `Return a JSON array. Each item: {"first_name":"","last_name":"","title":"","email":"","source_url":"${url}"}\n` +
+      `Use only what is literally on the page — no guessing. If no relevant people are present return [].\n\n` +
+      `--- PAGE TEXT ---\n${text}\n--- END ---\nReturn only JSON.`;
     try {
-      const txt = await aiCall(openaiKey, prompt, 3000);
-      for (const c of parseArr(txt)) {
-        if (!c.first_name && !c.last_name) continue;
-        const dk = `${(c.first_name||'').toLowerCase().trim()}|${(c.last_name||'').toLowerCase().trim()}|${co.company_name.toLowerCase().trim()}`;
-        if (existingKeys.has(dk)) { result.duplicates_skipped++; continue; }
+      const txt = await aiCall(openaiKey, prompt, 2000);
+      const arr = parseArr(txt);
+      if (arr.length === 0) continue;
+      return arr
+        .filter((c: any) => c.first_name || c.last_name)
+        .map((c: any) => ({
+          first_name: c.first_name || '',
+          last_name: c.last_name || '',
+          email: c.email || '',
+          title: c.title || '',
+          source: 'Leadership Page' as const,
+          source_url: url,
+          is_verified: true,
+          notes: `Scraped from ${url}`,
+        }));
+    } catch (e) {
+      console.warn(`leadership-extract failed for ${url}:`, (e as Error).message);
+      continue;
+    }
+  }
+  return [];
+}
+
+// ----------------- Apollo -----------------
+
+async function searchApollo(co: { company_name: string; website?: string|null }, apolloKey: string): Promise<ContactCandidate[]> {
+  // mixed_people/search supports either q_organization_names or
+  // q_organization_domains. Domain matches are far more precise when we
+  // have a website on file; fall back to name otherwise.
+  const domain = extractDomain(co.website);
+  const body: Record<string, any> = {
+    page: 1,
+    per_page: 25,
+    person_titles: TARGET_TITLES,
+  };
+  if (domain) body.q_organization_domains = [domain];
+  else body.q_organization_names = [co.company_name];
+
+  try {
+    const r = await fetch(`${APOLLO_BASE}/mixed_people/search`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+        'X-Api-Key': apolloKey,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const txt = await r.text();
+      console.warn(`Apollo ${r.status} for ${co.company_name}: ${txt.slice(0, 200)}`);
+      return [];
+    }
+    const d = await r.json();
+    const people: any[] = d.people || d.contacts || [];
+    return people
+      .filter(p => (p.first_name || p.last_name))
+      .map(p => ({
+        first_name: p.first_name || '',
+        last_name: p.last_name || '',
+        email: p.email || '',
+        title: p.title || (p.headline || ''),
+        phone_work: p.organization?.phone || '',
+        phone_cell: p.mobile_phone || '',
+        source: 'Apollo' as const,
+        source_url: p.linkedin_url || (p.id ? `https://app.apollo.io/#/people/${p.id}` : null),
+        is_verified: !!p.email_status && p.email_status !== 'unverified',
+        apollo_id: p.id,
+        notes: `From Apollo (${p.email_status || 'no email status'})`,
+      }));
+  } catch (e) {
+    console.warn(`Apollo error for ${co.company_name}:`, (e as Error).message);
+    return [];
+  }
+}
+
+// ----------------- Hunter -----------------
+
+// Returns { email, score } or null.
+async function hunterEmailFinder(firstName: string, lastName: string, domain: string, hunterKey: string): Promise<{ email: string; score: number } | null> {
+  if (!firstName || !lastName || !domain) return null;
+  try {
+    const url = `${HUNTER_BASE}/email-finder?domain=${encodeURIComponent(domain)}&first_name=${encodeURIComponent(firstName)}&last_name=${encodeURIComponent(lastName)}&api_key=${encodeURIComponent(hunterKey)}`;
+    const r = await fetch(url);
+    if (!r.ok) {
+      const txt = await r.text();
+      console.warn(`Hunter ${r.status} for ${firstName} ${lastName}@${domain}: ${txt.slice(0, 150)}`);
+      return null;
+    }
+    const d = await r.json();
+    const email = d?.data?.email;
+    const score = d?.data?.score || 0;
+    if (!email) return null;
+    return { email, score };
+  } catch (e) {
+    console.warn(`Hunter exception:`, (e as Error).message);
+    return null;
+  }
+}
+
+// ----------------- AI brainstorm -----------------
+
+async function aiBrainstorm(co: { company_name: string }, here: ContactRow[], openaiKey: string): Promise<ContactCandidate[]> {
+  const knownList = here.length > 0
+    ? `\n\nWe already have these contacts — do NOT return them, find OTHER people:\n${here.map(c => `- ${c.first_name} ${c.last_name}`).join('\n')}\n`
+    : '';
+  const prompt =
+    `Find hiring-related contacts at "${co.company_name}". Target roles: ${TARGET_TITLES.join(', ')}.` +
+    knownList +
+    `\nONLY return real, publicly verifiable information (LinkedIn profile, company staff page, press release, etc.). No guessed emails, no fabricated names.` +
+    `\nReturn a JSON array. Each item: {"first_name":"","last_name":"","email":"","phone_work":"","phone_cell":"","phone_home":"","title":"","source":"","source_url":""}` +
+    `\nReturn only JSON.`;
+  try {
+    const txt = await aiCall(openaiKey, prompt, 3000);
+    return parseArr(txt)
+      .filter((c: any) => c.first_name || c.last_name)
+      .map((c: any) => {
         let su: string|null = null;
         if (typeof c.source_url === 'string' && c.source_url.startsWith('http') && !c.source_url.includes('/search/results/') && !c.source_url.includes('?q=')) {
           su = c.source_url;
         }
-        const { error } = await supabase.from('marketing_contacts').insert({
-          company_id: co.id,
-          company_name: co.company_name,
+        return {
           first_name: c.first_name || '',
           last_name: c.last_name || '',
           email: c.email || '',
           phone_work: c.phone_work || '',
-          phone_home: c.phone_home || '',
           phone_cell: c.phone_cell || '',
+          phone_home: c.phone_home || '',
           title: c.title || '',
-          source: 'AI Intelligence Engine',
+          source: 'AI Intelligence Engine' as const,
           source_url: su,
           is_verified: !!su,
-        });
-        if (!error) { result.ai_added++; existingKeys.add(dk); }
-      }
-    } catch (e) {
-      result.errors.push(`AI: ${(e as Error).message}`);
-    }
+        };
+      });
+  } catch (e) {
+    console.warn(`AI brainstorm error for ${co.company_name}:`, (e as Error).message);
+    return [];
   }
+}
 
-  // -------- Crelate pass --------
-  if (crelateKey) {
-    try {
-      const searchName = co.company_name.replace(/\s*\/\s*/g, ' ').replace(/\s*\(.*?\)\s*/g, ' ').trim();
-      const compRes = await crelateGet('/companies', crelateKey, { search: searchName, take: '10' });
-      for (const cc of (compRes?.Data || [])) {
-        if (!cc.Id) continue;
-        const contactsRes = await crelateGet('/contacts', crelateKey, { companyId: cc.Id, take: '50' });
-        for (const contact of (contactsRes?.Data || [])) {
-          const cid = contact.Id;
-          if (!cid || existingCrelateIds.has(cid)) { result.duplicates_skipped++; continue; }
-          const fn = contact.FirstName || '';
-          const ln = contact.LastName || '';
-          if (!fn && !ln) continue;
-          const dk = `${fn.toLowerCase()}|${ln.toLowerCase()}|${co.company_name.toLowerCase()}`;
-          if (existingKeys.has(dk)) { result.duplicates_skipped++; continue; }
-          const crelateUrl = buildCrelateContactUrl(cid);
-          const { error } = await supabase.from('marketing_contacts').insert({
-            company_id: co.id,
-            company_name: co.company_name,
-            first_name: fn, last_name: ln,
-            email: extractEmail(contact),
-            phone_work: extractPhone(contact, 'work'),
-            phone_home: extractPhone(contact, 'home'),
-            phone_cell: extractPhone(contact, 'mobile'),
-            title: extractTitle(contact),
-            source: 'Crelate ATS',
-            source_url: crelateUrl,
-            is_verified: true,
-            crelate_contact_id: cid,
-            crelate_url: crelateUrl,
-            notes: `From Crelate (API v3). Company: ${cc.Name || searchName}`,
-          });
-          if (!error) { result.crelate_added++; existingCrelateIds.add(cid); existingKeys.add(dk); }
-          await delay(200);
-        }
-        await delay(200);
-      }
+// ----------------- Crelate pass -----------------
 
-      const directRes = await crelateGet('/contacts', crelateKey, { search: searchName, take: '20' });
-      for (const contact of (directRes?.Data || [])) {
+async function searchCrelate(co: CompanyRow, crelateKey: string): Promise<ContactCandidate[]> {
+  const out: ContactCandidate[] = [];
+  try {
+    const searchName = co.company_name.replace(/\s*\/\s*/g, ' ').replace(/\s*\(.*?\)\s*/g, ' ').trim();
+    const compRes = await crelateGet('/companies', crelateKey, { search: searchName, take: '10' });
+    for (const cc of (compRes?.Data || [])) {
+      if (!cc.Id) continue;
+      const contactsRes = await crelateGet('/contacts', crelateKey, { companyId: cc.Id, take: '50' });
+      for (const contact of (contactsRes?.Data || [])) {
         const cid = contact.Id;
-        if (!cid || existingCrelateIds.has(cid)) continue;
+        if (!cid) continue;
         const fn = contact.FirstName || '';
         const ln = contact.LastName || '';
         if (!fn && !ln) continue;
-        const contactCo = extractCompanyName(contact).toLowerCase();
-        const searchLower = searchName.toLowerCase();
-        if (contactCo && !contactCo.includes(searchLower) && !searchLower.includes(contactCo)) continue;
-        const dk = `${fn.toLowerCase()}|${ln.toLowerCase()}|${co.company_name.toLowerCase()}`;
-        if (existingKeys.has(dk)) { result.duplicates_skipped++; continue; }
         const crelateUrl = buildCrelateContactUrl(cid);
-        const { error } = await supabase.from('marketing_contacts').insert({
-          company_id: co.id,
-          company_name: co.company_name,
+        out.push({
           first_name: fn, last_name: ln,
           email: extractEmail(contact),
           phone_work: extractPhone(contact, 'work'),
@@ -205,14 +339,167 @@ async function enrichCompany(
           is_verified: true,
           crelate_contact_id: cid,
           crelate_url: crelateUrl,
-          notes: 'From Crelate contact search (API v3).',
+          notes: `From Crelate (API v3). Company: ${cc.Name || searchName}`,
         });
-        if (!error) { result.crelate_added++; existingCrelateIds.add(cid); existingKeys.add(dk); }
-        await delay(200);
+        await delay(150);
       }
-    } catch (e) {
-      result.errors.push(`Crelate: ${(e as Error).message}`);
+      await delay(150);
     }
+    const directRes = await crelateGet('/contacts', crelateKey, { search: searchName, take: '20' });
+    for (const contact of (directRes?.Data || [])) {
+      const cid = contact.Id;
+      if (!cid) continue;
+      const fn = contact.FirstName || '';
+      const ln = contact.LastName || '';
+      if (!fn && !ln) continue;
+      const contactCo = extractCompanyName(contact).toLowerCase();
+      const searchLower = co.company_name.toLowerCase();
+      if (contactCo && !contactCo.includes(searchLower) && !searchLower.includes(contactCo)) continue;
+      const crelateUrl = buildCrelateContactUrl(cid);
+      out.push({
+        first_name: fn, last_name: ln,
+        email: extractEmail(contact),
+        phone_work: extractPhone(contact, 'work'),
+        phone_home: extractPhone(contact, 'home'),
+        phone_cell: extractPhone(contact, 'mobile'),
+        title: extractTitle(contact),
+        source: 'Crelate ATS',
+        source_url: crelateUrl,
+        is_verified: true,
+        crelate_contact_id: cid,
+        crelate_url: crelateUrl,
+        notes: 'From Crelate contact search (API v3).',
+      });
+      await delay(150);
+    }
+  } catch (e) {
+    console.warn(`Crelate error for ${co.company_name}:`, (e as Error).message);
+  }
+  return out;
+}
+
+// ----------------- per-company orchestration -----------------
+
+type CompanyRow = { id: string; company_name: string; website?: string|null };
+type ContactRow = { id: string; company_id: string|null; company_name: string|null; first_name: string|null; last_name: string|null; crelate_contact_id: string|null };
+type PerCompany = {
+  company: string;
+  ai_added: number;
+  crelate_added: number;
+  apollo_added: number;
+  leadership_added: number;
+  emails_verified: number;
+  duplicates_skipped: number;
+  errors: string[];
+};
+
+async function enrichCompany(
+  co: CompanyRow,
+  existingKeys: Set<string>,
+  existingCrelateIds: Set<string>,
+  existingApolloIds: Set<string>,
+  here: ContactRow[],
+  openaiKey: string | undefined,
+  crelateKey: string | undefined,
+  apolloKey: string | undefined,
+  hunterKey: string | undefined,
+): Promise<PerCompany> {
+  const result: PerCompany = {
+    company: co.company_name,
+    ai_added: 0, crelate_added: 0, apollo_added: 0, leadership_added: 0,
+    emails_verified: 0, duplicates_skipped: 0, errors: [],
+  };
+
+  const candidates: ContactCandidate[] = [];
+
+  // 1. Leadership pages (free; needs website)
+  if (openaiKey && co.website) {
+    try {
+      const lp = await scrapeLeadershipPages(co, openaiKey);
+      candidates.push(...lp);
+    } catch (e) { result.errors.push(`Leadership: ${(e as Error).message}`); }
+  }
+
+  // 2. Apollo
+  if (apolloKey) {
+    try {
+      const ap = await searchApollo(co, apolloKey);
+      candidates.push(...ap);
+    } catch (e) { result.errors.push(`Apollo: ${(e as Error).message}`); }
+  }
+
+  // 3. AI brainstorm (existing)
+  if (openaiKey) {
+    try {
+      const ai = await aiBrainstorm(co, here, openaiKey);
+      candidates.push(...ai);
+    } catch (e) { result.errors.push(`AI: ${(e as Error).message}`); }
+  }
+
+  // 4. Crelate
+  if (crelateKey) {
+    try {
+      const cr = await searchCrelate(co, crelateKey);
+      candidates.push(...cr);
+    } catch (e) { result.errors.push(`Crelate: ${(e as Error).message}`); }
+  }
+
+  // 5. Hunter email enrichment + insert pass.
+  // Walk every candidate; dedupe on first|last|company; if no email and
+  // we have a domain + Hunter key, try to find one.
+  const domain = extractDomain(co.website);
+  for (const cand of candidates) {
+    const fn = (cand.first_name || '').trim();
+    const ln = (cand.last_name || '').trim();
+    if (!fn && !ln) continue;
+    const dk = `${fn.toLowerCase()}|${ln.toLowerCase()}|${co.company_name.toLowerCase().trim()}`;
+    if (existingKeys.has(dk)) { result.duplicates_skipped++; continue; }
+    if (cand.crelate_contact_id && existingCrelateIds.has(cand.crelate_contact_id)) { result.duplicates_skipped++; continue; }
+    if (cand.apollo_id && existingApolloIds.has(cand.apollo_id)) { result.duplicates_skipped++; continue; }
+
+    // Hunter enrichment if we lack an email but have a domain.
+    let email = cand.email || '';
+    let hunterNote = '';
+    if (!email && hunterKey && domain && fn && ln) {
+      const h = await hunterEmailFinder(fn, ln, domain, hunterKey);
+      if (h?.email) {
+        email = h.email;
+        hunterNote = ` Hunter score=${h.score}.`;
+        result.emails_verified++;
+      }
+    }
+
+    const insertRow: Record<string, any> = {
+      company_id: co.id,
+      company_name: co.company_name,
+      first_name: fn,
+      last_name: ln,
+      email,
+      phone_work: cand.phone_work || '',
+      phone_home: cand.phone_home || '',
+      phone_cell: cand.phone_cell || '',
+      title: cand.title || '',
+      source: cand.source,
+      source_url: cand.source_url || null,
+      is_verified: !!cand.is_verified,
+      notes: (cand.notes || '') + hunterNote,
+    };
+    if (cand.crelate_contact_id) {
+      insertRow.crelate_contact_id = cand.crelate_contact_id;
+      insertRow.crelate_url = cand.crelate_url || buildCrelateContactUrl(cand.crelate_contact_id);
+    }
+
+    const { error } = await supabase.from('marketing_contacts').insert(insertRow);
+    if (error) continue;
+
+    existingKeys.add(dk);
+    if (cand.crelate_contact_id) existingCrelateIds.add(cand.crelate_contact_id);
+    if (cand.apollo_id) existingApolloIds.add(cand.apollo_id);
+
+    if (cand.source === 'AI Intelligence Engine') result.ai_added++;
+    else if (cand.source === 'Crelate ATS') result.crelate_added++;
+    else if (cand.source === 'Apollo') result.apollo_added++;
+    else if (cand.source === 'Leadership Page') result.leadership_added++;
   }
 
   // Keep marketing_companies.contact_count in sync.
@@ -224,20 +511,22 @@ async function enrichCompany(
 
 // ----------------- background task -----------------
 
-async function processRun(runId: string, targets: CompanyRow[], openaiKey: string | undefined, crelateKey: string | undefined) {
+async function processRun(runId: string, targets: CompanyRow[], openaiKey: string|undefined, crelateKey: string|undefined, apolloKey: string|undefined, hunterKey: string|undefined) {
   const startedAt = Date.now();
   try {
-    // Snapshot of existing contacts, used for dedup + "find different people"
     const { data: existingContacts } = await supabase.from('marketing_contacts')
-      .select('id, company_id, company_name, first_name, last_name, crelate_contact_id');
+      .select('id, company_id, company_name, first_name, last_name, crelate_contact_id, notes');
     const existing: ContactRow[] = (existingContacts || []) as ContactRow[];
     const existingKeys = new Set(existing.map(c =>
       `${(c.first_name||'').toLowerCase().trim()}|${(c.last_name||'').toLowerCase().trim()}|${(c.company_name||'').toLowerCase().trim()}`
     ));
     const existingCrelateIds = new Set(existing.map(c => c.crelate_contact_id).filter(Boolean) as string[]);
+    // Apollo IDs aren't stored separately; we'd need a column for that.
+    // For now this is empty so Apollo dedup falls back to the name-key.
+    const existingApolloIds = new Set<string>();
 
     const per: PerCompany[] = [];
-    let aiTotal = 0, crelateTotal = 0, skippedTotal = 0;
+    const totals = { ai: 0, crelate: 0, apollo: 0, leadership: 0, emails: 0, skipped: 0 };
 
     for (let i = 0; i < targets.length; i++) {
       const co = targets[i];
@@ -250,19 +539,24 @@ async function processRun(runId: string, targets: CompanyRow[], openaiKey: strin
         (c.company_name || '').toLowerCase().trim() === co.company_name.toLowerCase().trim()
       );
 
-      const r = await enrichCompany(co, existingKeys, existingCrelateIds, here, openaiKey, crelateKey);
+      const r = await enrichCompany(co, existingKeys, existingCrelateIds, existingApolloIds, here, openaiKey, crelateKey, apolloKey, hunterKey);
       per.push(r);
-      aiTotal += r.ai_added;
-      crelateTotal += r.crelate_added;
-      skippedTotal += r.duplicates_skipped;
+      totals.ai += r.ai_added;
+      totals.crelate += r.crelate_added;
+      totals.apollo += r.apollo_added;
+      totals.leadership += r.leadership_added;
+      totals.emails += r.emails_verified;
+      totals.skipped += r.duplicates_skipped;
 
-      // Partial update after each company so the UI progress bar moves.
       await supabase.from('contact_runs').update({
         companies_processed: i + 1,
-        ai_added: aiTotal,
-        crelate_added: crelateTotal,
-        contacts_added: aiTotal + crelateTotal,
-        duplicates_skipped: skippedTotal,
+        ai_added: totals.ai,
+        crelate_added: totals.crelate,
+        apollo_added: totals.apollo,
+        leadership_added: totals.leadership,
+        emails_verified: totals.emails,
+        contacts_added: totals.ai + totals.crelate + totals.apollo + totals.leadership,
+        duplicates_skipped: totals.skipped,
         per_company: per,
       }).eq('id', runId);
     }
@@ -272,13 +566,16 @@ async function processRun(runId: string, targets: CompanyRow[], openaiKey: strin
       completed_at: new Date().toISOString(),
       current_company: null,
       companies_processed: targets.length,
-      ai_added: aiTotal,
-      crelate_added: crelateTotal,
-      contacts_added: aiTotal + crelateTotal,
-      duplicates_skipped: skippedTotal,
+      ai_added: totals.ai,
+      crelate_added: totals.crelate,
+      apollo_added: totals.apollo,
+      leadership_added: totals.leadership,
+      emails_verified: totals.emails,
+      contacts_added: totals.ai + totals.crelate + totals.apollo + totals.leadership,
+      duplicates_skipped: totals.skipped,
       per_company: per,
     }).eq('id', runId);
-    console.log(`find-contacts run ${runId} completed in ${Math.round((Date.now() - startedAt) / 1000)}s: ${aiTotal + crelateTotal} added, ${skippedTotal} skipped`);
+    console.log(`find-contacts run ${runId} done in ${Math.round((Date.now() - startedAt) / 1000)}s — AI:${totals.ai} Crelate:${totals.crelate} Apollo:${totals.apollo} Leadership:${totals.leadership} Hunter-verified:${totals.emails} Skipped:${totals.skipped}`);
   } catch (e) {
     const msg = (e as Error).message || String(e);
     console.error(`find-contacts run ${runId} failed:`, msg);
@@ -293,9 +590,7 @@ async function processRun(runId: string, targets: CompanyRow[], openaiKey: strin
 // ----------------- HTTP handler -----------------
 
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
-  }
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
   try {
     const body = await req.json().catch(() => ({}));
@@ -304,13 +599,15 @@ Deno.serve(async (req) => {
 
     const openaiKey = Deno.env.get('OPENAI_API_KEY');
     const crelateKey = Deno.env.get('CRELATE_API_KEY');
-    if (!openaiKey && !crelateKey) {
-      return new Response(JSON.stringify({ success: false, error: 'Neither OPENAI_API_KEY nor CRELATE_API_KEY is configured' }), {
+    const apolloKey = Deno.env.get('APOLLO_API_KEY');
+    const hunterKey = Deno.env.get('HUNTER_API_KEY');
+
+    if (!openaiKey && !crelateKey && !apolloKey) {
+      return new Response(JSON.stringify({ success: false, error: 'No contact-discovery secrets configured (need at least one of OPENAI_API_KEY, APOLLO_API_KEY, CRELATE_API_KEY)' }), {
         status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     }
 
-    // Resolve target companies.
     let targets: CompanyRow[] = [];
     let targetCompanyName: string | null = null;
     if (mode === 'company') {
@@ -319,7 +616,7 @@ Deno.serve(async (req) => {
           status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
-      const { data } = await supabase.from('marketing_companies').select('id, company_name').eq('id', companyId).maybeSingle();
+      const { data } = await supabase.from('marketing_companies').select('id, company_name, website').eq('id', companyId).maybeSingle();
       if (!data) {
         return new Response(JSON.stringify({ success: false, error: 'Company not found' }), {
           status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -328,9 +625,8 @@ Deno.serve(async (req) => {
       targets = [data as CompanyRow];
       targetCompanyName = data.company_name;
     } else {
-      // mode === 'all': every non-blocked company with at least one open job.
       const { data: companies } = await supabase.from('marketing_companies')
-        .select('id, company_name, is_blocked')
+        .select('id, company_name, website, is_blocked')
         .order('is_high_priority', { ascending: false });
       const { data: openJobs } = await supabase.from('marketing_jobs')
         .select('company_id, company_name, is_closed, status')
@@ -341,10 +637,9 @@ Deno.serve(async (req) => {
       targets = (companies || [])
         .filter(c => !c.is_blocked)
         .filter(c => activeIds.has(c.id) || activeNames.has((c.company_name || '').toLowerCase().trim()))
-        .map(c => ({ id: c.id, company_name: c.company_name }));
+        .map(c => ({ id: c.id, company_name: c.company_name, website: c.website }));
     }
 
-    // Insert run row synchronously so we have an id to return.
     const { data: runRow, error: insertErr } = await supabase.from('contact_runs').insert({
       status: 'running',
       mode,
@@ -359,16 +654,20 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Hand the actual work off to a background task. The HTTP response
-    // returns immediately with the run id; the client polls contact_runs
-    // for progress instead of waiting on this request.
-    EdgeRuntime.waitUntil(processRun(runRow.id, targets, openaiKey, crelateKey));
+    EdgeRuntime.waitUntil(processRun(runRow.id, targets, openaiKey, crelateKey, apolloKey, hunterKey));
 
     return new Response(JSON.stringify({
       success: true,
       run_id: runRow.id,
       mode,
       companies_total: targets.length,
+      sources_active: {
+        leadership: !!openaiKey,
+        apollo: !!apolloKey,
+        ai: !!openaiKey,
+        crelate: !!crelateKey,
+        hunter: !!hunterKey,
+      },
     }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 
   } catch (error) {

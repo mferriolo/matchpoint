@@ -1265,11 +1265,22 @@ const MarketingNewJobs: React.FC = () => {
                       }}
                     />
                   </div>
-                  {contactRun.current_company && (
-                    <p className="mt-1.5 text-[11px] text-emerald-900/70 truncate">
-                      Processing: <span className="font-medium">{contactRun.current_company}</span>
-                    </p>
-                  )}
+                  <div className="flex items-center justify-between mt-1.5 text-[11px] text-emerald-900/70 gap-3 flex-wrap">
+                    {/* Per-source breakdown — only renders non-zero counts
+                        to keep the panel tight. */}
+                    <div className="flex items-center gap-2 tabular-nums">
+                      {(contactRun.leadership_added || 0) > 0 && <span>Leadership: <strong>{contactRun.leadership_added}</strong></span>}
+                      {(contactRun.apollo_added || 0) > 0 && <span>· Apollo: <strong>{contactRun.apollo_added}</strong></span>}
+                      {(contactRun.ai_added || 0) > 0 && <span>· AI: <strong>{contactRun.ai_added}</strong></span>}
+                      {(contactRun.crelate_added || 0) > 0 && <span>· Crelate: <strong>{contactRun.crelate_added}</strong></span>}
+                      {(contactRun.emails_verified || 0) > 0 && <span>· Hunter-verified: <strong>{contactRun.emails_verified}</strong></span>}
+                    </div>
+                    {contactRun.current_company && (
+                      <p className="truncate max-w-[50%]">
+                        Processing: <span className="font-medium">{contactRun.current_company}</span>
+                      </p>
+                    )}
+                  </div>
                 </div>
               )}
 
