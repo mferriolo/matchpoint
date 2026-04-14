@@ -65,6 +65,43 @@ const MarketingNewJobs: React.FC = () => {
     if (contactSortField === f) setContactSortDir(d => d === 'asc' ? 'desc' : 'asc');
     else { setContactSortField(f); setContactSortDir('asc'); }
   };
+
+  // Multi-select + bulk delete for contacts. The checkbox column is on
+  // the far right of the Contacts table; a bulk-action bar appears when
+  // any rows are selected. Deletes are confirmed via a dialog and fire
+  // a single `.in('id', [...])` so the round-trip stays tight.
+  const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
+  const [showDeleteContactsConfirm, setShowDeleteContactsConfirm] = useState(false);
+  const [deletingContacts, setDeletingContacts] = useState(false);
+
+  const toggleContactSelect = (id: string) => {
+    setSelectedContactIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const clearContactSelection = () => setSelectedContactIds(new Set());
+
+  const handleDeleteSelectedContacts = async () => {
+    if (selectedContactIds.size === 0) return;
+    setDeletingContacts(true);
+    try {
+      const ids = Array.from(selectedContactIds);
+      const { error } = await supabase.from('marketing_contacts').delete().in('id', ids);
+      if (error) throw error;
+      toast({
+        title: `${ids.length} contact${ids.length === 1 ? '' : 's'} deleted`,
+      });
+      clearContactSelection();
+      setShowDeleteContactsConfirm(false);
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Delete failed', description: err.message || String(err), variant: 'destructive' });
+    } finally {
+      setDeletingContacts(false);
+    }
+  };
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedContact, setSelectedContact] = useState<any>(null);
@@ -1373,6 +1410,32 @@ const MarketingNewJobs: React.FC = () => {
                 <span className="text-sm text-gray-500">{filteredContacts.length} contacts</span>
               </div>
 
+              {/* Bulk-action bar — only visible when rows are selected
+                  via the far-right checkbox column. */}
+              {selectedContactIds.size > 0 && (
+                <div className="px-4 py-2.5 border-b bg-red-50/70 flex items-center justify-between">
+                  <div className="text-sm text-[#911406] font-medium">
+                    {selectedContactIds.size} contact{selectedContactIds.size === 1 ? '' : 's'} selected
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={clearContactSelection}
+                      className="text-gray-700"
+                    >
+                      Clear selection
+                    </Button>
+                    <Button
+                      onClick={() => setShowDeleteContactsConfirm(true)}
+                      className="bg-[#911406] hover:bg-[#7a1005] text-white"
+                    >
+                      <Trash2 className="w-4 h-4 mr-1.5" />
+                      Delete {selectedContactIds.size}
+                    </Button>
+                  </div>
+                </div>
+              )}
+
               {/* Live progress panel — visible while a find-contacts run
                   is in flight. Polls contact_runs every 2s. */}
               {contactRunIsActive && contactRun && (
@@ -1454,13 +1517,47 @@ const MarketingNewJobs: React.FC = () => {
                       <MultiSelectColumnHeader<ContactSortField> field="source" label="Source" filterValues={filterContactSource} filterOptions={uniqueContactSourceValues} onFilterChange={setFilterContactSource} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
                       <MultiSelectColumnHeader<ContactSortField> field="created_at" label="Date / Time Added" filterValues={filterDateAdded} filterOptions={uniqueContactDates} onFilterChange={setFilterDateAdded} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by date added" />
                       <MultiSelectColumnHeader<ContactSortField> field="linkedin_url" label="LinkedIn URL" filterValues={filterLinkedInPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterLinkedInPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by LinkedIn presence" />
+                      <th className="text-center px-3 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider w-[50px]">
+                        <input
+                          type="checkbox"
+                          className="w-4 h-4 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
+                          checked={filteredContacts.length > 0 && filteredContacts.every(c => selectedContactIds.has(c.id))}
+                          ref={el => {
+                            // Tri-state: indeterminate when some (but not
+                            // all) visible rows are selected. Purely visual.
+                            if (el) {
+                              const total = filteredContacts.length;
+                              const sel = filteredContacts.filter(c => selectedContactIds.has(c.id)).length;
+                              el.indeterminate = sel > 0 && sel < total;
+                            }
+                          }}
+                          onChange={() => {
+                            const allSelected = filteredContacts.length > 0 && filteredContacts.every(c => selectedContactIds.has(c.id));
+                            if (allSelected) {
+                              // Deselect only the currently-visible ones so selections on filtered-out rows survive.
+                              setSelectedContactIds(prev => {
+                                const next = new Set(prev);
+                                filteredContacts.forEach(c => next.delete(c.id));
+                                return next;
+                              });
+                            } else {
+                              setSelectedContactIds(prev => {
+                                const next = new Set(prev);
+                                filteredContacts.forEach(c => next.add(c.id));
+                                return next;
+                              });
+                            }
+                          }}
+                          title="Select / deselect all visible contacts"
+                        />
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
                     {loading ? (
-                      <tr><td colSpan={11} className="text-center py-12"><Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400" /></td></tr>
+                      <tr><td colSpan={12} className="text-center py-12"><Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400" /></td></tr>
                     ) : filteredContacts.length === 0 ? (
-                      <tr><td colSpan={11} className="text-center py-12 text-gray-500">No contacts found. Run the tracker or import data to add contacts.</td></tr>
+                      <tr><td colSpan={12} className="text-center py-12 text-gray-500">No contacts found. Run the tracker or import data to add contacts.</td></tr>
                     ) : filteredContacts.map((c, idx) => {
                       // Derive LinkedIn URL: prefer linkedin_url field, then check source_url for LinkedIn links
                       const linkedinUrl = c.linkedin_url || 
@@ -1549,7 +1646,7 @@ const MarketingNewJobs: React.FC = () => {
                             )}
                           </td>
                           {/* LinkedIn URL */}
-                          <td className="px-4 py-2.5 text-sm" onClick={e => e.stopPropagation()}>
+                          <td className="px-4 py-2.5 border-r border-gray-100 text-sm" onClick={e => e.stopPropagation()}>
                             {linkedinUrl ? (
                               <a
                                 href={linkedinUrl.startsWith('http') ? linkedinUrl : `https://${linkedinUrl}`}
@@ -1564,6 +1661,18 @@ const MarketingNewJobs: React.FC = () => {
                             ) : (
                               <span className="text-gray-300">—</span>
                             )}
+                          </td>
+                          {/* Selection checkbox (far right). stopPropagation
+                              so clicking the box doesn't also toggle the
+                              detail panel via the row's onClick. */}
+                          <td className="px-3 py-2.5 text-center" onClick={e => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              className="w-4 h-4 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
+                              checked={selectedContactIds.has(c.id)}
+                              onChange={() => toggleContactSelect(c.id)}
+                              title="Select contact"
+                            />
                           </td>
                         </tr>
                       );
@@ -1666,6 +1775,57 @@ const MarketingNewJobs: React.FC = () => {
 
         </Tabs>
       </div>
+
+      {/* Delete Selected Contacts Confirmation */}
+      {showDeleteContactsConfirm && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => !deletingContacts && setShowDeleteContactsConfirm(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="p-6 border-b">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                  <Trash2 className="w-5 h-5 text-red-700" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">
+                    Delete {selectedContactIds.size} contact{selectedContactIds.size === 1 ? '' : 's'}?
+                  </h3>
+                  <p className="text-sm text-gray-500">This removes them from the database permanently.</p>
+                </div>
+              </div>
+            </div>
+            <div className="p-6 text-sm text-gray-700 space-y-2">
+              <p>
+                The selected contact{selectedContactIds.size === 1 ? '' : 's'} will be deleted from <code className="text-xs bg-gray-100 px-1 rounded">marketing_contacts</code>.
+                Company contact counts will refresh on the next load.
+              </p>
+              <p className="text-xs text-gray-500">
+                If any of these came from Crelate, re-running Find Contacts will pull them back in —
+                block the contact at the source if you want them gone for good.
+              </p>
+            </div>
+            <div className="p-4 border-t bg-gray-50 flex items-center justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setShowDeleteContactsConfirm(false)}
+                disabled={deletingContacts}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleDeleteSelectedContacts}
+                disabled={deletingContacts}
+                className="bg-[#911406] hover:bg-[#7a1005] text-white"
+              >
+                {deletingContacts ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Deleting…</>
+                ) : (
+                  <><Trash2 className="w-4 h-4 mr-2" /> Delete {selectedContactIds.size}</>
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Find Contacts Results Dialog — shows the final breakdown for
           the most recent completed (or failed) run. Auto-opens when a
