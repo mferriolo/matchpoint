@@ -52,6 +52,13 @@ const MarketingNewJobs: React.FC = () => {
   const [scrapingDescs, setScrapingDescs] = useState(false);
   const [scrapeResult, setScrapeResult] = useState<any>(null);
 
+  // Contact enrichment state. `findingContactsAll` is set while the
+  // page-level "Find Contacts for All Companies" run is in flight;
+  // `findingContactsForId` stores the company id for a per-row run so
+  // only that row's button shows a spinner.
+  const [findingContactsAll, setFindingContactsAll] = useState(false);
+  const [findingContactsForId, setFindingContactsForId] = useState<string | null>(null);
+
 
 
 
@@ -85,6 +92,35 @@ const MarketingNewJobs: React.FC = () => {
   // Open state is managed by Radix Popover internally.
   const [filterCompanyCategory, setFilterCompanyCategory] = useState<Set<string>>(new Set());
   const [companyCategoryFilterOpen, setCompanyCategoryFilterOpen] = useState(false);
+
+  // Invoke the find-contacts edge function. mode='all' crawls every
+  // non-blocked company with open jobs; mode='company' targets a single
+  // company. The function returns per-company stats so we surface a
+  // useful toast regardless of which mode ran.
+  const handleFindContacts = async (opts: { mode: 'all' } | { mode: 'company'; companyId: string; companyName?: string }) => {
+    const isAll = opts.mode === 'all';
+    if (isAll) setFindingContactsAll(true);
+    else setFindingContactsForId(opts.companyId);
+    try {
+      const body = isAll ? { mode: 'all' } : { mode: 'company', companyId: opts.companyId };
+      const { data, error } = await supabase.functions.invoke('find-contacts', { body });
+      if (error) throw error;
+      if (!data?.success) throw new Error(data?.error || 'Unknown error');
+      const added = data.contacts_added ?? 0;
+      const skipped = data.duplicates_skipped ?? 0;
+      const processed = data.companies_processed ?? 0;
+      const label = isAll
+        ? `Find Contacts: ${added} added across ${processed} companies${skipped ? `, ${skipped} duplicates skipped` : ''}`
+        : `${opts.companyName || 'Company'}: ${added} new contact${added === 1 ? '' : 's'}${skipped ? `, ${skipped} duplicates skipped` : ''}`;
+      toast({ title: label });
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Find Contacts failed', description: err.message, variant: 'destructive' });
+    } finally {
+      if (isAll) setFindingContactsAll(false);
+      else setFindingContactsForId(null);
+    }
+  };
 
   const handleSaveCompanyType = async (id: string, newType: string) => {
     try {
@@ -1013,6 +1049,16 @@ const MarketingNewJobs: React.FC = () => {
                           <td className="text-center px-4 py-3">
                             <div className="inline-flex items-center gap-1">
                               <button
+                                onClick={() => handleFindContacts({ mode: 'company', companyId: c.id, companyName: c.company_name })}
+                                disabled={findingContactsAll || findingContactsForId === c.id}
+                                className="inline-flex items-center justify-center p-1.5 rounded text-emerald-700 hover:bg-emerald-50 disabled:opacity-40"
+                                title={`Find more hiring contacts at ${c.company_name} (AI + Crelate)`}
+                              >
+                                {findingContactsForId === c.id
+                                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                                  : <Users className="w-4 h-4" />}
+                              </button>
+                              <button
                                 onClick={() => setEditingCompanyTypeId(prev => prev === c.id ? null : c.id)}
                                 className="inline-flex items-center justify-center p-1.5 rounded text-blue-600 hover:bg-blue-50"
                                 title="Edit category"
@@ -1121,6 +1167,18 @@ const MarketingNewJobs: React.FC = () => {
                 <select value={filterSource} onChange={e => setFilterSource(e.target.value)} className="border rounded-md px-3 py-2 text-sm bg-white">
                   {contactSources.map(s => <option key={s} value={s}>{s}</option>)}
                 </select>
+                <Button
+                  onClick={() => handleFindContacts({ mode: 'all' })}
+                  disabled={findingContactsAll}
+                  className="bg-[#911406] hover:bg-[#7a1005] text-white"
+                  title="Find more contacts (AI + Crelate) for every company with open jobs"
+                >
+                  {findingContactsAll ? (
+                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Finding contacts…</>
+                  ) : (
+                    <><Users className="w-4 h-4 mr-2" /> Find Contacts</>
+                  )}
+                </Button>
                 <span className="text-sm text-gray-500">{filteredContacts.length} contacts</span>
               </div>
 
@@ -1131,12 +1189,12 @@ const MarketingNewJobs: React.FC = () => {
                     <tr>
                       <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[120px]">First Name</th>
                       <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[120px]">Last Name</th>
+                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[180px]">Company</th>
+                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[180px]">Title</th>
                       <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[200px]">Email</th>
                       <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[130px]">Phone (Work)</th>
                       <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[130px]">Phone (Home)</th>
                       <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[130px]">Phone (Cell)</th>
-                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[180px]">Title</th>
-                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[180px]">Company</th>
                       <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[120px]">Source</th>
                       <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider min-w-[200px]">LinkedIn URL</th>
                     </tr>
@@ -1167,11 +1225,19 @@ const MarketingNewJobs: React.FC = () => {
                           <td className="px-4 py-2.5 border-r border-gray-100 text-gray-900 font-medium">
                             {c.last_name || <span className="text-gray-300">—</span>}
                           </td>
+                          {/* Company */}
+                          <td className="px-4 py-2.5 border-r border-gray-100 text-gray-900 font-medium text-sm">
+                            {c.company_name || <span className="text-gray-300">—</span>}
+                          </td>
+                          {/* Title */}
+                          <td className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm">
+                            {c.title || <span className="text-gray-300">—</span>}
+                          </td>
                           {/* Email */}
                           <td className="px-4 py-2.5 border-r border-gray-100">
                             {c.email ? (
-                              <a 
-                                href={`mailto:${c.email}`} 
+                              <a
+                                href={`mailto:${c.email}`}
                                 className="text-blue-600 hover:underline text-sm"
                                 onClick={e => e.stopPropagation()}
                               >
@@ -1192,14 +1258,6 @@ const MarketingNewJobs: React.FC = () => {
                           {/* Phone (Cell) */}
                           <td className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm">
                             {c.phone_cell || <span className="text-gray-300">—</span>}
-                          </td>
-                          {/* Title */}
-                          <td className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm">
-                            {c.title || <span className="text-gray-300">—</span>}
-                          </td>
-                          {/* Company */}
-                          <td className="px-4 py-2.5 border-r border-gray-100 text-gray-900 font-medium text-sm">
-                            {c.company_name || <span className="text-gray-300">—</span>}
                           </td>
                           {/* Source */}
                           <td className="px-4 py-2.5 border-r border-gray-100 text-sm">

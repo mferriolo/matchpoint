@@ -1076,41 +1076,11 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         await upd({ new_jobs_added: added, duplicates_skipped: dupes, new_companies_added: coAdded, new_roles_by_type: roleB });
       }
 
-      // STEP 6: CONTACTS (only for companies that have verified jobs)
-      await progress.startStep('enriching_contacts', 'Finding hiring contacts...');
-      log('enriching_contacts', 'Contact enrichment');
-      const coWithJobs = new Set<string>();
-      allJ.forEach(j => { if (!j.is_closed && j.status !== 'Closed') coWithJobs.add(j.company_name); });
-      newCos.forEach(c => coWithJobs.add(c));
-      const needCt: string[] = [];
-      for (const cn of coWithJobs) { if (allT.filter(c => c.company_name === cn).length < 2) needCt.push(cn); }
-      await progress.updateStep('enriching_contacts', { items_total: needCt.length, items_processed: 0, sub_step: `${needCt.length} companies need contacts` });
-      telem.startStep('enriching_contacts', needCt.length);
-
-      if (needCt.length > 0) {
-        log('enriching_contacts', `${needCt.length} companies need contacts`);
-        for (let i = 0; i < needCt.length; i += 25) {
-          const batch = needCt.slice(i, i + 25);
-          await progress.updateStep('enriching_contacts', { items_processed: i, sub_step: `Enriching batch ${Math.floor(i/25)+1}/${Math.ceil(needCt.length/25)}...` });
-          try {
-            const cr = await aiCall(oa, `Find hiring contacts for:\n${batch.map((c,i)=>`${i+1}. ${c}`).join('\n')}\nFind: Talent Acquisition, Recruiters, HR Directors, Medical Directors, CMOs.\nONLY real verifiable info. No guessed emails.\nReturn JSON: [{"company":"","first_name":"","last_name":"","email":"","phone_work":"","phone_cell":"","phone_home":"","title":"","source":"","source_url":""}]\nOnly JSON.`, 5000, telem);
-            for (const c of parseArr(cr)) {
-              if (!c.company || (!c.first_name && !c.last_name)) continue;
-              const dk = `${(c.first_name||'').toLowerCase().trim()}|${(c.last_name||'').toLowerCase().trim()}|${(c.company||'').toLowerCase().trim()}`;
-              if (ctKeys.has(dk)) continue; ctKeys.add(dk);
-              const co = coMap.get((c.company||'').toLowerCase().trim());
-              let su: string|null = null;
-              if (c.source_url?.startsWith('http') && !c.source_url.includes('/search/results/') && !c.source_url.includes('?q=')) su = c.source_url;
-              const { error } = await supabase.from('marketing_contacts').insert({ company_id: co?.id||null, company_name: c.company, first_name: c.first_name||'', last_name: c.last_name||'', email: c.email||'', phone_work: c.phone_work||'', phone_home: c.phone_home||'', phone_cell: c.phone_cell||'', title: c.title||'', source: 'AI Intelligence Engine', source_url: su, is_verified: !!su });
-              if (!error) ctAdded++;
-            }
-          } catch (e) { log('enriching_contacts', `Batch error: ${(e as Error).message}`); }
-        }
-      }
-      log('enriching_contacts', `${ctAdded} contacts added`);
-      telem.endStep(ctAdded, `${ctAdded} contacts added across ${needCt.length} companies needing enrichment`);
-      await progress.completeStep('enriching_contacts', `${ctAdded} contacts added`);
-      await upd({ contacts_added: ctAdded });
+      // STEP 6 (CONTACTS) removed in v90. Contact enrichment now runs as
+      // a separate action from the Contacts tab and Companies tab via the
+      // `find-contacts` edge function, so the Tracker only does job
+      // discovery / dedup / insertion.
+      await progress.skipStep('enriching_contacts');
     } else {
       await progress.skipStep('searching_sources');
       await progress.skipStep('deduplicating');
