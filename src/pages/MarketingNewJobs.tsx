@@ -2078,7 +2078,7 @@ const MarketingNewJobs: React.FC = () => {
                   </p>
                   {isEnrich && enrichedCount === 0 && r.companies_total > 0 && (
                     <p className="text-xs text-amber-700 mt-1 font-medium">
-                      No fields were filled — scroll down to see why per contact.
+                      No fields were filled — see diagnostics + per-contact reasons below.
                     </p>
                   )}
                   {!isEnrich && (r.duplicates_skipped || 0) > 0 && (
@@ -2115,6 +2115,18 @@ const MarketingNewJobs: React.FC = () => {
                     Hunter runs <em>after</em> the other sources and backfills verified emails onto contacts that came in with just a name.
                   </p>
                 </div>
+
+                {/* Diagnostics panel for enrich runs — shows the blob
+                    the edge function writes to error_message on
+                    success/failure so we can see what sources were
+                    configured, how many rows loaded, and totals even
+                    when per_company is empty. */}
+                {isEnrich && r.error_message && (
+                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                    <h4 className="text-xs uppercase tracking-wider text-slate-600 font-semibold mb-1.5">Diagnostics</h4>
+                    <p className="text-[11px] text-slate-700 font-mono break-all leading-relaxed">{r.error_message}</p>
+                  </div>
+                )}
 
                 {/* Per-row detail. For enrich: one row per contact with
                     the specific fields that got filled OR a reason why
@@ -2220,13 +2232,16 @@ const MarketingNewJobs: React.FC = () => {
                   </div>
                 )}
 
-                {/* Errors surfacing — e.g. Apollo 401 / credit exhaustion */}
-                {(companiesWithErrors.length > 0 || r.error_message) && (
+                {/* Errors surfacing — e.g. Apollo 401 / credit exhaustion.
+                    For successful enrich runs, the diagnostic blob lives
+                    in its own panel above so we don't double-render it
+                    here as an "Issue". */}
+                {(companiesWithErrors.length > 0 || (r.error_message && !(isEnrich && succeeded))) && (
                   <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
                     <h4 className="text-xs uppercase tracking-wider text-amber-800 font-semibold mb-2 flex items-center gap-1.5">
                       <AlertTriangle className="w-3.5 h-3.5" /> Issues
                     </h4>
-                    {r.error_message && (
+                    {r.error_message && !(isEnrich && succeeded) && (
                       <p className="text-xs text-amber-900 font-mono bg-white/60 p-2 rounded mb-2">{r.error_message}</p>
                     )}
                     {companiesWithErrors.length > 0 && (

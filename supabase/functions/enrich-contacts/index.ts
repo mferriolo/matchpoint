@@ -390,13 +390,30 @@ async function enrichContact(
 
 async function processRun(runId: string, contactIds: string[], apolloKey: string|undefined, hunterKey: string|undefined, serpKey: string|undefined, openaiKey: string|undefined) {
   const startedAt = Date.now();
+  // Diagnostic blob — written into error_message on completion so the
+  // user can see it in the results dialog even when per_company comes
+  // back empty. Lists what sources were configured, how many contacts
+  // the function was able to load, and any warnings.
+  const diag: string[] = [];
+  diag.push(`sources: SerpAPI=${serpKey ? 'yes' : 'NO'}, OpenAI=${openaiKey ? 'yes' : 'NO'}, Apollo=${apolloKey ? 'yes' : 'NO'}, Hunter=${hunterKey ? 'yes' : 'NO'}`);
+  diag.push(`contactIds received: ${contactIds.length}`);
   try {
     // Load the contacts + their companies' websites in two queries so
     // we can pass a domain to Apollo/Hunter without N round-trips.
-    const { data: contacts } = await supabase.from('marketing_contacts')
+    const { data: contacts, error: loadErr } = await supabase.from('marketing_contacts')
       .select('id, first_name, last_name, company_name, company_id, email, title, linkedin_url, source_url, phone_work, phone_home, phone_cell')
       .in('id', contactIds);
     const rows: ContactRow[] = (contacts || []) as ContactRow[];
+    diag.push(`rows loaded from marketing_contacts: ${rows.length}${loadErr ? ` (load error: ${loadErr.message})` : ''}`);
+    if (rows.length === 0) {
+      await supabase.from('contact_runs').update({
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        current_company: null,
+        error_message: `No contacts matched the requested IDs. Diagnostics: ${diag.join(' | ')}`,
+      }).eq('id', runId);
+      return;
+    }
 
     const coIds = Array.from(new Set(rows.map(r => r.company_id).filter(Boolean) as string[]));
     const domainByCoId = new Map<string, string | null>();
@@ -455,19 +472,53 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
       }).eq('id', runId);
     }
 
+    diag.push(`processed ${rows.length} contacts in ${Math.round((Date.now() - startedAt) / 1000)}s`);
+    diag.push(`totals: enriched=${totals.enriched} serp=${totals.serp} apollo=${totals.apollo} hunter=${totals.hunter} skipped=${totals.skipped}`);
+    // Belt-and-suspenders final write — include per_company + totals
+    // even though the in-loop updates already wrote them, in case the
+    // client was polling at the wrong moment.
     await supabase.from('contact_runs').update({
       status: 'completed',
       completed_at: new Date().toISOString(),
       current_company: null,
+      companies_processed: rows.length,
+      contacts_added: totals.enriched,
+      ai_added: totals.serp,
+      apollo_added: totals.apollo,
+      emails_verified: totals.hunter,
+      duplicates_skipped: totals.skipped,
+      per_company: results.map(r => ({
+        company: r.contactName,
+        ai_added: r.serpHit ? 1 : 0,
+        crelate_added: 0,
+        apollo_added: r.apolloHit ? 1 : 0,
+        leadership_added: 0,
+        emails_verified: r.hunterHit ? 1 : 0,
+        duplicates_skipped: r.fieldsUpdated.length === 0 ? 1 : 0,
+        errors: r.errors,
+        fields_updated: r.fieldsUpdated,
+        skip_reason: r.skipReason,
+        serp_attempted: r.serpAttempted,
+        serp_results: r.serpResultsCount,
+        apollo_attempted: r.apolloAttempted,
+        apollo_matched: r.apolloMatched,
+        hunter_attempted: r.hunterAttempted,
+        hunter_matched: r.hunterMatched,
+        had_domain: r.apolloHadDomain,
+      })),
+      // Diagnostics are surfaced via error_message so the results dialog
+      // can show them — even on successful runs.
+      error_message: diag.join(' | '),
     }).eq('id', runId);
-    console.log(`enrich-contacts run ${runId} done in ${Math.round((Date.now() - startedAt) / 1000)}s — enriched ${totals.enriched} of ${rows.length}, SerpAPI:${totals.serp} Apollo:${totals.apollo} Hunter:${totals.hunter}`);
+    console.log(`enrich-contacts run ${runId} done: ${diag.join(' | ')}`);
   } catch (e) {
     const msg = (e as Error).message || String(e);
     console.error(`enrich-contacts run ${runId} failed:`, msg);
+    diag.push(`EXCEPTION: ${msg}`);
     await supabase.from('contact_runs').update({
       status: 'failed',
       completed_at: new Date().toISOString(),
-      error_message: msg,
+      error_message: diag.join(' | '),
     }).eq('id', runId);
   }
 }
