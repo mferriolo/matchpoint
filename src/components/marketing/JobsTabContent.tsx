@@ -29,6 +29,175 @@ type SortDir = 'asc' | 'desc';
 
 const JOB_TYPE_OPTIONS = ['All', 'CMO', 'Medical Director', 'PCP', 'APP', 'Other'];
 
+// Multi-select column header extracted to MODULE scope so it isn't
+// remounted on every parent re-render. When this was defined inside the
+// parent component body, checking a checkbox caused parent state to
+// change → parent re-render → React saw a new function reference and
+// unmounted + remounted the whole dropdown. That remount briefly
+// detached the click-outside ref and closed the popup before the user
+// could select a second option. Keeping this at module scope means the
+// component type is stable across parent renders; only props change.
+type MultiSelectColumnHeaderProps<Field extends string> = {
+  field: Field;
+  label: string;
+  filterValues: Set<string>;
+  filterOptions: string[];
+  onFilterChange: (next: Set<string>) => void;
+  filterKey: string;
+  openFilter: string | null;
+  setOpenFilter: (k: string | null) => void;
+  sortField: Field;
+  sortDir: 'asc' | 'desc';
+  onSort: (f: Field) => void;
+};
+
+function MultiSelectColumnHeader<Field extends string>(props: MultiSelectColumnHeaderProps<Field>) {
+  const { field, label, filterValues, filterOptions, onFilterChange, filterKey,
+    openFilter, setOpenFilter, sortField, sortDir, onSort } = props;
+  const isFilterOpen = openFilter === filterKey;
+  const hasFilter = filterValues.size > 0;
+  const [filterSearch, setFilterSearch] = useState('');
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Reset the search box when the dropdown closes.
+  React.useEffect(() => { if (!isFilterOpen) setFilterSearch(''); }, [isFilterOpen]);
+
+  // Per-dropdown click-outside handler. Only armed while open, so it
+  // can't fire stale-ref checks during other re-renders.
+  React.useEffect(() => {
+    if (!isFilterOpen) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setOpenFilter(null);
+      }
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [isFilterOpen, setOpenFilter]);
+
+  // Hide the legacy 'All' sentinel from options if a call site still passes it.
+  const cleanOptions = useMemo(() => filterOptions.filter(o => o !== 'All'), [filterOptions]);
+  const displayOptions = useMemo(() => {
+    if (!filterSearch) return cleanOptions;
+    const s = filterSearch.toLowerCase();
+    return cleanOptions.filter(opt => opt.toLowerCase().includes(s));
+  }, [cleanOptions, filterSearch]);
+
+  const toggleOption = (opt: string) => {
+    const next = new Set(filterValues);
+    if (next.has(opt)) next.delete(opt); else next.add(opt);
+    onFilterChange(next);
+  };
+
+  const sortIcon = sortField !== field
+    ? <ArrowUpDown className="w-3 h-3 ml-1 opacity-40 flex-shrink-0" />
+    : sortDir === 'asc'
+      ? <ArrowUp className="w-3 h-3 ml-1 text-[#911406] flex-shrink-0" />
+      : <ArrowDown className="w-3 h-3 ml-1 text-[#911406] flex-shrink-0" />;
+
+  return (
+    <th className="text-left px-4 py-3 font-medium text-gray-600 relative select-none">
+      <div className="flex items-center gap-1">
+        <button
+          onClick={() => onSort(field)}
+          className="flex items-center gap-0.5 hover:text-gray-900 transition-colors text-xs uppercase tracking-wider font-semibold"
+        >
+          {label}
+          {sortIcon}
+        </button>
+        <button
+          onClick={(e) => { e.stopPropagation(); setOpenFilter(isFilterOpen ? null : filterKey); }}
+          className={`p-0.5 rounded transition-colors ml-0.5 ${hasFilter ? 'text-[#911406] bg-red-50' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
+          title={`Filter by ${label}${hasFilter ? ` (${filterValues.size} selected)` : ''}`}
+        >
+          <Filter className="w-3 h-3" />
+        </button>
+        {hasFilter && (
+          <>
+            <span className="text-[10px] font-semibold text-[#911406] bg-red-50 px-1 rounded tabular-nums">{filterValues.size}</span>
+            <button
+              onClick={(e) => { e.stopPropagation(); onFilterChange(new Set()); }}
+              className="p-0.5 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+              title="Clear filter"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </>
+        )}
+      </div>
+      {isFilterOpen && (
+        <div
+          ref={dropdownRef}
+          className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-xl z-50 min-w-[240px] max-h-[400px] flex flex-col"
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div className="p-2 border-b border-gray-100 sticky top-0 bg-white z-10">
+            <div className="flex items-center justify-between mb-1.5">
+              <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Filter by {label}</p>
+              {hasFilter && (
+                <span className="text-[10px] text-[#911406] font-semibold">{filterValues.size} selected</span>
+              )}
+            </div>
+            {cleanOptions.length > 8 && (
+              <input
+                type="text"
+                placeholder={`Search ${label.toLowerCase()}...`}
+                value={filterSearch}
+                onChange={e => setFilterSearch(e.target.value)}
+                className="w-full text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#911406]/30 focus:border-[#911406]/30"
+              />
+            )}
+          </div>
+          <div className="py-1 overflow-y-auto flex-1">
+            {displayOptions.map(opt => {
+              const checked = filterValues.has(opt);
+              return (
+                <label
+                  key={opt}
+                  className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors flex items-center gap-2 cursor-pointer ${checked ? 'bg-red-50/50 text-[#911406] font-medium' : 'text-gray-700'}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleOption(opt)}
+                    className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
+                  />
+                  <span className="truncate flex-1">{opt}</span>
+                </label>
+              );
+            })}
+            {displayOptions.length === 0 && (
+              <p className="text-xs text-gray-400 px-3 py-2 italic">No matches</p>
+            )}
+          </div>
+          <div className="border-t border-gray-100 px-3 py-2 flex items-center justify-between gap-2 bg-gray-50/50">
+            <button
+              onClick={() => onFilterChange(new Set(displayOptions))}
+              className="text-[11px] text-gray-600 hover:text-[#911406] font-medium"
+            >
+              Select all{filterSearch ? ' (visible)' : ''}
+            </button>
+            <button
+              onClick={() => onFilterChange(new Set())}
+              className="text-[11px] text-gray-600 hover:text-[#911406] font-medium"
+              disabled={!hasFilter}
+            >
+              Clear
+            </button>
+            <button
+              onClick={() => setOpenFilter(null)}
+              className="text-[11px] text-white bg-[#911406] hover:bg-[#7a1005] px-2.5 py-1 rounded font-medium"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      )}
+    </th>
+  );
+}
+
 const CATEGORY_OPTIONS = [
   'All',
   'Value Based Care (VBC)',
@@ -153,9 +322,9 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
   const [filterCompany, setFilterCompany] = useState<Set<string>>(new Set());
   const [filterLocation, setFilterLocation] = useState<Set<string>>(new Set());
 
-  // Dropdown open state
+  // Dropdown open state. Click-outside handling lives inside the
+  // MultiSelectColumnHeader itself now (per-dropdown).
   const [openFilter, setOpenFilter] = useState<string | null>(null);
-  const filterRef = useRef<HTMLDivElement>(null);
 
   // Scrub state
   const [isScrubbing, setIsScrubbing] = useState(false);
@@ -196,17 +365,6 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
   const [viewingJobId, setViewingJobId] = useState<string | null>(null);
   const viewingJob = viewingJobId ? jobs.find(j => j.id === viewingJobId) : null;
 
-
-  // Close filter dropdown when clicking outside
-  React.useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (filterRef.current && !filterRef.current.contains(e.target as Node)) {
-        setOpenFilter(null);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
 
   // Derive unique values for filter dropdowns. No 'All' sentinel: the
   // multi-select checkbox list uses an empty set to mean "no filter".
@@ -715,143 +873,6 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
       : <ArrowDown className="w-3 h-3 ml-1 text-[#911406] flex-shrink-0" />;
   };
 
-  // Column header with sort + multi-select filter. filterValues is a Set
-  // of currently-selected values for this column; an empty set means "no
-  // filter" (all rows pass). Checking/unchecking a row toggles it in the
-  // set. The "Select all" / "Clear" links in the footer are convenience
-  // shortcuts over the currently-visible (search-filtered) options.
-  const ColumnHeader = ({
-    field, label, filterValues, filterOptions, onFilterChange, filterKey
-  }: {
-    field: SortField; label: string; filterValues: Set<string>; filterOptions: string[];
-    onFilterChange: (next: Set<string>) => void; filterKey: string;
-  }) => {
-    const isFilterOpen = openFilter === filterKey;
-    const hasFilter = filterValues.size > 0;
-    const [filterSearch, setFilterSearch] = useState('');
-
-    // Hide the legacy 'All' sentinel from options if a call site still passes it.
-    const cleanOptions = useMemo(() => filterOptions.filter(o => o !== 'All'), [filterOptions]);
-
-    const displayOptions = useMemo(() => {
-      if (!filterSearch) return cleanOptions;
-      const s = filterSearch.toLowerCase();
-      return cleanOptions.filter(opt => opt.toLowerCase().includes(s));
-    }, [cleanOptions, filterSearch]);
-
-    React.useEffect(() => {
-      if (!isFilterOpen) setFilterSearch('');
-    }, [isFilterOpen]);
-
-    const toggleOption = (opt: string) => {
-      const next = new Set(filterValues);
-      if (next.has(opt)) next.delete(opt);
-      else next.add(opt);
-      onFilterChange(next);
-    };
-
-    return (
-      <th className="text-left px-4 py-3 font-medium text-gray-600 relative select-none">
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => handleSort(field)}
-            className="flex items-center gap-0.5 hover:text-gray-900 transition-colors text-xs uppercase tracking-wider font-semibold"
-          >
-            {label}
-            <SortIcon field={field} />
-          </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); setOpenFilter(isFilterOpen ? null : filterKey); }}
-            className={`p-0.5 rounded transition-colors ml-0.5 ${hasFilter ? 'text-[#911406] bg-red-50' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
-            title={`Filter by ${label}${hasFilter ? ` (${filterValues.size} selected)` : ''}`}
-          >
-            <Filter className="w-3 h-3" />
-          </button>
-          {hasFilter && (
-            <>
-              <span className="text-[10px] font-semibold text-[#911406] bg-red-50 px-1 rounded tabular-nums">{filterValues.size}</span>
-              <button
-                onClick={(e) => { e.stopPropagation(); onFilterChange(new Set()); }}
-                className="p-0.5 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
-                title="Clear filter"
-              >
-                <X className="w-3 h-3" />
-              </button>
-            </>
-          )}
-        </div>
-        {isFilterOpen && (
-          <div
-            ref={filterRef}
-            className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-xl z-50 min-w-[240px] max-h-[400px] flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="p-2 border-b border-gray-100 sticky top-0 bg-white z-10">
-              <div className="flex items-center justify-between mb-1.5">
-                <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Filter by {label}</p>
-                {hasFilter && (
-                  <span className="text-[10px] text-[#911406] font-semibold">{filterValues.size} selected</span>
-                )}
-              </div>
-              {cleanOptions.length > 8 && (
-                <input
-                  type="text"
-                  placeholder={`Search ${label.toLowerCase()}...`}
-                  value={filterSearch}
-                  onChange={e => setFilterSearch(e.target.value)}
-                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#911406]/30 focus:border-[#911406]/30"
-                  autoFocus
-                />
-              )}
-            </div>
-            <div className="py-1 overflow-y-auto flex-1">
-              {displayOptions.map(opt => {
-                const checked = filterValues.has(opt);
-                return (
-                  <label
-                    key={opt}
-                    className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors flex items-center gap-2 cursor-pointer ${checked ? 'bg-red-50/50 text-[#911406] font-medium' : 'text-gray-700'}`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleOption(opt)}
-                      className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
-                    />
-                    <span className="truncate flex-1">{opt}</span>
-                  </label>
-                );
-              })}
-              {displayOptions.length === 0 && (
-                <p className="text-xs text-gray-400 px-3 py-2 italic">No matches</p>
-              )}
-            </div>
-            <div className="border-t border-gray-100 px-3 py-2 flex items-center justify-between gap-2 bg-gray-50/50">
-              <button
-                onClick={() => onFilterChange(new Set(displayOptions))}
-                className="text-[11px] text-gray-600 hover:text-[#911406] font-medium"
-              >
-                Select all{filterSearch ? ' (visible)' : ''}
-              </button>
-              <button
-                onClick={() => onFilterChange(new Set())}
-                className="text-[11px] text-gray-600 hover:text-[#911406] font-medium"
-                disabled={!hasFilter}
-              >
-                Clear
-              </button>
-              <button
-                onClick={() => setOpenFilter(null)}
-                className="text-[11px] text-white bg-[#911406] hover:bg-[#7a1005] px-2.5 py-1 rounded font-medium"
-              >
-                Done
-              </button>
-            </div>
-          </div>
-        )}
-      </th>
-    );
-  };
 
 
 
@@ -1094,11 +1115,11 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                   title={allVisibleSelected ? 'Deselect all visible' : 'Select all visible'}
                 />
               </th>
-              <ColumnHeader field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} filterKey="company" />
-              <ColumnHeader field="job_title" label="Job Title" filterValues={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} filterKey="title" />
-              <ColumnHeader field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={JOB_TYPE_OPTIONS} onFilterChange={setFilterJobType} filterKey="jobtype" />
-              <ColumnHeader field="job_category" label="Company Category" filterValues={filterCategory} filterOptions={CATEGORY_OPTIONS} onFilterChange={setFilterCategory} filterKey="category" />
-              <ColumnHeader field="location" label="Location" filterValues={filterLocation} filterOptions={uniqueLocations} onFilterChange={setFilterLocation} filterKey="location" />
+              <MultiSelectColumnHeader<SortField> field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} filterKey="company" openFilter={openFilter} setOpenFilter={setOpenFilter} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="job_title" label="Job Title" filterValues={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} filterKey="title" openFilter={openFilter} setOpenFilter={setOpenFilter} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={JOB_TYPE_OPTIONS} onFilterChange={setFilterJobType} filterKey="jobtype" openFilter={openFilter} setOpenFilter={setOpenFilter} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="job_category" label="Company Category" filterValues={filterCategory} filterOptions={CATEGORY_OPTIONS} onFilterChange={setFilterCategory} filterKey="category" openFilter={openFilter} setOpenFilter={setOpenFilter} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="location" label="Location" filterValues={filterLocation} filterOptions={uniqueLocations} onFilterChange={setFilterLocation} filterKey="location" openFilter={openFilter} setOpenFilter={setOpenFilter} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
 
               <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[110px]">
                 <button onClick={() => handleSort('date_posted')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
