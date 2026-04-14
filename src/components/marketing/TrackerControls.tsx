@@ -15,7 +15,7 @@ import { useToast } from '@/hooks/use-toast';
 // ============================================================
 // CONSTANTS
 // ============================================================
-const MAX_POLL_DURATION_MS = 20 * 60 * 1000; // 20 minutes max polling (increased for verification step)
+const MAX_POLL_DURATION_MS = 30 * 60 * 1000; // 30 minutes max polling (v85: bumped from 20 to give Phase A+B+C+D headroom)
 const STALE_THRESHOLD_MS = 3 * 60 * 1000;
 const POLL_INTERVAL_MS = 2000;
 

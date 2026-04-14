@@ -700,9 +700,12 @@ async function updateSummariesBatch(logFn: (step: string, msg: string) => void, 
 
 async function cleanupStaleRuns() {
   try {
-    const cutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    // v85: bumped from 15 → 30 min so a legitimately-long run isn't
+    // marked failed by the next invocation's cleanup. UI watchdog also
+    // moved to 30 min in TrackerControls.tsx for the same reason.
+    const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
     const { data: stale } = await supabase.from('tracker_runs').select('id').eq('status', 'running').lt('started_at', cutoff);
-    if (stale && stale.length > 0) { const ids = stale.map(r => r.id); await supabase.from('tracker_runs').update({ status: 'failed', completed_at: new Date().toISOString(), current_step: 'error', error_message: 'Auto-cleaned: exceeded 15min timeout' }).in('id', ids); }
+    if (stale && stale.length > 0) { const ids = stale.map(r => r.id); await supabase.from('tracker_runs').update({ status: 'failed', completed_at: new Date().toISOString(), current_step: 'error', error_message: 'Auto-cleaned: exceeded 30min timeout' }).in('id', ids); }
   } catch (e) { console.warn('Stale run cleanup error:', e); }
 }
 
@@ -874,7 +877,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           let cpFetched = 0, cpErrors = 0, cpJobsBefore = candidates.length;
           const atsCounts: Record<string, number> = {};
           for (let i = 0; i < targetsWithCareerUrl.length; i++) {
-            if (Date.now() - runStartMs > 12 * 60 * 1000) {
+            if (Date.now() - runStartMs > 25 * 60 * 1000) {
               log('searching_sources', `Career-page time budget exhausted after ${cpFetched} fetches`);
               break;
             }
@@ -914,31 +917,37 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         telem.startStep('discover_via_serpapi', totalUnits);
 
         // ---------- Phase B: Per-company SerpAPI queries ----------
-        for (let i = 0; i < targets.length; i++) {
-          if (Date.now() - runStartMs > 12 * 60 * 1000) {
+        // v85: parallelized with concurrency=5 to cut Phase B time from
+        // ~16 min (serial × 8s/call × 110 companies) down to ~3 min.
+        // SerpAPI's Self plan supports >100 concurrent connections; 5 is
+        // very safe and avoids tripping any rate limits.
+        const PHASE_B_CONCURRENCY = 5;
+        for (let i = 0; i < targets.length; i += PHASE_B_CONCURRENCY) {
+          if (Date.now() - runStartMs > 25 * 60 * 1000) {
             log('searching_sources', `Time budget exhausted after ${processed} queries (${candidates.length} candidates so far)`);
             break;
           }
-          const t = targets[i];
-          const r = await searchSerpApiForCompany(t.name, effectiveRoles);
-          serpCalls++;
-          if (!r.searchSuccess) {
-            serpErrors++;
-            log('searching_sources', `SerpAPI error for ${t.name}: ${r.error}`);
-          } else {
-            for (const sj of r.jobsFound) ingestSerpResult(sj, t.name, t.source);
+          const batch = targets.slice(i, i + PHASE_B_CONCURRENCY);
+          const settled = await Promise.all(batch.map(t => searchSerpApiForCompany(t.name, effectiveRoles).then(r => ({ t, r }))));
+          for (const { t, r } of settled) {
+            serpCalls++;
+            if (!r.searchSuccess) {
+              serpErrors++;
+              log('searching_sources', `SerpAPI error for ${t.name}: ${r.error}`);
+            } else {
+              for (const sj of r.jobsFound) ingestSerpResult(sj, t.name, t.source);
+            }
+            processed++;
           }
-          processed++;
-          if (processed % 5 === 0 || processed === totalUnits) {
-            await progress.updateStep('searching_sources', { items_processed: processed, sub_step: `${processed}/${totalUnits} queries, ${candidates.length} matching jobs found` });
-          }
-          if (i < targets.length - 1) await new Promise(r2 => setTimeout(r2, 150));
+          await progress.updateStep('searching_sources', { items_processed: processed, sub_step: `${processed}/${totalUnits} queries, ${candidates.length} matching jobs found` });
+          // Tiny pause between batches as a courtesy to SerpAPI.
+          if (i + PHASE_B_CONCURRENCY < targets.length) await new Promise(r2 => setTimeout(r2, 100));
         }
 
         // Broad per-role queries — vacuum coverage for jobs at companies
         // not yet in our DB. One call per role keyword, ~10 results each.
         for (const role of effectiveRoles) {
-          if (Date.now() - runStartMs > 12 * 60 * 1000) break;
+          if (Date.now() - runStartMs > 25 * 60 * 1000) break;
           const cleanRole = _cleanRoleLabel(role);
           if (!cleanRole) { processed++; continue; }
           const r = await searchSerpApiBroad(`"${cleanRole}" healthcare`);
@@ -975,7 +984,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             .join(' OR ');
           if (roleClause) {
             for (const board of HEALTHCARE_BOARDS) {
-              if (Date.now() - runStartMs > 12 * 60 * 1000) {
+              if (Date.now() - runStartMs > 25 * 60 * 1000) {
                 log('searching_sources', `Phase D: time budget exhausted after ${dCalls} board queries`);
                 break;
               }
