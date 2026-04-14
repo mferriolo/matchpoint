@@ -24,6 +24,7 @@ import PushToCrelate from '@/components/marketing/PushToCrelate';
 import CrelateSyncStatus from '@/components/marketing/CrelateSyncStatus';
 import MissingTitlesReport from '@/components/marketing/MissingTitlesReport';
 import TitleMapping from '@/components/marketing/TitleMapping';
+import { MultiSelectColumnHeader } from '@/components/marketing/MultiSelectColumnHeader';
 import { exportMasterSheet, exportNewDataSheet } from '@/utils/xlsxExport';
 
 
@@ -37,7 +38,33 @@ const MarketingNewJobs: React.FC = () => {
   const [contacts, setContacts] = useState<any[]>([]);
   const [searchCompanies, setSearchCompanies] = useState('');
   const [searchContacts, setSearchContacts] = useState('');
-  const [filterSource, setFilterSource] = useState('All');
+
+  // Contacts tab sort + per-column filters. Multi-select filters use an
+  // empty Set to mean "no filter"; for presence filters (email, phones,
+  // LinkedIn) callers pass options ['Has data', 'No data'] and the
+  // filter logic interprets them directly.
+  type ContactSortField =
+    | 'first_name' | 'last_name' | 'company_name' | 'title'
+    | 'email' | 'phone_work' | 'phone_home' | 'phone_cell'
+    | 'source' | 'created_at' | 'linkedin_url';
+  const [contactSortField, setContactSortField] = useState<ContactSortField>('created_at');
+  const [contactSortDir, setContactSortDir] = useState<'asc'|'desc'>('desc');
+  const [filterFirstName, setFilterFirstName] = useState<Set<string>>(new Set());
+  const [filterLastName, setFilterLastName] = useState<Set<string>>(new Set());
+  const [filterContactCompany, setFilterContactCompany] = useState<Set<string>>(new Set());
+  const [filterContactTitle, setFilterContactTitle] = useState<Set<string>>(new Set());
+  const [filterContactSource, setFilterContactSource] = useState<Set<string>>(new Set());
+  const [filterDateAdded, setFilterDateAdded] = useState<Set<string>>(new Set());
+  const [filterEmailPresence, setFilterEmailPresence] = useState<Set<string>>(new Set());
+  const [filterPhoneWorkPresence, setFilterPhoneWorkPresence] = useState<Set<string>>(new Set());
+  const [filterPhoneHomePresence, setFilterPhoneHomePresence] = useState<Set<string>>(new Set());
+  const [filterPhoneCellPresence, setFilterPhoneCellPresence] = useState<Set<string>>(new Set());
+  const [filterLinkedInPresence, setFilterLinkedInPresence] = useState<Set<string>>(new Set());
+
+  const handleContactSort = (f: ContactSortField) => {
+    if (contactSortField === f) setContactSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setContactSortField(f); setContactSortDir('asc'); }
+  };
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedContact, setSelectedContact] = useState<any>(null);
@@ -253,7 +280,6 @@ const MarketingNewJobs: React.FC = () => {
   };
 
 
-  const contactSources = ['All', 'Crelate ATS', 'AI Intelligence Engine', 'AI Second-Pass Sweep', 'Manual'];
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -473,21 +499,115 @@ const MarketingNewJobs: React.FC = () => {
 
   const highPriorityCompanyCount = useMemo(() => companies.filter(c => c.is_high_priority).length, [companies]);
 
-  // Contacts filter
-  const filteredContacts = contacts.filter(c => {
-    const matchesSearch = !searchContacts ||
-      c.company_name?.toLowerCase().includes(searchContacts.toLowerCase()) ||
-      c.first_name?.toLowerCase().includes(searchContacts.toLowerCase()) ||
-      c.last_name?.toLowerCase().includes(searchContacts.toLowerCase()) ||
-      c.title?.toLowerCase().includes(searchContacts.toLowerCase()) ||
-      c.email?.toLowerCase().includes(searchContacts.toLowerCase());
-    const matchesSource = filterSource === 'All' ||
-      (filterSource === 'Crelate ATS' && c.source === 'Crelate ATS') ||
-      (filterSource === 'AI Intelligence Engine' && c.source?.includes('AI') && !c.source?.includes('Sweep')) ||
-      (filterSource === 'AI Second-Pass Sweep' && c.source?.includes('Sweep')) ||
-      (filterSource === 'Manual' && !c.source?.includes('AI') && c.source !== 'Crelate ATS');
-    return matchesSearch && matchesSource;
-  });
+  // Derived LinkedIn URL per contact — the column reads from either the
+  // explicit linkedin_url field or falls back to source_url when it looks
+  // like a LinkedIn profile. Computed once here so sort + filter + table
+  // render all agree on the same value.
+  const getLinkedin = (c: any): string =>
+    c.linkedin_url || (c.source_url && c.source_url.includes('linkedin.com/in/') ? c.source_url : '');
+
+  // "Has data / No data" filter helper. Empty set or both options
+  // selected means "no filter"; one option means restrict to that side.
+  const presencePasses = (val: any, filter: Set<string>): boolean => {
+    if (filter.size === 0 || filter.size === 2) return true;
+    const has = !!(val && String(val).trim());
+    if (filter.has('Has data') && has) return true;
+    if (filter.has('No data') && !has) return true;
+    return false;
+  };
+
+  // Unique-value options for the multi-select filter dropdowns. Date
+  // Added is rounded to a YYYY-MM-DD key so the filter shows one entry
+  // per calendar day instead of one per contact.
+  const uniqueContactFirstNames = useMemo(() =>
+    Array.from(new Set(contacts.map(c => c.first_name).filter(Boolean))).sort(), [contacts]);
+  const uniqueContactLastNames = useMemo(() =>
+    Array.from(new Set(contacts.map(c => c.last_name).filter(Boolean))).sort(), [contacts]);
+  const uniqueContactCompanies = useMemo(() =>
+    Array.from(new Set(contacts.map(c => c.company_name).filter(Boolean))).sort(), [contacts]);
+  const uniqueContactTitles = useMemo(() =>
+    Array.from(new Set(contacts.map(c => c.title).filter(Boolean))).sort(), [contacts]);
+  const uniqueContactSourceValues = useMemo(() =>
+    Array.from(new Set(contacts.map(c => c.source).filter(Boolean))).sort(), [contacts]);
+  // Date key for filtering: a "Month Day, Year" string (e.g. "Apr 14,
+  // 2026") so the dropdown shows human-readable dates and the filter
+  // comparison is straight equality. Internally we also keep an ISO
+  // sort key so the dropdown orders most-recent first.
+  const formatDateKey = (iso: string): string => {
+    const d = new Date(iso);
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  };
+  const uniqueContactDates = useMemo(() => {
+    const pairs: { label: string; iso: string }[] = [];
+    const seen = new Set<string>();
+    for (const c of contacts) {
+      if (!c.created_at) continue;
+      const iso = new Date(c.created_at).toISOString().slice(0, 10);
+      if (seen.has(iso)) continue;
+      seen.add(iso);
+      pairs.push({ label: formatDateKey(c.created_at), iso });
+    }
+    pairs.sort((a, b) => b.iso.localeCompare(a.iso));
+    return pairs.map(p => p.label);
+  }, [contacts]);
+  const PRESENCE_OPTIONS = ['Has data', 'No data'];
+
+  // Contacts filter + sort
+  const filteredContacts = useMemo(() => {
+    const s = searchContacts.toLowerCase();
+    const list = contacts.filter(c => {
+      if (s) {
+        const matches = (c.company_name || '').toLowerCase().includes(s) ||
+          (c.first_name || '').toLowerCase().includes(s) ||
+          (c.last_name || '').toLowerCase().includes(s) ||
+          (c.title || '').toLowerCase().includes(s) ||
+          (c.email || '').toLowerCase().includes(s);
+        if (!matches) return false;
+      }
+      if (filterFirstName.size > 0 && !filterFirstName.has(c.first_name || '')) return false;
+      if (filterLastName.size > 0 && !filterLastName.has(c.last_name || '')) return false;
+      if (filterContactCompany.size > 0 && !filterContactCompany.has(c.company_name || '')) return false;
+      if (filterContactTitle.size > 0 && !filterContactTitle.has(c.title || '')) return false;
+      if (filterContactSource.size > 0 && !filterContactSource.has(c.source || '')) return false;
+      if (filterDateAdded.size > 0) {
+        const key = c.created_at ? formatDateKey(c.created_at) : '';
+        if (!filterDateAdded.has(key)) return false;
+      }
+      if (!presencePasses(c.email, filterEmailPresence)) return false;
+      if (!presencePasses(c.phone_work, filterPhoneWorkPresence)) return false;
+      if (!presencePasses(c.phone_home, filterPhoneHomePresence)) return false;
+      if (!presencePasses(c.phone_cell, filterPhoneCellPresence)) return false;
+      if (!presencePasses(getLinkedin(c), filterLinkedInPresence)) return false;
+      return true;
+    });
+
+    return [...list].sort((a, b) => {
+      let aVal: string | number = '';
+      let bVal: string | number = '';
+      switch (contactSortField) {
+        case 'first_name': aVal = (a.first_name || '').toLowerCase(); bVal = (b.first_name || '').toLowerCase(); break;
+        case 'last_name': aVal = (a.last_name || '').toLowerCase(); bVal = (b.last_name || '').toLowerCase(); break;
+        case 'company_name': aVal = (a.company_name || '').toLowerCase(); bVal = (b.company_name || '').toLowerCase(); break;
+        case 'title': aVal = (a.title || '').toLowerCase(); bVal = (b.title || '').toLowerCase(); break;
+        case 'email': aVal = (a.email || '').toLowerCase(); bVal = (b.email || '').toLowerCase(); break;
+        case 'phone_work': aVal = (a.phone_work || ''); bVal = (b.phone_work || ''); break;
+        case 'phone_home': aVal = (a.phone_home || ''); bVal = (b.phone_home || ''); break;
+        case 'phone_cell': aVal = (a.phone_cell || ''); bVal = (b.phone_cell || ''); break;
+        case 'source': aVal = (a.source || '').toLowerCase(); bVal = (b.source || '').toLowerCase(); break;
+        case 'created_at': aVal = a.created_at ? new Date(a.created_at).getTime() : 0; bVal = b.created_at ? new Date(b.created_at).getTime() : 0; break;
+        case 'linkedin_url': aVal = getLinkedin(a).toLowerCase(); bVal = getLinkedin(b).toLowerCase(); break;
+      }
+      if (typeof aVal === 'number' && typeof bVal === 'number') {
+        return contactSortDir === 'asc' ? aVal - bVal : bVal - aVal;
+      }
+      const cmp = String(aVal).localeCompare(String(bVal));
+      return contactSortDir === 'asc' ? cmp : -cmp;
+    });
+  }, [contacts, searchContacts, contactSortField, contactSortDir,
+      filterFirstName, filterLastName, filterContactCompany, filterContactTitle,
+      filterContactSource, filterDateAdded, filterEmailPresence,
+      filterPhoneWorkPresence, filterPhoneHomePresence, filterPhoneCellPresence,
+      filterLinkedInPresence]);
 
   const openJobsCount = jobs.filter(j => !j.is_closed && j.status !== 'Closed').length;
   const closedJobsCount = jobs.filter(j => j.is_closed || j.status === 'Closed').length;
@@ -1226,9 +1346,7 @@ const MarketingNewJobs: React.FC = () => {
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                   <Input placeholder="Search contacts by name, company, title, email..." value={searchContacts} onChange={e => setSearchContacts(e.target.value)} className="pl-9" />
                 </div>
-                <select value={filterSource} onChange={e => setFilterSource(e.target.value)} className="border rounded-md px-3 py-2 text-sm bg-white">
-                  {contactSources.map(s => <option key={s} value={s}>{s}</option>)}
-                </select>
+                {/* Source filter moved into the Source column header below. */}
                 <Button
                   onClick={() => handleFindContacts({ mode: 'all' })}
                   disabled={contactRunIsActive}
@@ -1325,17 +1443,17 @@ const MarketingNewJobs: React.FC = () => {
                 <table className="w-full text-sm border-collapse">
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
-                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[120px]">First Name</th>
-                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[120px]">Last Name</th>
-                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[180px]">Company</th>
-                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[180px]">Title</th>
-                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[200px]">Email</th>
-                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[130px]">Phone (Work)</th>
-                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[130px]">Phone (Home)</th>
-                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[130px]">Phone (Cell)</th>
-                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[120px]">Source</th>
-                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider border-r border-gray-200 min-w-[160px]">Date / Time Added</th>
-                      <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider min-w-[200px]">LinkedIn URL</th>
+                      <MultiSelectColumnHeader<ContactSortField> field="first_name" label="First Name" filterValues={filterFirstName} filterOptions={uniqueContactFirstNames} onFilterChange={setFilterFirstName} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
+                      <MultiSelectColumnHeader<ContactSortField> field="last_name" label="Last Name" filterValues={filterLastName} filterOptions={uniqueContactLastNames} onFilterChange={setFilterLastName} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
+                      <MultiSelectColumnHeader<ContactSortField> field="company_name" label="Company" filterValues={filterContactCompany} filterOptions={uniqueContactCompanies} onFilterChange={setFilterContactCompany} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
+                      <MultiSelectColumnHeader<ContactSortField> field="title" label="Title" filterValues={filterContactTitle} filterOptions={uniqueContactTitles} onFilterChange={setFilterContactTitle} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
+                      <MultiSelectColumnHeader<ContactSortField> field="email" label="Email" filterValues={filterEmailPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterEmailPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Email presence" />
+                      <MultiSelectColumnHeader<ContactSortField> field="phone_work" label="Phone (Work)" filterValues={filterPhoneWorkPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterPhoneWorkPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Work Phone presence" />
+                      <MultiSelectColumnHeader<ContactSortField> field="phone_home" label="Phone (Home)" filterValues={filterPhoneHomePresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterPhoneHomePresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Home Phone presence" />
+                      <MultiSelectColumnHeader<ContactSortField> field="phone_cell" label="Phone (Cell)" filterValues={filterPhoneCellPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterPhoneCellPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Cell Phone presence" />
+                      <MultiSelectColumnHeader<ContactSortField> field="source" label="Source" filterValues={filterContactSource} filterOptions={uniqueContactSourceValues} onFilterChange={setFilterContactSource} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
+                      <MultiSelectColumnHeader<ContactSortField> field="created_at" label="Date / Time Added" filterValues={filterDateAdded} filterOptions={uniqueContactDates} onFilterChange={setFilterDateAdded} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by date added" />
+                      <MultiSelectColumnHeader<ContactSortField> field="linkedin_url" label="LinkedIn URL" filterValues={filterLinkedInPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterLinkedInPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by LinkedIn presence" />
                     </tr>
                   </thead>
                   <tbody>
