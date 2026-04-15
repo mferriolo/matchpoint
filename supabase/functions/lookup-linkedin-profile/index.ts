@@ -87,18 +87,36 @@ function parseLinkedInTitle(titleRaw: string): { title: string | null; company: 
   return { title: null, company: null };
 }
 
-// Person-identity check: the result must actually be about the target
-// person. Checks that both first and last name appear somewhere in the
-// title, snippet, or URL (URL slug). Prevents returning a random third
-// party's profile that happens to rank for the search query.
+// Strip accents + punctuation + lowercase so "José Quiñones" matches a
+// slug like "jose-quinones". Collapses to letters only.
+function normalizeToken(s: string): string {
+  return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z]/g, '');
+}
+
+// Person-identity check. URL slug is the PRIMARY signal — LinkedIn
+// profile slugs almost always contain at least one of the person's
+// names. If the slug matches someone else entirely (e.g. "ife-o" for a
+// search that returned "George Barnett"), we reject even if the search
+// snippet mentions George's name in some other context (comment,
+// recommendation). Title/snippet is a secondary sanity check.
 function resultMatchesPerson(r: any, firstName: string, lastName: string): boolean {
-  const fn = firstName.toLowerCase().trim();
-  const ln = lastName.toLowerCase().trim();
-  if (!fn || !ln) return false;
-  const blob = `${r?.title || ''} ${r?.snippet || ''} ${r?.link || ''}`.toLowerCase();
-  // Require both names. For the URL specifically, also check the slug
-  // contains at least one — some people use initials in their slug.
-  return blob.includes(fn) && blob.includes(ln);
+  const fn = normalizeToken(firstName);
+  const ln = normalizeToken(lastName);
+  if (!fn && !ln) return false;
+  // Extract and normalise the LinkedIn slug.
+  const slugRaw = ((r?.link || '').match(/\/in\/([^\/\?]+)/) || [])[1] || '';
+  const slug = normalizeToken(slugRaw);
+  // The slug needs to contain the first or last name. This is what
+  // protects against entirely unrelated profiles being returned.
+  const slugHasFn = fn && slug.includes(fn);
+  const slugHasLn = ln && slug.includes(ln);
+  if (!slugHasFn && !slugHasLn) return false;
+  // Secondary check: title OR snippet should mention the person too,
+  // confirming the page is about them rather than just a slug collision.
+  const text = normalizeToken(`${r?.title || ''} ${r?.snippet || ''}`);
+  const textHasFn = fn && text.includes(fn);
+  const textHasLn = ln && text.includes(ln);
+  return !!(textHasFn || textHasLn);
 }
 
 Deno.serve(async (req) => {
@@ -237,20 +255,39 @@ Deno.serve(async (req) => {
     const matchingLinkedin = allLinkedin.filter((r2: any) => resultMatchesPerson(r2, firstName, lastName));
     const linkedinResults = matchingLinkedin.slice(0, 3);
     if (linkedinResults.length === 0) {
-      // True miss — no LinkedIn profile found at all. Cache it.
+      // No LinkedIn result matched the target person by slug + text.
+      // Cache the negative but include a debug trail of what WAS seen
+      // so the user can tell whether Google returned nothing at all
+      // (uncommon name, bad query) or returned something we rejected
+      // (wrong-person filter fired).
+      const rejectedTrail = allLinkedin.slice(0, 3).map((r2: any) => ({
+        title: r2?.title || '',
+        link: r2?.link || '',
+        rejected_reason: 'name-mismatch',
+      }));
       await supabase.from('linkedin_profile_cache').upsert({
         first_name_lower: fnLower,
         last_name_lower: lnLower,
         linkedin_url: null,
         current_company: null,
         current_title: null,
-        snippet: null,
+        snippet: rejectedTrail.length > 0
+          ? `No name-matching LinkedIn profiles among top ${allLinkedin.length} results. Top candidates: ${rejectedTrail.map(r => `${r.title} (${r.link})`).join(' | ')}`
+          : `SerpAPI returned 0 LinkedIn profiles for "${firstName} ${lastName}".`,
         hint_company: company || null,
         looked_up_at: new Date().toISOString(),
       }, { onConflict: 'first_name_lower,last_name_lower' });
-      return new Response(JSON.stringify({ success: true, linkedinUrl: null, currentCompany: null, currentTitle: null, snippet: null, cached: false }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return new Response(JSON.stringify({
+        success: true,
+        linkedinUrl: null,
+        currentCompany: null,
+        currentTitle: null,
+        snippet: rejectedTrail.length > 0
+          ? `No name-matching LinkedIn profiles among top ${allLinkedin.length} results. Top candidates: ${rejectedTrail.map(r => `${r.title} (${r.link})`).join(' | ')}`
+          : `SerpAPI returned 0 LinkedIn profiles for "${firstName} ${lastName}".`,
+        rejected_candidates: rejectedTrail,
+        cached: false,
+      }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
     const firstLI = linkedinResults[0];
 
