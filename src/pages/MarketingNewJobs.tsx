@@ -2261,7 +2261,27 @@ const MarketingNewJobs: React.FC = () => {
                               </>
                             ) : (
                               <div className="space-y-1">
-                                <span className="text-gray-500 italic">LinkedIn profile found but couldn't extract a current company from the Google snippet.</span>
+                                <span className="text-gray-500 italic">
+                                  {li.linkedinUrl
+                                    ? `LinkedIn profile found but the company couldn't be extracted from the Google snippet.`
+                                    : `No matching LinkedIn profile found for this person.`}
+                                </span>
+                                {li.linkedinUrl && (
+                                  <div className="flex items-center gap-2 justify-end">
+                                    <a
+                                      href={li.linkedinUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-sky-50 text-sky-800 border border-sky-200 hover:bg-sky-100"
+                                    >
+                                      <Linkedin className="w-3 h-3" />
+                                      Open profile
+                                    </a>
+                                    <span className="text-[9px] text-gray-400 truncate max-w-[160px]" title={li.linkedinUrl}>
+                                      {(li.linkedinUrl.match(/\/in\/([^\/\?]+)/) || [])[1] || li.linkedinUrl}
+                                    </span>
+                                  </div>
+                                )}
                                 {li.snippet && (
                                   <details className="text-[10px] text-gray-400 cursor-pointer">
                                     <summary className="hover:text-gray-600">show raw snippet</summary>
@@ -2270,10 +2290,9 @@ const MarketingNewJobs: React.FC = () => {
                                 )}
                                 <button
                                   onClick={() => {
-                                    const hint = g.contacts[0]?.company_name;
                                     const [fn, ...rest] = g.name.split(' ');
                                     const ln = rest.join(' ');
-                                    handleLookupLinkedinForGroup(g.key, fn, ln, hint, true);
+                                    handleLookupLinkedinForGroup(g.key, fn, ln, undefined, true);
                                   }}
                                   disabled={duplicateLookingUp.has(g.key)}
                                   className="text-[11px] text-[#911406] hover:underline font-medium"
@@ -2288,11 +2307,14 @@ const MarketingNewJobs: React.FC = () => {
                             variant="outline"
                             size="sm"
                             onClick={() => {
-                              // Pass the first record's company as a hint to narrow the search.
-                              const hint = g.contacts[0]?.company_name;
+                              // Don't pass a hint company — the group has
+                              // multiple companies by definition and a
+                              // stale hint biases Google toward old records.
+                              // We verify the result matches the person
+                              // by name on the server side.
                               const [fn, ...rest] = g.name.split(' ');
                               const ln = rest.join(' ');
-                              handleLookupLinkedinForGroup(g.key, fn, ln, hint);
+                              handleLookupLinkedinForGroup(g.key, fn, ln);
                             }}
                             disabled={duplicateLookingUp.has(g.key)}
                           >

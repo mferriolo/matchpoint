@@ -39,38 +39,66 @@ function pickEnv(...names: string[]): string | undefined {
   return undefined;
 }
 
+// Reject strings that look like locations so we don't mistake a city
+// for a company name. Common bad cases: "Brooklyn, New York, United
+// States", "San Francisco Bay Area", "London, England".
+function looksLikeLocation(s: string): boolean {
+  if (!s) return true;
+  const lower = s.toLowerCase().trim();
+  // Two or more commas is nearly always "City, State, Country".
+  const commas = (lower.match(/,/g) || []).length;
+  if (commas >= 2) return true;
+  // Common location keywords.
+  if (/\b(united states|united kingdom|usa|uk|canada|australia|metropolitan|greater|bay area|silicon valley|tri-?state area|metro area|city|province|prefecture|region)\b/i.test(lower)) return true;
+  // "City, ST" with 2-letter state code.
+  if (/^[A-Za-z .'-]{2,}\s*,\s*[A-Z]{2}$/.test(s.trim())) return true;
+  // Ends in "Area" (e.g. "San Francisco Bay Area", "New York City Metropolitan Area").
+  if (/\barea$/i.test(lower)) return true;
+  return false;
+}
+
 // Regex-based extraction from a LinkedIn Google-result title. Examples:
 //   "Nishit Jhaveri - Senior Manager, Product Analytics - ChenMed | LinkedIn"
 //   "Jane Doe - CMO at DaVita Kidney Care | LinkedIn"
 //   "John Smith - ChenMed | LinkedIn"
 //   "Nishit Jhaveri – VP Engineering – ChenMed | LinkedIn"   (em-dash variant)
-// Returns whatever it can parse; callers should fall back to AI when
-// the title doesn't match a recognisable format.
+// Rejects location-like candidates (city/state) so we never return
+// "Brooklyn, NY" as a company.
 function parseLinkedInTitle(titleRaw: string): { title: string | null; company: string | null } {
   if (!titleRaw) return { title: null, company: null };
-  // Strip the " | LinkedIn" / " - LinkedIn" suffix plus country tags
-  // like "(United States)" that sometimes appear.
   let cleaned = titleRaw
     .replace(/\s*\|\s*LinkedIn(\s+.*)?$/i, '')
     .replace(/\s*[-–—]\s*LinkedIn(\s+.*)?$/i, '')
     .replace(/\s*\(\s*(Linked ?In|United\s+\w+|\w{2,3}\s?,\s?\w+)\s*\)\s*$/i, '')
     .trim();
-  // Split on any dash variant (ASCII -, en-dash, em-dash) with spaces.
   const parts = cleaned.split(/\s+[-–—]\s+/).map(s => s.trim()).filter(Boolean);
+  const pick = (t: string | null, c: string | null) => ({
+    title: t,
+    company: c && !looksLikeLocation(c) ? c : null,
+  });
   if (parts.length >= 3) {
-    // "Name - Title - Company" (or more parts — last is usually company).
-    return {
-      title: parts[1] || null,
-      company: parts[parts.length - 1] || null,
-    };
+    return pick(parts[1] || null, parts[parts.length - 1] || null);
   }
   if (parts.length === 2) {
-    // Might be "Name - Title at Company" or "Name - Company".
     const atSplit = parts[1].split(/\s+\bat\b\s+/i).map(s => s.trim()).filter(Boolean);
-    if (atSplit.length === 2) return { title: atSplit[0] || null, company: atSplit[1] || null };
-    return { title: null, company: parts[1] || null };
+    if (atSplit.length === 2) return pick(atSplit[0] || null, atSplit[1] || null);
+    return pick(null, parts[1] || null);
   }
   return { title: null, company: null };
+}
+
+// Person-identity check: the result must actually be about the target
+// person. Checks that both first and last name appear somewhere in the
+// title, snippet, or URL (URL slug). Prevents returning a random third
+// party's profile that happens to rank for the search query.
+function resultMatchesPerson(r: any, firstName: string, lastName: string): boolean {
+  const fn = firstName.toLowerCase().trim();
+  const ln = lastName.toLowerCase().trim();
+  if (!fn || !ln) return false;
+  const blob = `${r?.title || ''} ${r?.snippet || ''} ${r?.link || ''}`.toLowerCase();
+  // Require both names. For the URL specifically, also check the slug
+  // contains at least one — some people use initials in their slug.
+  return blob.includes(fn) && blob.includes(ln);
 }
 
 Deno.serve(async (req) => {
@@ -171,13 +199,13 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Google query targeting LinkedIn profiles directly. The quotes on
-    // the name tighten the match; including a company hint when
-    // available narrows further without excluding results the person
-    // may have under a past role.
-    const query = company
-      ? `site:linkedin.com/in "${firstName} ${lastName}" "${company}"`
-      : `site:linkedin.com/in "${firstName} ${lastName}"`;
+    // Google query — search by name only. Including the caller's hint
+    // company tends to bias Google toward STALE results (e.g. the
+    // hint is from an old record, so Google returns a cached/older
+    // profile version that mentions that company). Name alone gets
+    // us the most up-to-date main profile; we verify it's actually
+    // this person below via resultMatchesPerson().
+    const query = `site:linkedin.com/in "${firstName} ${lastName}"`;
     const url = `${SERP_BASE}?q=${encodeURIComponent(query)}&api_key=${encodeURIComponent(serpKey)}&num=5&engine=google`;
     const r = await fetch(url);
     if (!r.ok) {
@@ -197,14 +225,17 @@ Deno.serve(async (req) => {
     const d = await r.json();
     const results = d.organic_results || [];
 
-    // Collect up to the top 3 LinkedIn results so the AI has multiple
-    // signals (profile title, snippet, sub-results). LinkedIn snippets
-    // vary — sometimes the profile title clearly shows "Name - Title -
-    // Company | LinkedIn" and sometimes Google returns an activity post
-    // snippet where the company is only implicit.
-    const linkedinResults = results.filter((r2: any) =>
+    // Collect LinkedIn /in/ results AND filter to those actually
+    // mentioning the target person's first AND last name. This is the
+    // key fix for the "Ife O." / "Samantha Widdicombe" problem —
+    // Google sometimes ranks a different person's profile that happens
+    // to match for other reasons (e.g. a connection, a comment). If
+    // the name isn't in the title/snippet/URL, it's not them.
+    const allLinkedin = results.filter((r2: any) =>
       typeof r2?.link === 'string' && r2.link.includes('linkedin.com/in/')
-    ).slice(0, 3);
+    );
+    const matchingLinkedin = allLinkedin.filter((r2: any) => resultMatchesPerson(r2, firstName, lastName));
+    const linkedinResults = matchingLinkedin.slice(0, 3);
     if (linkedinResults.length === 0) {
       // True miss — no LinkedIn profile found at all. Cache it.
       await supabase.from('linkedin_profile_cache').upsert({
