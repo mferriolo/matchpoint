@@ -91,15 +91,19 @@ Deno.serve(async (req) => {
     }
 
     // LinkedIn snippets are formatted like: "Name — Title at Company ·
-    // Location · Mutual connections". Ask the AI to pull the CURRENT
-    // company out. Strict JSON response; no guessing.
+    // Location · Mutual connections". Ask the AI to pull both the
+    // current title and the current company. Strict JSON response; no
+    // guessing — return nulls when unclear.
     const snippet = `${firstLI.title || ''} — ${firstLI.snippet || ''}`;
-    const prompt = `You are reading the Google result snippet for a LinkedIn profile. Extract the person's CURRENT company (the one most recently listed / listed first).
+    const prompt = `You are reading the Google result snippet for a LinkedIn profile. Extract the person's CURRENT job title and CURRENT company (the ones most recently listed / listed first in the snippet).
 
 Person: ${firstName} ${lastName}
 Snippet: ${snippet}
 
-Return strict JSON: {"current_company": "<company name>"} or {"current_company": null} if you cannot determine the current employer.`;
+Return strict JSON with two fields:
+{"current_title": "<job title as written>", "current_company": "<company name>"}
+
+Use null for either field if you cannot determine it from the snippet. Do not guess. Do not abbreviate. The title should match how the person writes it on their profile (e.g. "Chief Medical Officer", not "CMO", unless the snippet itself uses CMO).`;
 
     const aiRes = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -109,15 +113,19 @@ Return strict JSON: {"current_company": "<company name>"} or {"current_company":
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
         response_format: { type: 'json_object' },
-        max_tokens: 120,
+        max_tokens: 160,
       }),
     });
     const aiData = await aiRes.json();
     let currentCompany: string | null = null;
+    let currentTitle: string | null = null;
     try {
       const parsed = JSON.parse(aiData.choices?.[0]?.message?.content || '{}');
       if (parsed && typeof parsed.current_company === 'string' && parsed.current_company.trim()) {
         currentCompany = parsed.current_company.trim();
+      }
+      if (parsed && typeof parsed.current_title === 'string' && parsed.current_title.trim()) {
+        currentTitle = parsed.current_title.trim();
       }
     } catch {}
 
@@ -125,6 +133,7 @@ Return strict JSON: {"current_company": "<company name>"} or {"current_company":
       success: true,
       linkedinUrl: firstLI.link,
       currentCompany,
+      currentTitle,
       snippet,
     }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 

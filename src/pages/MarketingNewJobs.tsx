@@ -84,10 +84,11 @@ const MarketingNewJobs: React.FC = () => {
   // itself). Per-group LinkedIn lookups are on-demand; the user picks
   // which group to check, we call lookup-linkedin-profile for that one.
   const [showDuplicateReview, setShowDuplicateReview] = useState(false);
-  const [duplicateLinkedin, setDuplicateLinkedin] = useState<Record<string, { linkedinUrl: string|null; currentCompany: string|null; snippet?: string }>>({});
+  const [duplicateLinkedin, setDuplicateLinkedin] = useState<Record<string, { linkedinUrl: string|null; currentCompany: string|null; currentTitle: string|null; snippet?: string }>>({});
   const [duplicateLookingUp, setDuplicateLookingUp] = useState<string | null>(null);
   const [duplicateDeleteIds, setDuplicateDeleteIds] = useState<Set<string>>(new Set());
   const [duplicateDeleting, setDuplicateDeleting] = useState(false);
+  const [duplicateReplacing, setDuplicateReplacing] = useState<string | null>(null);
 
   const toggleContactSelect = (id: string) => {
     setSelectedContactIds(prev => {
@@ -202,6 +203,7 @@ const MarketingNewJobs: React.FC = () => {
         [groupKey]: {
           linkedinUrl: data.linkedinUrl || null,
           currentCompany: data.currentCompany || null,
+          currentTitle: data.currentTitle || null,
           snippet: data.snippet || undefined,
         },
       }));
@@ -238,6 +240,72 @@ const MarketingNewJobs: React.FC = () => {
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
+  };
+
+  // Replace every record in a duplicate group with a single new record
+  // reflecting the person's current company + title (from LinkedIn).
+  // Used when the LinkedIn lookup shows the person now works somewhere
+  // NOT represented by any of their existing records. Looks up the
+  // matching marketing_companies row (if any) so the new contact is
+  // properly linked; falls back to an unlinked row with just
+  // company_name if the company isn't on file yet.
+  const handleReplaceGroupWithNewAtCompany = async (group: { key: string; name: string; contacts: any[] }, currentCompany: string, currentTitle: string | null, linkedinUrl: string | null) => {
+    if (!currentCompany) return;
+    const confirmReplace = window.confirm(
+      `Delete all ${group.contacts.length} existing record${group.contacts.length === 1 ? '' : 's'} for ${group.name} and create one new record at "${currentCompany}"${currentTitle ? ` (${currentTitle})` : ''}?`
+    );
+    if (!confirmReplace) return;
+    setDuplicateReplacing(group.key);
+    try {
+      // Try to find an existing marketing_companies row whose name is a
+      // loose match for the LinkedIn-reported current company. We'd
+      // rather link the new contact properly than leave company_id null.
+      const { data: candidateCompanies } = await supabase
+        .from('marketing_companies')
+        .select('id, company_name')
+        .ilike('company_name', `%${currentCompany.split(' ')[0]}%`)
+        .limit(10);
+      const matchedCompany = (candidateCompanies || []).find(co => companyMatches(co.company_name, currentCompany)) || null;
+
+      const nameParts = group.name.trim().split(/\s+/);
+      const fn = nameParts[0] || '';
+      const ln = nameParts.slice(1).join(' ') || '';
+
+      const { error: insertErr } = await supabase.from('marketing_contacts').insert({
+        first_name: fn,
+        last_name: ln,
+        company_name: currentCompany,
+        company_id: matchedCompany?.id || null,
+        title: currentTitle || '',
+        linkedin_url: linkedinUrl || null,
+        source: 'LinkedIn (dedup replace)',
+        source_url: linkedinUrl || null,
+        is_verified: true,
+        notes: `Created via duplicate-review replace action on ${new Date().toISOString().slice(0, 10)} — previous ${group.contacts.length} record${group.contacts.length === 1 ? '' : 's'} deleted.`,
+      });
+      if (insertErr) throw insertErr;
+
+      const ids = group.contacts.map(c => c.id);
+      const { error: delErr } = await supabase.from('marketing_contacts').delete().in('id', ids);
+      if (delErr) throw delErr;
+
+      // Clean up any marked-for-deletion IDs that just got deleted so
+      // the footer count updates immediately.
+      setDuplicateDeleteIds(prev => {
+        const next = new Set(prev);
+        ids.forEach(id => next.delete(id));
+        return next;
+      });
+
+      toast({
+        title: `Replaced ${ids.length} record${ids.length === 1 ? '' : 's'} for ${group.name} with new at ${currentCompany}${matchedCompany ? '' : ' (unlinked — company not found in database)'}`,
+      });
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Replace failed', description: err.message || String(err), variant: 'destructive' });
+    } finally {
+      setDuplicateReplacing(null);
+    }
   };
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -2135,10 +2203,17 @@ const MarketingNewJobs: React.FC = () => {
                           </a>
                         )}
                         {lookedUp ? (
-                          <div className="text-xs">
-                            {li.currentCompany
-                              ? <span>Current: <strong className="text-emerald-700">{li.currentCompany}</strong></span>
-                              : <span className="text-gray-500 italic">LinkedIn found but couldn't extract current company</span>}
+                          <div className="text-xs text-right">
+                            {li.currentCompany ? (
+                              <>
+                                <div>Current: <strong className="text-emerald-700">{li.currentCompany}</strong></div>
+                                {li.currentTitle && (
+                                  <div className="text-gray-600 mt-0.5">Title: <span className="font-medium">{li.currentTitle}</span></div>
+                                )}
+                              </>
+                            ) : (
+                              <span className="text-gray-500 italic">LinkedIn found but couldn't extract current company</span>
+                            )}
                           </div>
                         ) : (
                           <Button
@@ -2214,26 +2289,47 @@ const MarketingNewJobs: React.FC = () => {
                         })}
                       </tbody>
                     </table>
-                    {/* One-click convenience: after LinkedIn check, mark
-                        all non-matching records for deletion so the user
-                        doesn't have to click each checkbox. */}
-                    {lookedUp && li.currentCompany && (
-                      <div className="px-4 py-2 border-t bg-white flex items-center justify-end">
-                        <button
-                          onClick={() => {
-                            const next = new Set(duplicateDeleteIds);
-                            for (const c of g.contacts) {
-                              if (!companyMatches(c.company_name, li.currentCompany)) next.add(c.id);
-                              else next.delete(c.id);
-                            }
-                            setDuplicateDeleteIds(next);
-                          }}
-                          className="text-[11px] text-[#911406] hover:underline font-medium"
-                        >
-                          Mark all non-matching ({g.contacts.filter(c => !companyMatches(c.company_name, li.currentCompany)).length}) for deletion
-                        </button>
-                      </div>
-                    )}
+                    {/* After LinkedIn check: two shortcut actions.
+                        (1) Mark all non-matching records for deletion —
+                        useful when one existing record already matches
+                        the current employer.
+                        (2) Replace all with a new record — useful when
+                        the person now works somewhere not in the group
+                        (e.g. Sarah Brown has 6 old records, none at
+                        her current DaVita role). */}
+                    {lookedUp && li.currentCompany && (() => {
+                      const hasMatchingRecord = g.contacts.some(c => companyMatches(c.company_name, li.currentCompany));
+                      const nonMatchingCount = g.contacts.filter(c => !companyMatches(c.company_name, li.currentCompany)).length;
+                      return (
+                        <div className="px-4 py-2 border-t bg-white flex items-center justify-end gap-3 flex-wrap">
+                          {hasMatchingRecord && (
+                            <button
+                              onClick={() => {
+                                const next = new Set(duplicateDeleteIds);
+                                for (const c of g.contacts) {
+                                  if (!companyMatches(c.company_name, li.currentCompany)) next.add(c.id);
+                                  else next.delete(c.id);
+                                }
+                                setDuplicateDeleteIds(next);
+                              }}
+                              className="text-[11px] text-[#911406] hover:underline font-medium"
+                            >
+                              Mark all non-matching ({nonMatchingCount}) for deletion
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleReplaceGroupWithNewAtCompany(g, li.currentCompany!, li.currentTitle, li.linkedinUrl)}
+                            disabled={duplicateReplacing === g.key}
+                            className="text-[11px] inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-medium disabled:opacity-50"
+                            title={`Delete all ${g.contacts.length} existing records and create one new record at ${li.currentCompany}`}
+                          >
+                            {duplicateReplacing === g.key
+                              ? <><Loader2 className="w-3 h-3 animate-spin" /> Replacing…</>
+                              : <>Replace all with new at {li.currentCompany}{li.currentTitle ? ` (${li.currentTitle})` : ''}</>}
+                          </button>
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })}
