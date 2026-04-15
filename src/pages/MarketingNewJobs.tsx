@@ -84,7 +84,7 @@ const MarketingNewJobs: React.FC = () => {
   // itself). Per-group LinkedIn lookups are on-demand; the user picks
   // which group to check, we call lookup-linkedin-profile for that one.
   const [showDuplicateReview, setShowDuplicateReview] = useState(false);
-  const [duplicateLinkedin, setDuplicateLinkedin] = useState<Record<string, { linkedinUrl: string|null; currentCompany: string|null; currentTitle: string|null; snippet?: string; cached?: boolean; cachedAgeDays?: number }>>({});
+  const [duplicateLinkedin, setDuplicateLinkedin] = useState<Record<string, { linkedinUrl: string|null; currentCompany: string|null; currentTitle: string|null; snippet?: string; cached?: boolean; cachedAgeDays?: number; extractionSource?: string|null }>>({});
   // Set of group keys currently being looked up so multiple in-flight
   // LinkedIn queries each show their own spinner. Previously this was
   // a single string, so clicking a second "Check LinkedIn" button
@@ -231,6 +231,7 @@ const MarketingNewJobs: React.FC = () => {
           snippet: data.snippet || undefined,
           cached: !!data.cached,
           cachedAgeDays: data.cached_age_days || undefined,
+          extractionSource: data.extraction_source || null,
         },
       }));
     } catch (err: any) {
@@ -2232,8 +2233,26 @@ const MarketingNewJobs: React.FC = () => {
                           <div className="text-xs text-right">
                             {li.currentCompany ? (
                               <>
-                                <div className="flex items-center justify-end gap-1.5">
+                                <div className="flex items-center justify-end gap-1.5 flex-wrap">
                                   <span>Current: <strong className="text-emerald-700">{li.currentCompany}</strong></span>
+                                  {li.extractionSource && (
+                                    <span
+                                      className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${
+                                        li.extractionSource === 'apollo' ? 'bg-emerald-100 text-emerald-800' :
+                                        li.extractionSource === 'regex' ? 'bg-blue-100 text-blue-800' :
+                                        'bg-amber-100 text-amber-800'
+                                      }`}
+                                      title={
+                                        li.extractionSource === 'apollo'
+                                          ? 'Read from Apollo structured work history — most reliable'
+                                          : li.extractionSource === 'regex'
+                                            ? 'Parsed from Google result title (LinkedIn headline) — usually but not always the current employer'
+                                            : 'AI-extracted from Google snippet — least reliable, verify against the profile'
+                                      }
+                                    >
+                                      {li.extractionSource === 'apollo' ? 'Apollo' : li.extractionSource === 'regex' ? 'Title' : 'AI'}
+                                    </span>
+                                  )}
                                   {li.cached && (
                                     <span className="text-[9px] uppercase tracking-wider bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-semibold" title={`Served from cache${li.cachedAgeDays !== undefined ? ` (${li.cachedAgeDays}d old)` : ''} — no SerpAPI credit used`}>
                                       Cached{li.cachedAgeDays !== undefined ? ` ${li.cachedAgeDays}d` : ''}

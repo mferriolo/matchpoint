@@ -93,6 +93,44 @@ function normalizeToken(s: string): string {
   return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z]/g, '');
 }
 
+// Apollo /v1/people/match by LinkedIn URL — returns the person's
+// structured work history, so we get the CURRENT employer from their
+// actual "experience" section rather than guessing at their headline
+// tagline. Free on Apollo's free tier for basic profile fields; only
+// email/phone reveals consume credits.
+async function apolloMatchByLinkedInUrl(
+  linkedinUrl: string, apolloKey: string
+): Promise<{ company: string | null; title: string | null } | null> {
+  try {
+    const r = await fetch('https://api.apollo.io/v1/people/match', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+        'X-Api-Key': apolloKey,
+      },
+      body: JSON.stringify({ linkedin_url: linkedinUrl }),
+    });
+    if (!r.ok) {
+      const txt = await r.text();
+      console.warn(`Apollo match ${r.status} for ${linkedinUrl}: ${txt.slice(0, 200)}`);
+      return null;
+    }
+    const d = await r.json();
+    const p = d?.person || null;
+    if (!p) return null;
+    const company = p?.organization?.name || p?.current_organization?.name || null;
+    const title = p?.title || p?.headline || null;
+    return {
+      company: typeof company === 'string' && company.trim() ? company.trim() : null,
+      title: typeof title === 'string' && title.trim() ? title.trim() : null,
+    };
+  } catch (e) {
+    console.warn(`Apollo match exception for ${linkedinUrl}:`, (e as Error).message);
+    return null;
+  }
+}
+
 // Person-identity check. URL slug is the PRIMARY signal — LinkedIn
 // profile slugs almost always contain at least one of the person's
 // names. If the slug matches someone else entirely (e.g. "ife-o" for a
@@ -203,6 +241,7 @@ Deno.serve(async (req) => {
 
     const serpKey = pickEnv('SERP_API_KEY', 'SERPAPI_API_KEY', 'SERPAPI_KEY', 'SERP_KEY');
     const openaiKey = pickEnv('OPENAI_API_KEY', 'OPENAI_KEY', 'OPENAI_TOKEN');
+    const apolloKey = pickEnv('APOLLO_API_KEY', 'APOLLO_KEY', 'APOLLO_TOKEN', 'APOLLO_IO_API_KEY', 'APOLLO_IO_KEY');
     if (!serpKey || !openaiKey) {
       // Report which names the function actually sees so the user can
       // spot a misnamed secret. Same pattern the enrich function uses.
@@ -333,17 +372,38 @@ Return strict JSON with exactly these two fields:
 
 Use null for a field only when you genuinely cannot find it in the result text. A company name literally present in the title is NOT a guess.`;
 
-    // Regex parse of the LinkedIn result title is the primary path. It's
-    // more reliable than any LLM on a standardised title format and
-    // doesn't consume OpenAI tokens when it works.
     let currentCompany: string | null = null;
     let currentTitle: string | null = null;
-    const regex = parseLinkedInTitle(firstLI.title || '');
-    if (regex.company) currentCompany = regex.company;
-    if (regex.title) currentTitle = regex.title;
+    let extractionSource: 'apollo' | 'regex' | 'ai' | null = null;
 
-    // AI fallback only when the regex couldn't pull out a company name
-    // (e.g. non-standard title formats). Same prompt as before.
+    // PRIMARY: Apollo /people/match by LinkedIn URL. This reads the
+    // person's structured work history from Apollo's database so we
+    // get their ACTUAL current employer rather than their LinkedIn
+    // headline. The headline is self-authored marketing ("Primary
+    // Care", "Healthcare Executive"); the work history shows the real
+    // employer. Apollo's free tier returns company + title without
+    // consuming reveal credits.
+    if (apolloKey && firstLI.link) {
+      const apolloData = await apolloMatchByLinkedInUrl(firstLI.link, apolloKey);
+      if (apolloData?.company) {
+        currentCompany = apolloData.company;
+        if (apolloData.title) currentTitle = apolloData.title;
+        extractionSource = 'apollo';
+      }
+    }
+
+    // FALLBACK 1: regex parse of the Google result title. Works when
+    // LinkedIn's headline is structured as "Name - Title - Company".
+    if (!currentCompany) {
+      const regex = parseLinkedInTitle(firstLI.title || '');
+      if (regex.company) {
+        currentCompany = regex.company;
+        extractionSource = 'regex';
+      }
+      if (!currentTitle && regex.title) currentTitle = regex.title;
+    }
+
+    // FALLBACK 2: AI extraction from the full snippet.
     if (!currentCompany) {
       const aiRes = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -361,6 +421,7 @@ Use null for a field only when you genuinely cannot find it in the result text. 
         const parsed = JSON.parse(aiData.choices?.[0]?.message?.content || '{}');
         if (parsed && typeof parsed.current_company === 'string' && parsed.current_company.trim()) {
           currentCompany = parsed.current_company.trim();
+          extractionSource = 'ai';
         }
         if (!currentTitle && parsed && typeof parsed.current_title === 'string' && parsed.current_title.trim()) {
           currentTitle = parsed.current_title.trim();
@@ -386,6 +447,7 @@ Use null for a field only when you genuinely cannot find it in the result text. 
       currentCompany,
       currentTitle,
       snippet,
+      extraction_source: extractionSource,
       cached: false,
     }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 
