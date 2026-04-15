@@ -85,7 +85,11 @@ const MarketingNewJobs: React.FC = () => {
   // which group to check, we call lookup-linkedin-profile for that one.
   const [showDuplicateReview, setShowDuplicateReview] = useState(false);
   const [duplicateLinkedin, setDuplicateLinkedin] = useState<Record<string, { linkedinUrl: string|null; currentCompany: string|null; currentTitle: string|null; snippet?: string; cached?: boolean; cachedAgeDays?: number }>>({});
-  const [duplicateLookingUp, setDuplicateLookingUp] = useState<string | null>(null);
+  // Set of group keys currently being looked up so multiple in-flight
+  // LinkedIn queries each show their own spinner. Previously this was
+  // a single string, so clicking a second "Check LinkedIn" button
+  // visually reset the first one while it was still processing.
+  const [duplicateLookingUp, setDuplicateLookingUp] = useState<Set<string>>(new Set());
   const [duplicateDeleteIds, setDuplicateDeleteIds] = useState<Set<string>>(new Set());
   const [duplicateDeleting, setDuplicateDeleting] = useState(false);
   const [duplicateReplacing, setDuplicateReplacing] = useState<string | null>(null);
@@ -191,7 +195,7 @@ const MarketingNewJobs: React.FC = () => {
   // currently works. Stores the result keyed by group key so the UI
   // can show it beside each duplicate group.
   const handleLookupLinkedinForGroup = async (groupKey: string, firstName: string, lastName: string, hintCompany?: string, force = false) => {
-    setDuplicateLookingUp(groupKey);
+    setDuplicateLookingUp(prev => { const next = new Set(prev); next.add(groupKey); return next; });
     try {
       const { data, error } = await supabase.functions.invoke('lookup-linkedin-profile', {
         body: { firstName, lastName, company: hintCompany || undefined, force },
@@ -232,7 +236,7 @@ const MarketingNewJobs: React.FC = () => {
     } catch (err: any) {
       toast({ title: 'LinkedIn lookup failed', description: err.message || String(err), variant: 'destructive' });
     } finally {
-      setDuplicateLookingUp(null);
+      setDuplicateLookingUp(prev => { const next = new Set(prev); next.delete(groupKey); return next; });
     }
   };
 
@@ -2247,11 +2251,11 @@ const MarketingNewJobs: React.FC = () => {
                                       const ln = rest.join(' ');
                                       handleLookupLinkedinForGroup(g.key, fn, ln, hint, true);
                                     }}
-                                    disabled={duplicateLookingUp === g.key}
+                                    disabled={duplicateLookingUp.has(g.key)}
                                     className="text-[10px] text-gray-500 hover:text-[#911406] underline mt-1"
                                     title="Force a fresh SerpAPI lookup (bypasses the 30-day cache)"
                                   >
-                                    {duplicateLookingUp === g.key ? 'Refreshing…' : 'Refresh from SerpAPI'}
+                                    {duplicateLookingUp.has(g.key) ? 'Refreshing…' : 'Refresh from SerpAPI'}
                                   </button>
                                 )}
                               </>
@@ -2270,9 +2274,9 @@ const MarketingNewJobs: React.FC = () => {
                               const ln = rest.join(' ');
                               handleLookupLinkedinForGroup(g.key, fn, ln, hint);
                             }}
-                            disabled={duplicateLookingUp === g.key}
+                            disabled={duplicateLookingUp.has(g.key)}
                           >
-                            {duplicateLookingUp === g.key
+                            {duplicateLookingUp.has(g.key)
                               ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> Checking…</>
                               : <><Linkedin className="w-3.5 h-3.5 mr-1" /> Check LinkedIn</>}
                           </Button>
