@@ -93,6 +93,33 @@ function normalizeToken(s: string): string {
   return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z]/g, '');
 }
 
+// LinkedIn meta-descriptions (what Google puts in the snippet) are
+// usually of the form:
+//   "Headline · Experience: Current Company · Education: School · Location: ..."
+//   "Headline | Experience · Current Company | Education · School · 500+ connections"
+// So scanning for "Experience: X" or "Experience · X" is a highly
+// reliable way to pull the ACTUAL current employer out of Google's
+// snippet — separate from the profile headline (which Google puts in
+// the result title and which we were mistakenly parsing as company).
+function parseExperienceFromSnippet(snippet: string): string | null {
+  if (!snippet) return null;
+  // Match "Experience" followed by separator (: or · or • or -), capture
+  // up to the next separator or end. Non-greedy so we don't gobble the
+  // whole string when multiple sections are present.
+  const patterns = [
+    /\bExperience\s*[:·•\-–—]\s*([^·•|\n\r]+?)(?=\s*[·•|]|\s*-\s|\s+Education\b|\s+Location\b|$)/i,
+    /\bCurrently works? at\s+([^·•|\n\r]+?)(?=\s*[·•|]|\s*-\s|$)/i,
+  ];
+  for (const re of patterns) {
+    const m = snippet.match(re);
+    if (m && m[1]) {
+      const extracted = m[1].trim().replace(/[.,;]+$/, '');
+      if (extracted.length >= 2 && extracted.length <= 100) return extracted;
+    }
+  }
+  return null;
+}
+
 // Apollo /v1/people/match by LinkedIn URL — returns the person's
 // structured work history, so we get the CURRENT employer from their
 // actual "experience" section rather than guessing at their headline
@@ -374,15 +401,12 @@ Use null for a field only when you genuinely cannot find it in the result text. 
 
     let currentCompany: string | null = null;
     let currentTitle: string | null = null;
-    let extractionSource: 'apollo' | 'regex' | 'ai' | null = null;
+    let extractionSource: 'apollo' | 'snippet' | 'regex' | 'ai' | null = null;
 
-    // PRIMARY: Apollo /people/match by LinkedIn URL. This reads the
-    // person's structured work history from Apollo's database so we
-    // get their ACTUAL current employer rather than their LinkedIn
-    // headline. The headline is self-authored marketing ("Primary
-    // Care", "Healthcare Executive"); the work history shows the real
-    // employer. Apollo's free tier returns company + title without
-    // consuming reveal credits.
+    // PRIMARY: Apollo /people/match by LinkedIn URL. Reads structured
+    // work history so we get the ACTUAL current employer, not the
+    // self-authored headline. Free on Apollo's free tier for the
+    // basic profile fields.
     if (apolloKey && firstLI.link) {
       const apolloData = await apolloMatchByLinkedInUrl(firstLI.link, apolloKey);
       if (apolloData?.company) {
@@ -392,8 +416,24 @@ Use null for a field only when you genuinely cannot find it in the result text. 
       }
     }
 
-    // FALLBACK 1: regex parse of the Google result title. Works when
-    // LinkedIn's headline is structured as "Name - Title - Company".
+    // SECONDARY: Parse Google's snippet for LinkedIn's meta-description
+    // "Experience: Company" marker. LinkedIn writes that meta from the
+    // profile's actual Experience section, so it reflects the real
+    // current employer (not the headline tagline). This catches Nishit
+    // -style cases where Apollo has no record of the person but Google
+    // has indexed their LinkedIn meta description.
+    if (!currentCompany) {
+      const expCompany = parseExperienceFromSnippet(firstLI.snippet || '');
+      if (expCompany && !looksLikeLocation(expCompany)) {
+        currentCompany = expCompany;
+        extractionSource = 'snippet';
+      }
+    }
+
+    // FALLBACK 1: regex parse of the Google result TITLE. This reads
+    // the LinkedIn headline so it'll often return the person's
+    // self-description (e.g. "Primary Care") rather than their real
+    // employer. Flagged as lower-trust via extraction_source.
     if (!currentCompany) {
       const regex = parseLinkedInTitle(firstLI.title || '');
       if (regex.company) {

@@ -2239,18 +2239,23 @@ const MarketingNewJobs: React.FC = () => {
                                     <span
                                       className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${
                                         li.extractionSource === 'apollo' ? 'bg-emerald-100 text-emerald-800' :
-                                        li.extractionSource === 'regex' ? 'bg-blue-100 text-blue-800' :
-                                        'bg-amber-100 text-amber-800'
+                                        li.extractionSource === 'snippet' ? 'bg-teal-100 text-teal-800' :
+                                        li.extractionSource === 'regex' ? 'bg-amber-100 text-amber-800' :
+                                        'bg-orange-100 text-orange-800'
                                       }`}
                                       title={
                                         li.extractionSource === 'apollo'
-                                          ? 'Read from Apollo structured work history — most reliable'
-                                          : li.extractionSource === 'regex'
-                                            ? 'Parsed from Google result title (LinkedIn headline) — usually but not always the current employer'
-                                            : 'AI-extracted from Google snippet — least reliable, verify against the profile'
+                                          ? 'Apollo structured work history — most reliable'
+                                          : li.extractionSource === 'snippet'
+                                            ? 'Parsed from LinkedIn\'s Experience meta-description in the Google snippet — reflects the real current employer'
+                                            : li.extractionSource === 'regex'
+                                              ? 'LinkedIn headline via title regex — often the person\'s self-description rather than their employer. Verify against the profile.'
+                                              : 'AI-extracted from Google snippet — verify against the profile'
                                       }
                                     >
-                                      {li.extractionSource === 'apollo' ? 'Apollo' : li.extractionSource === 'regex' ? 'Title' : 'AI'}
+                                      {li.extractionSource === 'apollo' ? 'Apollo' :
+                                        li.extractionSource === 'snippet' ? 'Experience' :
+                                        li.extractionSource === 'regex' ? 'Headline ⚠' : 'AI'}
                                     </span>
                                   )}
                                   {li.cached && (
