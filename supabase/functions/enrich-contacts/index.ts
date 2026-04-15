@@ -56,12 +56,22 @@ async function serpSearch(query: string, serpKey: string, num = 10): Promise<any
 async function lushaEnrich(
   fn: string, ln: string, companyName: string, domain: string | null, lushaKey: string
 ): Promise<{ email: string; mobile: string; direct: string; office: string; raw: any; debug: string } | null> {
-  // v2 /person endpoint takes contactInfo + companyInfo. Prefer domain
-  // over raw company name — domain reduces false positives dramatically.
-  const body: Record<string, any> = {
-    contactInfo: { firstName: fn, lastName: ln },
-    companyInfo: domain ? { domain } : { name: companyName },
+  // Lusha's current v2 /person endpoint requires bulk format even for a
+  // single contact. Body must be { contacts: [{...fields...}] } — they
+  // reject contactInfo/companyInfo explicitly:
+  //   "property contactInfo should not exist"
+  //   "property companyInfo should not exist"
+  //   "contacts must contain no more than 100 elements"
+  const contactEntry: Record<string, any> = {
+    contactId: '0',
+    firstName: fn,
+    lastName: ln,
+    fullName: `${fn} ${ln}`,
+    companies: [
+      domain ? { domain, isCurrent: true } : { name: companyName, isCurrent: true },
+    ],
   };
+  const body = { contacts: [contactEntry] };
   const r = await fetch(`${LUSHA_BASE}/v2/person`, {
     method: 'POST',
     headers: {
@@ -77,25 +87,28 @@ async function lushaEnrich(
   }
   const d = await r.json();
 
-  // Lusha has shipped multiple response shapes. Walk them all. Known
-  // envelope shapes:
-  //   { data: { contact: {...} } }               ← some v2 responses
-  //   { data: {...contactFields} }                ← newer v2
-  //   { contact: {...} }                          ← legacy
-  //   { contactId: { data: {...} } }              ← bulk response
-  //   <top-level fields>                          ← some direct returns
-  const candidates = [
-    d?.data?.contact,
-    d?.contact,
-    d?.data,
-    d,
-  ].filter(Boolean);
-  // Also try bulk response: first value of { "0": {data: ...} } etc.
-  if (typeof d === 'object' && d !== null) {
-    for (const v of Object.values(d as any)) {
-      if (v && typeof v === 'object' && (v as any).data) candidates.push((v as any).data);
+  // Bulk response is keyed by contactId:
+  //   { "contacts": { "0": { "data": {...} } } }
+  //   { "contacts": { "0": { "contact": {...}, "company": {...} } } }
+  //   { "data": { "0": {...} } }
+  // Plus the legacy envelopes. Walk them all.
+  const candidates: any[] = [];
+  const byId = d?.contacts || d?.data;
+  if (byId && typeof byId === 'object') {
+    for (const v of Object.values(byId)) {
+      if (v && typeof v === 'object') {
+        const vobj: any = v;
+        if (vobj.data) candidates.push(vobj.data);
+        if (vobj.contact) candidates.push(vobj.contact);
+        candidates.push(vobj);
+      }
     }
   }
+  // Legacy single-person envelopes too, just in case.
+  if (d?.data?.contact) candidates.push(d.data.contact);
+  if (d?.contact) candidates.push(d.contact);
+  if (d?.data && !Array.isArray(d.data)) candidates.push(d.data);
+  candidates.push(d);
 
   // Field extraction helpers. Lusha has used "emails" / "emailAddresses"
   // and phone types both as strings ("work_direct") and as nested
