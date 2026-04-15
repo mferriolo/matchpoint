@@ -33,6 +33,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const APOLLO_BASE = "https://api.apollo.io/v1";
 const HUNTER_BASE = "https://api.hunter.io/v2";
 const SERP_BASE = "https://serpapi.com/search.json";
+const LUSHA_BASE = "https://api.lusha.com";
 
 // Target Google result pages we'll read. LinkedIn is tried first
 // because it's the most reliable single source for a hiring contact.
@@ -45,6 +46,66 @@ async function serpSearch(query: string, serpKey: string, num = 10): Promise<any
   }
   const d = await r.json();
   return d.organic_results || [];
+}
+
+// Lusha person enrichment. Cost-gated: each success burns one credit,
+// so the caller is expected to skip contacts that already have both an
+// email and a phone before invoking this. Returns normalised
+// { email, mobile, direct, office } — callers pick the fields they
+// actually need.
+async function lushaEnrich(
+  fn: string, ln: string, companyName: string, domain: string | null, lushaKey: string
+): Promise<{ email: string; mobile: string; direct: string; office: string; raw: any } | null> {
+  // v2 /person endpoint takes contactInfo + companyInfo. Prefer domain
+  // over raw company name — domain reduces false positives dramatically.
+  const body: Record<string, any> = {
+    contactInfo: { firstName: fn, lastName: ln },
+    companyInfo: domain ? { domain } : { name: companyName },
+  };
+  const r = await fetch(`${LUSHA_BASE}/v2/person`, {
+    method: 'POST',
+    headers: {
+      'api_key': lushaKey,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const txt = await r.text();
+    console.warn(`Lusha ${r.status} for ${fn} ${ln}: ${txt.slice(0, 300)}`);
+    return null;
+  }
+  const d = await r.json();
+  // Lusha has shipped two v2 shapes over time — both wrap the contact
+  // under `data.contact` or `contact`. Normalise.
+  const contact = d?.data?.contact || d?.contact || null;
+  if (!contact) return null;
+
+  // Email: emails can be an array of {email, type} or a single string.
+  let email = '';
+  if (Array.isArray(contact.emails) && contact.emails.length > 0) {
+    email = contact.emails[0]?.email || contact.emails[0] || '';
+  } else if (typeof contact.email === 'string') {
+    email = contact.email;
+  }
+
+  // Phones: array of { number, type } where type is e.g. 'work',
+  // 'work_direct', 'mobile', 'personal', 'fax'. Map to our buckets.
+  let mobile = '', direct = '', office = '';
+  const phones = Array.isArray(contact.phoneNumbers) ? contact.phoneNumbers
+                : Array.isArray(contact.phones) ? contact.phones
+                : [];
+  for (const p of phones) {
+    const num = p?.number || p?.internationalNumber || (typeof p === 'string' ? p : '');
+    const type = String(p?.type || '').toLowerCase();
+    if (!num) continue;
+    if (type.includes('mobile') || type.includes('cell') || type.includes('personal')) mobile = mobile || num;
+    else if (type.includes('direct')) direct = direct || num;
+    else if (type.includes('work') || type.includes('office')) office = office || num;
+    else if (!direct && !mobile) direct = num;
+  }
+
+  return { email, mobile, direct, office, raw: d };
 }
 
 // gpt-4o-mini snippet extractor. Given a bundle of Google result
@@ -176,11 +237,15 @@ type EnrichResult = {
   contactId: string;
   contactName: string;
   fieldsUpdated: string[];
-  serpHit: boolean;             // SerpAPI + AI extract produced a field
+  serpHit: boolean;
+  lushaHit: boolean;
   apolloHit: boolean;
   hunterHit: boolean;
   serpAttempted: boolean;
-  serpResultsCount: number;     // how many Google organic results came back
+  serpResultsCount: number;
+  lushaAttempted: boolean;      // we spent credits looking up this contact
+  lushaMatched: boolean;        // Lusha returned a person
+  lushaSkippedForCredits: boolean; // skipped the call because contact had email+phone
   apolloAttempted: boolean;
   apolloMatched: boolean;
   apolloHadDomain: boolean;
@@ -197,16 +262,21 @@ async function enrichContact(
   hunterKey: string | undefined,
   serpKey: string | undefined,
   openaiKey: string | undefined,
+  lushaKey: string | undefined,
 ): Promise<EnrichResult> {
   const res: EnrichResult = {
     contactId: c.id,
     contactName: `${c.first_name || ''} ${c.last_name || ''}`.trim() || '(unnamed)',
     fieldsUpdated: [],
     serpHit: false,
+    lushaHit: false,
     apolloHit: false,
     hunterHit: false,
     serpAttempted: false,
     serpResultsCount: 0,
+    lushaAttempted: false,
+    lushaMatched: false,
+    lushaSkippedForCredits: false,
     apolloAttempted: false,
     apolloMatched: false,
     apolloHadDomain: !!companyDomain,
@@ -299,7 +369,48 @@ async function enrichContact(
     }
   }
 
-  // 2. Apollo people/match — one call can fill multiple fields.
+  // 2. Lusha — primary paid phone source. 1 credit per successful
+  //    lookup. Skip if the contact already has an email AND at least
+  //    one phone — in that case spending a credit would be mostly
+  //    wasted since Lusha's biggest value-add is phone + email pairs.
+  //    Also skip if SerpAPI already filled both email AND a phone.
+  if (lushaKey) {
+    const emailAfterSerp = updates.email || c.email;
+    const phoneAfterSerp = updates.phone_work || updates.phone_cell || c.phone_work || c.phone_cell;
+    if (emailAfterSerp && phoneAfterSerp) {
+      res.lushaSkippedForCredits = true;
+    } else {
+      res.lushaAttempted = true;
+      const l = await withTimeout(
+        lushaEnrich(fn, ln, c.company_name!, companyDomain, lushaKey),
+        15_000,
+        `Lusha(${fn} ${ln})`
+      );
+      if (l) {
+        res.lushaMatched = true;
+        if (!updates.email && !c.email && l.email) {
+          updates.email = l.email;
+          if (!res.fieldsUpdated.includes('email')) res.fieldsUpdated.push('email');
+          res.lushaHit = true;
+        }
+        if (!updates.phone_cell && !c.phone_cell && l.mobile) {
+          updates.phone_cell = l.mobile;
+          if (!res.fieldsUpdated.includes('phone_cell')) res.fieldsUpdated.push('phone_cell');
+          res.lushaHit = true;
+        }
+        // Direct dial beats office line; both land in phone_work.
+        const workPhone = l.direct || l.office;
+        if (!updates.phone_work && !c.phone_work && workPhone) {
+          updates.phone_work = workPhone;
+          if (!res.fieldsUpdated.includes('phone_work')) res.fieldsUpdated.push('phone_work');
+          res.lushaHit = true;
+        }
+        if (res.lushaHit) notes.push('Lusha filled: ' + res.fieldsUpdated.filter(f => f === 'email' || f === 'phone_cell' || f === 'phone_work').join(', '));
+      }
+    }
+  }
+
+  // 3. Apollo people/match — one call can fill multiple fields.
   if (apolloKey) {
     res.apolloAttempted = true;
     const p = await withTimeout(
@@ -361,15 +472,22 @@ async function enrichContact(
       if (res.serpResultsCount === 0) parts.push(`Google returned 0 results for "${fn} ${ln} ${c.company_name}"`);
       else parts.push(`Google returned ${res.serpResultsCount} results but nothing verifiable could be extracted`);
     }
+    if (res.lushaSkippedForCredits) {
+      parts.push('Lusha skipped (contact already had email + phone; saved a credit)');
+    } else if (res.lushaAttempted && !res.lushaMatched) {
+      parts.push(`Lusha had no match${companyDomain ? ` @ ${companyDomain}` : ` at "${c.company_name}"`}`);
+    } else if (res.lushaMatched && !res.lushaHit) {
+      parts.push('Lusha matched but every field it returned was already on this contact');
+    }
     if (res.apolloAttempted && !res.apolloMatched) {
       parts.push(`Apollo had no match${companyDomain ? ` @ ${companyDomain}` : ` at "${c.company_name}"`}`);
     } else if (res.apolloMatched) {
-      parts.push('Apollo matched but returned no new fields (may be paywalled — free tier locks email/phone)');
+      parts.push('Apollo matched but returned no new fields (free tier locks email/phone)');
     }
     if (res.hunterAttempted && !res.hunterMatched) {
       parts.push(`Hunter could not find an email${!companyDomain ? ' (no company website on file)' : ''}`);
     }
-    if (!res.serpAttempted && !res.apolloAttempted && !res.hunterAttempted) parts.push('no enrichment sources were configured');
+    if (!res.serpAttempted && !res.apolloAttempted && !res.hunterAttempted && !res.lushaAttempted) parts.push('no enrichment sources were configured');
     res.skipReason = parts.join(' · ') || 'no new information available';
     return res;
   }
@@ -388,14 +506,14 @@ async function enrichContact(
 
 // ----------------- background task -----------------
 
-async function processRun(runId: string, contactIds: string[], apolloKey: string|undefined, hunterKey: string|undefined, serpKey: string|undefined, openaiKey: string|undefined) {
+async function processRun(runId: string, contactIds: string[], apolloKey: string|undefined, hunterKey: string|undefined, serpKey: string|undefined, openaiKey: string|undefined, lushaKey: string|undefined) {
   const startedAt = Date.now();
   // Diagnostic blob — written into error_message on completion so the
   // user can see it in the results dialog even when per_company comes
   // back empty. Lists what sources were configured, how many contacts
   // the function was able to load, and any warnings.
   const diag: string[] = [];
-  diag.push(`sources: SerpAPI=${serpKey ? 'yes' : 'NO'}, OpenAI=${openaiKey ? 'yes' : 'NO'}, Apollo=${apolloKey ? 'yes' : 'NO'}, Hunter=${hunterKey ? 'yes' : 'NO'}`);
+  diag.push(`sources: SerpAPI=${serpKey ? 'yes' : 'NO'}, OpenAI=${openaiKey ? 'yes' : 'NO'}, Lusha=${lushaKey ? 'yes' : 'NO'}, Apollo=${apolloKey ? 'yes' : 'NO'}, Hunter=${hunterKey ? 'yes' : 'NO'}`);
   diag.push(`contactIds received: ${contactIds.length}`);
   try {
     // Load the contacts + their companies' websites in two queries so
@@ -423,7 +541,7 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
     }
 
     const results: EnrichResult[] = [];
-    const totals = { enriched: 0, serp: 0, apollo: 0, hunter: 0, skipped: 0 };
+    const totals = { enriched: 0, serp: 0, lusha: 0, lushaCreditsUsed: 0, apollo: 0, hunter: 0, skipped: 0 };
 
     for (let i = 0; i < rows.length; i++) {
       const c = rows[i];
@@ -433,11 +551,13 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
       }).eq('id', runId);
 
       const domain = c.company_id ? (domainByCoId.get(c.company_id) || null) : null;
-      const r = await enrichContact(c, domain, apolloKey, hunterKey, serpKey, openaiKey);
+      const r = await enrichContact(c, domain, apolloKey, hunterKey, serpKey, openaiKey, lushaKey);
       results.push(r);
       if (r.fieldsUpdated.length > 0) totals.enriched++;
       else totals.skipped++;
       if (r.serpHit) totals.serp++;
+      if (r.lushaHit) totals.lusha++;
+      if (r.lushaAttempted) totals.lushaCreditsUsed++; // every attempt burns a credit, match or no match
       if (r.apolloHit) totals.apollo++;
       if (r.hunterHit) totals.hunter++;
 
@@ -445,8 +565,8 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
       await supabase.from('contact_runs').update({
         companies_processed: i + 1,
         contacts_added: totals.enriched,
-        // ai_added is reused as the SerpAPI+AI counter for enrich runs
         ai_added: totals.serp,
+        lusha_added: totals.lusha,
         apollo_added: totals.apollo,
         emails_verified: totals.hunter,
         duplicates_skipped: totals.skipped,
@@ -455,6 +575,7 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
           ai_added: r.serpHit ? 1 : 0,
           crelate_added: 0,
           apollo_added: r.apolloHit ? 1 : 0,
+          lusha_added: r.lushaHit ? 1 : 0,
           leadership_added: 0,
           emails_verified: r.hunterHit ? 1 : 0,
           duplicates_skipped: r.fieldsUpdated.length === 0 ? 1 : 0,
@@ -463,6 +584,9 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
           skip_reason: r.skipReason,
           serp_attempted: r.serpAttempted,
           serp_results: r.serpResultsCount,
+          lusha_attempted: r.lushaAttempted,
+          lusha_matched: r.lushaMatched,
+          lusha_skipped_for_credits: r.lushaSkippedForCredits,
           apollo_attempted: r.apolloAttempted,
           apollo_matched: r.apolloMatched,
           hunter_attempted: r.hunterAttempted,
@@ -473,10 +597,8 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
     }
 
     diag.push(`processed ${rows.length} contacts in ${Math.round((Date.now() - startedAt) / 1000)}s`);
-    diag.push(`totals: enriched=${totals.enriched} serp=${totals.serp} apollo=${totals.apollo} hunter=${totals.hunter} skipped=${totals.skipped}`);
-    // Belt-and-suspenders final write — include per_company + totals
-    // even though the in-loop updates already wrote them, in case the
-    // client was polling at the wrong moment.
+    diag.push(`totals: enriched=${totals.enriched} serp=${totals.serp} lusha=${totals.lusha} apollo=${totals.apollo} hunter=${totals.hunter} skipped=${totals.skipped}`);
+    diag.push(`Lusha credits consumed (approx): ${totals.lushaCreditsUsed}`);
     await supabase.from('contact_runs').update({
       status: 'completed',
       completed_at: new Date().toISOString(),
@@ -484,6 +606,7 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
       companies_processed: rows.length,
       contacts_added: totals.enriched,
       ai_added: totals.serp,
+      lusha_added: totals.lusha,
       apollo_added: totals.apollo,
       emails_verified: totals.hunter,
       duplicates_skipped: totals.skipped,
@@ -492,6 +615,7 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
         ai_added: r.serpHit ? 1 : 0,
         crelate_added: 0,
         apollo_added: r.apolloHit ? 1 : 0,
+        lusha_added: r.lushaHit ? 1 : 0,
         leadership_added: 0,
         emails_verified: r.hunterHit ? 1 : 0,
         duplicates_skipped: r.fieldsUpdated.length === 0 ? 1 : 0,
@@ -500,14 +624,15 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
         skip_reason: r.skipReason,
         serp_attempted: r.serpAttempted,
         serp_results: r.serpResultsCount,
+        lusha_attempted: r.lushaAttempted,
+        lusha_matched: r.lushaMatched,
+        lusha_skipped_for_credits: r.lushaSkippedForCredits,
         apollo_attempted: r.apolloAttempted,
         apollo_matched: r.apolloMatched,
         hunter_attempted: r.hunterAttempted,
         hunter_matched: r.hunterMatched,
         had_domain: r.apolloHadDomain,
       })),
-      // Diagnostics are surfaced via error_message so the results dialog
-      // can show them — even on successful runs.
       error_message: diag.join(' | '),
     }).eq('id', runId);
     console.log(`enrich-contacts run ${runId} done: ${diag.join(' | ')}`);
@@ -563,14 +688,15 @@ Deno.serve(async (req) => {
     const hunterPick = pickEnv('HUNTER_API_KEY', 'HUNTER_KEY', 'HUNTER_TOKEN', 'HUNTER_IO_API_KEY', 'HUNTER_IO_KEY');
     const serpPick = pickEnv('SERP_API_KEY', 'SERPAPI_API_KEY', 'SERPAPI_KEY', 'SERP_KEY');
     const openaiPick = pickEnv('OPENAI_API_KEY', 'OPENAI_KEY', 'OPENAI_TOKEN');
+    const lushaPick = pickEnv('LUSHA_API_KEY', 'LUSHA_KEY', 'LUSHA_TOKEN');
     const apolloKey = apolloPick.value;
     const hunterKey = hunterPick.value;
     const serpKey = serpPick.value;
     const openaiKey = openaiPick.value;
-    // The function can enrich with any combo — SerpAPI+OpenAI is the
-    // primary source and runs on existing credentials; Apollo/Hunter are
-    // fallbacks. Only bail if NONE of the four are available.
-    if (!apolloKey && !hunterKey && !(serpKey && openaiKey)) {
+    const lushaKey = lushaPick.value;
+    // The function can enrich with any combo — SerpAPI+OpenAI and Lusha
+    // are the best sources. Only bail if NONE are available.
+    if (!apolloKey && !hunterKey && !lushaKey && !(serpKey && openaiKey)) {
       // Report presence of every env var the function can see (all
       // non-internal ones). This makes misnamed secrets obvious.
       const envKeys = Object.keys(Deno.env.toObject()).sort();
@@ -589,7 +715,7 @@ Deno.serve(async (req) => {
         status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     }
-    console.log(`enrich-contacts keys: SerpAPI=${serpPick.matched || '(none)'}, OpenAI=${openaiPick.matched || '(none)'}, Apollo=${apolloPick.matched || '(none)'}, Hunter=${hunterPick.matched || '(none)'}`);
+    console.log(`enrich-contacts keys: SerpAPI=${serpPick.matched || '(none)'}, OpenAI=${openaiPick.matched || '(none)'}, Lusha=${lushaPick.matched || '(none)'}, Apollo=${apolloPick.matched || '(none)'}, Hunter=${hunterPick.matched || '(none)'}`);
 
     // Auto-clear stuck runs older than 15 min.
     const staleCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
@@ -612,7 +738,7 @@ Deno.serve(async (req) => {
       });
     }
 
-    EdgeRuntime.waitUntil(processRun(runRow.id, contactIds, apolloKey, hunterKey, serpKey, openaiKey));
+    EdgeRuntime.waitUntil(processRun(runRow.id, contactIds, apolloKey, hunterKey, serpKey, openaiKey, lushaKey));
 
     return new Response(JSON.stringify({
       success: true,
@@ -622,6 +748,7 @@ Deno.serve(async (req) => {
       sources_active: {
         serpapi: !!serpKey,
         openai: !!openaiKey,
+        lusha: !!lushaKey,
         apollo: !!apolloKey,
         hunter: !!hunterKey,
       },

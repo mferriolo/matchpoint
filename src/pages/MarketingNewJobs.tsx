@@ -2089,30 +2089,34 @@ const MarketingNewJobs: React.FC = () => {
                 {/* Per-source breakdown */}
                 <div>
                   <h4 className="text-xs uppercase tracking-wider text-gray-500 font-semibold mb-2">By source</h4>
-                  <div className="grid grid-cols-5 gap-2">
+                  <div className="grid grid-cols-6 gap-2">
                     <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
-                      <p className="text-2xl font-bold text-slate-800 tabular-nums">{r.leadership_added || 0}</p>
-                      <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mt-0.5">Leadership</p>
+                      <p className="text-2xl font-bold text-slate-800 tabular-nums">{r.ai_added || 0}</p>
+                      <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mt-0.5">SerpAPI+AI</p>
+                    </div>
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-center">
+                      <p className="text-2xl font-bold text-emerald-800 tabular-nums">{r.lusha_added || 0}</p>
+                      <p className="text-[10px] uppercase tracking-wider text-emerald-700 font-semibold mt-0.5">Lusha 📞</p>
                     </div>
                     <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
                       <p className="text-2xl font-bold text-slate-800 tabular-nums">{r.apollo_added || 0}</p>
                       <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mt-0.5">Apollo</p>
                     </div>
                     <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
-                      <p className="text-2xl font-bold text-slate-800 tabular-nums">{r.ai_added || 0}</p>
-                      <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mt-0.5">AI</p>
+                      <p className="text-2xl font-bold text-slate-800 tabular-nums">{r.emails_verified || 0}</p>
+                      <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mt-0.5">Hunter ✉️</p>
+                    </div>
+                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
+                      <p className="text-2xl font-bold text-slate-800 tabular-nums">{r.leadership_added || 0}</p>
+                      <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mt-0.5">Leadership</p>
                     </div>
                     <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
                       <p className="text-2xl font-bold text-slate-800 tabular-nums">{r.crelate_added || 0}</p>
                       <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mt-0.5">Crelate</p>
                     </div>
-                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
-                      <p className="text-2xl font-bold text-slate-800 tabular-nums">{r.emails_verified || 0}</p>
-                      <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mt-0.5">Hunter ✉️</p>
-                    </div>
                   </div>
                   <p className="text-[11px] text-gray-500 mt-2">
-                    Hunter runs <em>after</em> the other sources and backfills verified emails onto contacts that came in with just a name.
+                    Lusha is the primary phone source (direct dials + mobiles). It's skipped for contacts that already have both email + phone to preserve credits.
                   </p>
                 </div>
 
@@ -2160,6 +2164,9 @@ const MarketingNewJobs: React.FC = () => {
                                           {f}
                                         </span>
                                       ))}
+                                      {p.lusha_added ? (
+                                        <span className="text-[10px] text-emerald-700 font-medium">via Lusha</span>
+                                      ) : null}
                                       {p.apollo_matched && (
                                         <span className="text-[10px] text-gray-400">via Apollo</span>
                                       )}
