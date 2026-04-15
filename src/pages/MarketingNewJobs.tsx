@@ -2756,9 +2756,22 @@ const MarketingNewJobs: React.FC = () => {
                                       )}
                                     </div>
                                   ) : (
-                                    <span className="text-[11px] italic">
-                                      {p.skip_reason || (Array.isArray(p.errors) && p.errors.length > 0 ? p.errors.join(' · ') : 'no change')}
-                                    </span>
+                                    <div>
+                                      <span className="text-[11px] italic">
+                                        {p.skip_reason || (Array.isArray(p.errors) && p.errors.length > 0 ? p.errors.join(' · ') : 'no change')}
+                                      </span>
+                                      {/* Surface Lusha's raw response
+                                          shape when it was attempted
+                                          but matched nothing — lets us
+                                          tell whether Lusha's parser
+                                          needs another response shape. */}
+                                      {p.lusha_attempted && !p.lusha_matched && p.lusha_debug && (
+                                        <details className="text-[10px] text-gray-400 mt-0.5">
+                                          <summary className="cursor-pointer hover:text-gray-600">Lusha raw</summary>
+                                          <pre className="whitespace-pre-wrap break-all font-mono bg-gray-50 p-1.5 rounded mt-0.5">{String(p.lusha_debug)}</pre>
+                                        </details>
+                                      )}
+                                    </div>
                                   )}
                                 </td>
                               </tr>
