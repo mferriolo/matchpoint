@@ -10,7 +10,7 @@ import {
   Database, Shield, Phone, Send,
   Linkedin, Unlink, Upload, Trash2, Zap,
   ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert, FileText, ArrowRightLeft,
-  Ban, RotateCcw, Eye, EyeOff, Pencil, Filter, X
+  Ban, RotateCcw, Eye, EyeOff, Pencil, Filter, X, Copy
 } from 'lucide-react';
 
 import { supabase } from '@/lib/supabase';
@@ -78,6 +78,16 @@ const MarketingNewJobs: React.FC = () => {
   const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
   const [showDeleteContactsConfirm, setShowDeleteContactsConfirm] = useState(false);
   const [deletingContacts, setDeletingContacts] = useState(false);
+
+  // Duplicate-review state. Groups are computed client-side from the
+  // already-loaded contacts list (no edge function needed for detection
+  // itself). Per-group LinkedIn lookups are on-demand; the user picks
+  // which group to check, we call lookup-linkedin-profile for that one.
+  const [showDuplicateReview, setShowDuplicateReview] = useState(false);
+  const [duplicateLinkedin, setDuplicateLinkedin] = useState<Record<string, { linkedinUrl: string|null; currentCompany: string|null; snippet?: string }>>({});
+  const [duplicateLookingUp, setDuplicateLookingUp] = useState<string | null>(null);
+  const [duplicateDeleteIds, setDuplicateDeleteIds] = useState<Set<string>>(new Set());
+  const [duplicateDeleting, setDuplicateDeleting] = useState(false);
 
   const toggleContactSelect = (id: string) => {
     setSelectedContactIds(prev => {
@@ -174,6 +184,60 @@ const MarketingNewJobs: React.FC = () => {
     } finally {
       setDeletingContacts(false);
     }
+  };
+
+  // Ask the lookup-linkedin-profile function where a named person
+  // currently works. Stores the result keyed by group key so the UI
+  // can show it beside each duplicate group.
+  const handleLookupLinkedinForGroup = async (groupKey: string, firstName: string, lastName: string, hintCompany?: string) => {
+    setDuplicateLookingUp(groupKey);
+    try {
+      const { data, error } = await supabase.functions.invoke('lookup-linkedin-profile', {
+        body: { firstName, lastName, company: hintCompany || undefined },
+      });
+      if (error) throw error;
+      if (!data?.success) throw new Error(data?.error || 'Lookup failed');
+      setDuplicateLinkedin(prev => ({
+        ...prev,
+        [groupKey]: {
+          linkedinUrl: data.linkedinUrl || null,
+          currentCompany: data.currentCompany || null,
+          snippet: data.snippet || undefined,
+        },
+      }));
+    } catch (err: any) {
+      toast({ title: 'LinkedIn lookup failed', description: err.message || String(err), variant: 'destructive' });
+    } finally {
+      setDuplicateLookingUp(null);
+    }
+  };
+
+  // Delete every contact the user checked for removal in the duplicate-
+  // review dialog. Single DELETE ... WHERE id IN (...) call.
+  const handleDeleteMarkedDuplicates = async () => {
+    if (duplicateDeleteIds.size === 0) return;
+    setDuplicateDeleting(true);
+    try {
+      const ids = Array.from(duplicateDeleteIds);
+      const { error } = await supabase.from('marketing_contacts').delete().in('id', ids);
+      if (error) throw error;
+      toast({ title: `${ids.length} duplicate${ids.length === 1 ? '' : 's'} deleted` });
+      setDuplicateDeleteIds(new Set());
+      setShowDuplicateReview(false);
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Delete failed', description: err.message || String(err), variant: 'destructive' });
+    } finally {
+      setDuplicateDeleting(false);
+    }
+  };
+
+  const toggleDuplicateDelete = (id: string) => {
+    setDuplicateDeleteIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
   };
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -675,6 +739,49 @@ const MarketingNewJobs: React.FC = () => {
     return pairs.map(p => p.label);
   }, [contacts]);
   const PRESENCE_OPTIONS = ['Has data', 'No data'];
+
+  // Duplicate groups: contacts sharing the same first + last name
+  // (case-insensitive). Groups are ordered by biggest first so the
+  // user can tackle the worst offenders. Within each group, records
+  // are sorted most-recently-added first since those are usually the
+  // more authoritative current ones.
+  const duplicateGroups = useMemo(() => {
+    const groups = new Map<string, any[]>();
+    for (const c of contacts) {
+      const fn = (c.first_name || '').toLowerCase().trim();
+      const ln = (c.last_name || '').toLowerCase().trim();
+      if (!fn && !ln) continue;
+      const key = `${fn}|${ln}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(c);
+    }
+    return Array.from(groups.entries())
+      .filter(([, items]) => items.length >= 2)
+      .map(([key, items]) => ({
+        key,
+        name: `${items[0].first_name || ''} ${items[0].last_name || ''}`.trim() || '(unnamed)',
+        contacts: items.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')),
+      }))
+      .sort((a, b) => b.contacts.length - a.contacts.length);
+  }, [contacts]);
+
+  // Fuzzy company-name match used to score which record in a duplicate
+  // group best matches the currentCompany from LinkedIn. Lowercase +
+  // substring-in-either-direction is enough for most recruiting
+  // scenarios (e.g. "UnitedHealth Group" ≈ "UnitedHealthcare").
+  const companyMatches = (a: string | null | undefined, b: string | null | undefined): boolean => {
+    if (!a || !b) return false;
+    const A = a.toLowerCase().trim();
+    const B = b.toLowerCase().trim();
+    if (!A || !B) return false;
+    if (A === B) return true;
+    if (A.includes(B) || B.includes(A)) return true;
+    // Strip common suffixes and recompare.
+    const strip = (s: string) => s.replace(/\b(inc|llc|corp|corporation|group|healthcare|health|medical|system|systems|care|pllc|pc)\.?\b/g, '').replace(/\s+/g, ' ').trim();
+    const sA = strip(A); const sB = strip(B);
+    if (sA && sB && (sA === sB || sA.includes(sB) || sB.includes(sA))) return true;
+    return false;
+  };
 
   // Contacts filter + sort
   const filteredContacts = useMemo(() => {
@@ -1504,6 +1611,16 @@ const MarketingNewJobs: React.FC = () => {
                     Last run details
                   </Button>
                 )}
+                <Button
+                  variant="outline"
+                  onClick={() => { setDuplicateDeleteIds(new Set()); setShowDuplicateReview(true); }}
+                  disabled={duplicateGroups.length === 0}
+                  className="text-gray-700"
+                  title={duplicateGroups.length === 0 ? 'No duplicate contacts detected' : `${duplicateGroups.length} name${duplicateGroups.length === 1 ? '' : 's'} with multiple records`}
+                >
+                  <Copy className="w-4 h-4 mr-2" />
+                  Deduplicate{duplicateGroups.length > 0 ? ` (${duplicateGroups.length})` : ''}
+                </Button>
                 <span className="text-sm text-gray-500">{filteredContacts.length} contacts</span>
               </div>
 
@@ -1964,6 +2081,195 @@ const MarketingNewJobs: React.FC = () => {
 
         </Tabs>
       </div>
+
+      {/* Duplicate Review Dialog — groups contacts by name and lets
+          the user see each person's records side by side, optionally
+          check LinkedIn to find their current company, and tick the
+          records to delete. */}
+      {showDuplicateReview && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => !duplicateDeleting && setShowDuplicateReview(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl overflow-hidden max-h-[88vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="p-5 border-b">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                  <Copy className="w-5 h-5 text-blue-700" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-lg font-bold text-gray-900">Duplicate contacts</h3>
+                  <p className="text-sm text-gray-500">
+                    {duplicateGroups.length} name{duplicateGroups.length === 1 ? '' : 's'} with multiple records.
+                    Click <em>Check LinkedIn</em> to find each person's current company — the record that matches
+                    gets highlighted as the one to keep.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowDuplicateReview(false)}
+                  className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-y-auto flex-1 p-5 space-y-5 bg-gray-50">
+              {duplicateGroups.map(g => {
+                const li = duplicateLinkedin[g.key];
+                const lookedUp = !!li;
+                return (
+                  <div key={g.key} className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+                    <div className="px-4 py-3 border-b bg-white flex items-center justify-between flex-wrap gap-2">
+                      <div>
+                        <h4 className="text-sm font-bold text-gray-900">{g.name}</h4>
+                        <p className="text-xs text-gray-500">{g.contacts.length} records</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {lookedUp && li.linkedinUrl && (
+                          <a
+                            href={li.linkedinUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-sky-50 text-sky-800 border border-sky-200 hover:bg-sky-100"
+                          >
+                            <Linkedin className="w-3 h-3" />
+                            Profile
+                          </a>
+                        )}
+                        {lookedUp ? (
+                          <div className="text-xs">
+                            {li.currentCompany
+                              ? <span>Current: <strong className="text-emerald-700">{li.currentCompany}</strong></span>
+                              : <span className="text-gray-500 italic">LinkedIn found but couldn't extract current company</span>}
+                          </div>
+                        ) : (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              // Pass the first record's company as a hint to narrow the search.
+                              const hint = g.contacts[0]?.company_name;
+                              const [fn, ...rest] = g.name.split(' ');
+                              const ln = rest.join(' ');
+                              handleLookupLinkedinForGroup(g.key, fn, ln, hint);
+                            }}
+                            disabled={duplicateLookingUp === g.key}
+                          >
+                            {duplicateLookingUp === g.key
+                              ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> Checking…</>
+                              : <><Linkedin className="w-3.5 h-3.5 mr-1" /> Check LinkedIn</>}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-50 text-gray-500 uppercase tracking-wider text-[10px]">
+                        <tr>
+                          <th className="text-center px-2 py-2 font-semibold w-[90px]">Delete?</th>
+                          <th className="text-left px-3 py-2 font-semibold">Company</th>
+                          <th className="text-left px-3 py-2 font-semibold">Title</th>
+                          <th className="text-left px-3 py-2 font-semibold">Email</th>
+                          <th className="text-left px-3 py-2 font-semibold">Phone(s)</th>
+                          <th className="text-left px-3 py-2 font-semibold">LinkedIn</th>
+                          <th className="text-left px-3 py-2 font-semibold">Source</th>
+                          <th className="text-right px-3 py-2 font-semibold">Added</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {g.contacts.map(c => {
+                          const marked = duplicateDeleteIds.has(c.id);
+                          // If we've done a LinkedIn check, highlight the record that matches the current employer.
+                          const isCurrent = lookedUp && li.currentCompany && companyMatches(c.company_name, li.currentCompany);
+                          const phones = [c.phone_work, c.phone_home, c.phone_cell].filter(Boolean).join(' · ') || '—';
+                          const linkedin = c.linkedin_url || (c.source_url?.includes('linkedin.com/in/') ? c.source_url : '') || '';
+                          return (
+                            <tr
+                              key={c.id}
+                              className={`border-t border-gray-100 align-top ${marked ? 'bg-red-50/50 text-gray-500' : isCurrent ? 'bg-emerald-50' : ''}`}
+                            >
+                              <td className="px-2 py-2 text-center">
+                                <input
+                                  type="checkbox"
+                                  checked={marked}
+                                  onChange={() => toggleDuplicateDelete(c.id)}
+                                  className="w-4 h-4 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
+                                />
+                              </td>
+                              <td className="px-3 py-2 font-medium truncate max-w-[180px]" title={c.company_name || ''}>
+                                {c.company_name || <span className="text-gray-300">—</span>}
+                                {isCurrent && <span className="ml-1.5 inline-block text-[9px] px-1.5 py-0.5 rounded bg-emerald-200 text-emerald-900 font-semibold uppercase tracking-wider">Current</span>}
+                              </td>
+                              <td className="px-3 py-2 truncate max-w-[160px]" title={c.title || ''}>{c.title || <span className="text-gray-300">—</span>}</td>
+                              <td className="px-3 py-2 truncate max-w-[180px]" title={c.email || ''}>{c.email || <span className="text-gray-300">—</span>}</td>
+                              <td className="px-3 py-2 truncate max-w-[160px]" title={phones}>{phones}</td>
+                              <td className="px-3 py-2">
+                                {linkedin
+                                  ? <a href={linkedin} target="_blank" rel="noopener noreferrer" className="text-sky-700 hover:underline">profile</a>
+                                  : <span className="text-gray-300">—</span>}
+                              </td>
+                              <td className="px-3 py-2 truncate max-w-[120px]" title={c.source || ''}>{c.source || <span className="text-gray-300">—</span>}</td>
+                              <td className="px-3 py-2 text-right tabular-nums text-gray-500">
+                                {c.created_at ? new Date(c.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    {/* One-click convenience: after LinkedIn check, mark
+                        all non-matching records for deletion so the user
+                        doesn't have to click each checkbox. */}
+                    {lookedUp && li.currentCompany && (
+                      <div className="px-4 py-2 border-t bg-white flex items-center justify-end">
+                        <button
+                          onClick={() => {
+                            const next = new Set(duplicateDeleteIds);
+                            for (const c of g.contacts) {
+                              if (!companyMatches(c.company_name, li.currentCompany)) next.add(c.id);
+                              else next.delete(c.id);
+                            }
+                            setDuplicateDeleteIds(next);
+                          }}
+                          className="text-[11px] text-[#911406] hover:underline font-medium"
+                        >
+                          Mark all non-matching ({g.contacts.filter(c => !companyMatches(c.company_name, li.currentCompany)).length}) for deletion
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {duplicateGroups.length === 0 && (
+                <p className="text-sm text-gray-500 italic text-center py-10">No duplicate names detected.</p>
+              )}
+            </div>
+
+            <div className="p-4 border-t bg-white flex items-center justify-between">
+              <p className="text-sm text-gray-600">
+                {duplicateDeleteIds.size} contact{duplicateDeleteIds.size === 1 ? '' : 's'} marked for deletion
+              </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => setShowDuplicateReview(false)}
+                  disabled={duplicateDeleting}
+                >
+                  Close
+                </Button>
+                <Button
+                  onClick={handleDeleteMarkedDuplicates}
+                  disabled={duplicateDeleteIds.size === 0 || duplicateDeleting}
+                  className="bg-[#911406] hover:bg-[#7a1005] text-white"
+                >
+                  {duplicateDeleting ? (
+                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Deleting…</>
+                  ) : (
+                    <><Trash2 className="w-4 h-4 mr-2" /> Delete {duplicateDeleteIds.size}</>
+                  )}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete Selected Contacts Confirmation */}
       {showDeleteContactsConfirm && (

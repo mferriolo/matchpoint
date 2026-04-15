@@ -598,7 +598,10 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
 
     diag.push(`processed ${rows.length} contacts in ${Math.round((Date.now() - startedAt) / 1000)}s`);
     diag.push(`totals: enriched=${totals.enriched} serp=${totals.serp} lusha=${totals.lusha} apollo=${totals.apollo} hunter=${totals.hunter} skipped=${totals.skipped}`);
-    diag.push(`Lusha credits consumed (approx): ${totals.lushaCreditsUsed}`);
+    // Lusha typically only charges a credit on successful reveals, so
+    // attempts is a ceiling — actual billed credits are usually closer
+    // to `lusha` (the successful-match count).
+    diag.push(`Lusha attempts: ${totals.lushaCreditsUsed} (credits billed only on successful reveals, ≈ ${totals.lusha})`);
     await supabase.from('contact_runs').update({
       status: 'completed',
       completed_at: new Date().toISOString(),
