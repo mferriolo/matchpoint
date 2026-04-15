@@ -209,6 +209,12 @@ Deno.serve(async (req) => {
     const firstName = (body?.firstName || '').toString().trim();
     const lastName = (body?.lastName || '').toString().trim();
     const company = (body?.company || '').toString().trim();
+    // Optional manual override — when the duplicate-review UI has N
+    // candidate profiles for the same person and the user picks one
+    // explicitly, pass that URL here to force extraction against
+    // that profile instead of whatever Google's top result is.
+    const manualUrlRaw = (body?.manualUrl || body?.linkedinUrl || '').toString().trim();
+    const manualUrl = manualUrlRaw && manualUrlRaw.includes('linkedin.com/in/') ? manualUrlRaw : '';
 
     if (!firstName || !lastName) {
       return new Response(JSON.stringify({ success: false, error: 'firstName and lastName are required' }), {
@@ -221,7 +227,9 @@ Deno.serve(async (req) => {
     const fnLower = firstName.toLowerCase().trim();
     const lnLower = lastName.toLowerCase().trim();
     const force = !!body?.force; // optional bypass: { force: true } re-queries and updates the cache
-    if (!force) {
+    // Manual URLs always bypass the cache — the user explicitly picked
+    // a profile, so we want to extract against that profile every time.
+    if (!force && !manualUrl) {
       let { data: cached } = await supabase
         .from('linkedin_profile_cache')
         .select('*')
@@ -367,8 +375,26 @@ Deno.serve(async (req) => {
       typeof r2?.link === 'string' && r2.link.includes('linkedin.com/in/')
     );
     const matchingLinkedin = allLinkedin.filter((r2: any) => resultMatchesPerson(r2, firstName, lastName));
-    const linkedinResults = matchingLinkedin.slice(0, 3);
-    if (linkedinResults.length === 0) {
+
+    // If the caller explicitly picked a URL, use that one even if it
+    // wasn't in SerpAPI's top results. Falls back to a synthetic
+    // result-row with just the URL so the rest of the pipeline (Apollo
+    // lookup + snippet parse) still works.
+    const pickBySlug = (list: any[], url: string) => {
+      const targetSlug = (url.match(/\/in\/([^\/\?]+)/) || [])[1] || '';
+      if (!targetSlug) return null;
+      return list.find((r2: any) => {
+        const slug = (r2?.link?.match(/\/in\/([^\/\?]+)/) || [])[1] || '';
+        return slug === targetSlug;
+      }) || null;
+    };
+
+    const primary = manualUrl
+      ? (pickBySlug(allLinkedin, manualUrl) || { link: manualUrl, title: '', snippet: '' })
+      : matchingLinkedin[0];
+
+    const linkedinResults = matchingLinkedin;
+    if (!primary || !primary.link) {
       // No LinkedIn result matched the target person by slug + text.
       // Cache the negative but include a debug trail of what WAS seen
       // so the user can tell whether Google returned nothing at all
@@ -403,7 +429,22 @@ Deno.serve(async (req) => {
         cached: false,
       }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
-    const firstLI = linkedinResults[0];
+    const firstLI = primary;
+    // Alternative profiles = all other name-matching LinkedIn results.
+    // Exposed to the UI so the user can pick a different candidate
+    // when the top result is the wrong person.
+    const primarySlug = (firstLI.link?.match(/\/in\/([^\/\?]+)/) || [])[1] || '';
+    const alternativeProfiles = matchingLinkedin
+      .filter((r2: any) => {
+        const s = (r2?.link?.match(/\/in\/([^\/\?]+)/) || [])[1] || '';
+        return s && s !== primarySlug;
+      })
+      .slice(0, 5)
+      .map((r2: any) => ({
+        linkedinUrl: r2.link,
+        title: r2.title || '',
+        snippet: r2.snippet || '',
+      }));
 
     // Build a richer context block — full title, snippet, URL, and any
     // rich_snippet metadata from each of the top LinkedIn results.
@@ -536,6 +577,8 @@ Use null for a field only when you genuinely cannot find it in the result text. 
       currentTitle,
       snippet,
       extraction_source: extractionSource,
+      alternative_profiles: alternativeProfiles,
+      manual_override: !!manualUrl,
       cached: false,
     }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 

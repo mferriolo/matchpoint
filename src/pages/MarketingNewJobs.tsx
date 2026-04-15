@@ -84,7 +84,9 @@ const MarketingNewJobs: React.FC = () => {
   // itself). Per-group LinkedIn lookups are on-demand; the user picks
   // which group to check, we call lookup-linkedin-profile for that one.
   const [showDuplicateReview, setShowDuplicateReview] = useState(false);
-  const [duplicateLinkedin, setDuplicateLinkedin] = useState<Record<string, { linkedinUrl: string|null; currentCompany: string|null; currentTitle: string|null; snippet?: string; cached?: boolean; cachedAgeDays?: number; extractionSource?: string|null }>>({});
+  const [duplicateLinkedin, setDuplicateLinkedin] = useState<Record<string, { linkedinUrl: string|null; currentCompany: string|null; currentTitle: string|null; snippet?: string; cached?: boolean; cachedAgeDays?: number; extractionSource?: string|null; alternativeProfiles?: { linkedinUrl: string; title: string; snippet: string }[]; manualOverride?: boolean }>>({});
+  // Per-group state for the "paste URL" input so each group has its own draft.
+  const [duplicateManualUrlDraft, setDuplicateManualUrlDraft] = useState<Record<string, string>>({});
   // Set of group keys currently being looked up so multiple in-flight
   // LinkedIn queries each show their own spinner. Previously this was
   // a single string, so clicking a second "Check LinkedIn" button
@@ -194,11 +196,11 @@ const MarketingNewJobs: React.FC = () => {
   // Ask the lookup-linkedin-profile function where a named person
   // currently works. Stores the result keyed by group key so the UI
   // can show it beside each duplicate group.
-  const handleLookupLinkedinForGroup = async (groupKey: string, firstName: string, lastName: string, hintCompany?: string, force = false) => {
+  const handleLookupLinkedinForGroup = async (groupKey: string, firstName: string, lastName: string, hintCompany?: string, force = false, manualUrl?: string) => {
     setDuplicateLookingUp(prev => { const next = new Set(prev); next.add(groupKey); return next; });
     try {
       const { data, error } = await supabase.functions.invoke('lookup-linkedin-profile', {
-        body: { firstName, lastName, company: hintCompany || undefined, force },
+        body: { firstName, lastName, company: hintCompany || undefined, force, manualUrl: manualUrl || undefined },
       });
       if (error) {
         // supabase-js wraps 4xx/5xx responses in a FunctionsHttpError
@@ -232,6 +234,8 @@ const MarketingNewJobs: React.FC = () => {
           cached: !!data.cached,
           cachedAgeDays: data.cached_age_days || undefined,
           extractionSource: data.extraction_source || null,
+          alternativeProfiles: Array.isArray(data.alternative_profiles) ? data.alternative_profiles : [],
+          manualOverride: !!data.manual_override,
         },
       }));
     } catch (err: any) {
@@ -2270,10 +2274,9 @@ const MarketingNewJobs: React.FC = () => {
                                 {li.cached && (
                                   <button
                                     onClick={() => {
-                                      const hint = g.contacts[0]?.company_name;
                                       const [fn, ...rest] = g.name.split(' ');
                                       const ln = rest.join(' ');
-                                      handleLookupLinkedinForGroup(g.key, fn, ln, hint, true);
+                                      handleLookupLinkedinForGroup(g.key, fn, ln, undefined, true);
                                     }}
                                     disabled={duplicateLookingUp.has(g.key)}
                                     className="text-[10px] text-gray-500 hover:text-[#911406] underline mt-1"
@@ -2281,6 +2284,68 @@ const MarketingNewJobs: React.FC = () => {
                                   >
                                     {duplicateLookingUp.has(g.key) ? 'Refreshing…' : 'Refresh from SerpAPI'}
                                   </button>
+                                )}
+                                {/* Alternative LinkedIn profiles — for
+                                    shared-name cases (e.g. two Julie
+                                    Ittys). The user can pick a
+                                    different profile or paste their own
+                                    URL if they know the right one. */}
+                                {((li.alternativeProfiles && li.alternativeProfiles.length > 0) || true) && (
+                                  <details className="mt-1 text-left">
+                                    <summary className="text-[10px] text-gray-500 hover:text-[#911406] cursor-pointer">
+                                      Wrong profile? {li.alternativeProfiles && li.alternativeProfiles.length > 0 ? `${li.alternativeProfiles.length} other candidate${li.alternativeProfiles.length === 1 ? '' : 's'}` : 'Paste correct URL'}
+                                    </summary>
+                                    <div className="space-y-1 mt-1.5 bg-gray-50 border border-gray-200 rounded p-2">
+                                      {(li.alternativeProfiles || []).map(alt => {
+                                        const slug = (alt.linkedinUrl.match(/\/in\/([^\/\?]+)/) || [])[1] || alt.linkedinUrl;
+                                        return (
+                                          <div key={alt.linkedinUrl} className="flex items-start gap-2 text-[10px]">
+                                            <div className="flex-1 min-w-0">
+                                              <div className="font-medium text-gray-700 truncate" title={alt.title}>{alt.title || slug}</div>
+                                              <div className="text-gray-400 truncate" title={alt.linkedinUrl}>{slug}</div>
+                                            </div>
+                                            <button
+                                              onClick={() => {
+                                                const [fn, ...rest] = g.name.split(' ');
+                                                const ln = rest.join(' ');
+                                                handleLookupLinkedinForGroup(g.key, fn, ln, undefined, true, alt.linkedinUrl);
+                                              }}
+                                              disabled={duplicateLookingUp.has(g.key)}
+                                              className="text-[10px] px-1.5 py-0.5 rounded bg-[#911406] text-white hover:bg-[#7a1005] flex-shrink-0"
+                                            >
+                                              Use
+                                            </button>
+                                          </div>
+                                        );
+                                      })}
+                                      <div className="pt-1 border-t border-gray-200 mt-1">
+                                        <input
+                                          type="text"
+                                          placeholder="https://linkedin.com/in/..."
+                                          value={duplicateManualUrlDraft[g.key] || ''}
+                                          onChange={e => setDuplicateManualUrlDraft(prev => ({ ...prev, [g.key]: e.target.value }))}
+                                          className="w-full text-[10px] border border-gray-200 rounded px-1.5 py-0.5 font-mono"
+                                        />
+                                        <button
+                                          onClick={() => {
+                                            const draft = duplicateManualUrlDraft[g.key]?.trim();
+                                            if (!draft || !draft.includes('linkedin.com/in/')) {
+                                              toast({ title: 'Enter a linkedin.com/in/… URL', variant: 'destructive' });
+                                              return;
+                                            }
+                                            const [fn, ...rest] = g.name.split(' ');
+                                            const ln = rest.join(' ');
+                                            handleLookupLinkedinForGroup(g.key, fn, ln, undefined, true, draft);
+                                            setDuplicateManualUrlDraft(prev => ({ ...prev, [g.key]: '' }));
+                                          }}
+                                          disabled={duplicateLookingUp.has(g.key)}
+                                          className="mt-1 text-[10px] px-2 py-0.5 rounded bg-gray-700 text-white hover:bg-gray-800"
+                                        >
+                                          Look up this URL
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </details>
                                 )}
                               </>
                             ) : (
