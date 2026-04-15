@@ -55,7 +55,7 @@ async function serpSearch(query: string, serpKey: string, num = 10): Promise<any
 // actually need.
 async function lushaEnrich(
   fn: string, ln: string, companyName: string, domain: string | null, lushaKey: string
-): Promise<{ email: string; mobile: string; direct: string; office: string; raw: any } | null> {
+): Promise<{ email: string; mobile: string; direct: string; office: string; raw: any; debug: string } | null> {
   // v2 /person endpoint takes contactInfo + companyInfo. Prefer domain
   // over raw company name — domain reduces false positives dramatically.
   const body: Record<string, any> = {
@@ -72,40 +72,84 @@ async function lushaEnrich(
   });
   if (!r.ok) {
     const txt = await r.text();
-    console.warn(`Lusha ${r.status} for ${fn} ${ln}: ${txt.slice(0, 300)}`);
-    return null;
+    console.warn(`Lusha ${r.status} for ${fn} ${ln}: ${txt.slice(0, 400)}`);
+    return { email: '', mobile: '', direct: '', office: '', raw: null, debug: `HTTP ${r.status}: ${txt.slice(0, 200)}` };
   }
   const d = await r.json();
-  // Lusha has shipped two v2 shapes over time — both wrap the contact
-  // under `data.contact` or `contact`. Normalise.
-  const contact = d?.data?.contact || d?.contact || null;
-  if (!contact) return null;
 
-  // Email: emails can be an array of {email, type} or a single string.
-  let email = '';
-  if (Array.isArray(contact.emails) && contact.emails.length > 0) {
-    email = contact.emails[0]?.email || contact.emails[0] || '';
-  } else if (typeof contact.email === 'string') {
-    email = contact.email;
+  // Lusha has shipped multiple response shapes. Walk them all. Known
+  // envelope shapes:
+  //   { data: { contact: {...} } }               ← some v2 responses
+  //   { data: {...contactFields} }                ← newer v2
+  //   { contact: {...} }                          ← legacy
+  //   { contactId: { data: {...} } }              ← bulk response
+  //   <top-level fields>                          ← some direct returns
+  const candidates = [
+    d?.data?.contact,
+    d?.contact,
+    d?.data,
+    d,
+  ].filter(Boolean);
+  // Also try bulk response: first value of { "0": {data: ...} } etc.
+  if (typeof d === 'object' && d !== null) {
+    for (const v of Object.values(d as any)) {
+      if (v && typeof v === 'object' && (v as any).data) candidates.push((v as any).data);
+    }
   }
 
-  // Phones: array of { number, type } where type is e.g. 'work',
-  // 'work_direct', 'mobile', 'personal', 'fax'. Map to our buckets.
-  let mobile = '', direct = '', office = '';
-  const phones = Array.isArray(contact.phoneNumbers) ? contact.phoneNumbers
-                : Array.isArray(contact.phones) ? contact.phones
-                : [];
-  for (const p of phones) {
-    const num = p?.number || p?.internationalNumber || (typeof p === 'string' ? p : '');
-    const type = String(p?.type || '').toLowerCase();
-    if (!num) continue;
-    if (type.includes('mobile') || type.includes('cell') || type.includes('personal')) mobile = mobile || num;
-    else if (type.includes('direct')) direct = direct || num;
-    else if (type.includes('work') || type.includes('office')) office = office || num;
-    else if (!direct && !mobile) direct = num;
+  // Field extraction helpers. Lusha has used "emails" / "emailAddresses"
+  // and phone types both as strings ("work_direct") and as nested
+  // objects ({value, type}). Handle all of them.
+  const pickString = (obj: any, keys: string[]): string => {
+    if (!obj) return '';
+    if (typeof obj === 'string') return obj;
+    for (const k of keys) { const v = obj[k]; if (typeof v === 'string' && v) return v; }
+    return '';
+  };
+
+  let email = '', mobile = '', direct = '', office = '';
+  let contactObj: any = null;
+  for (const c of candidates) {
+    if (!c || typeof c !== 'object') continue;
+    const emailList = c.emailAddresses || c.emails || c.EmailAddresses || c.email_addresses || [];
+    const phoneList = c.phoneNumbers || c.phones || c.PhoneNumbers || c.phone_numbers || [];
+    if ((Array.isArray(emailList) && emailList.length) || (Array.isArray(phoneList) && phoneList.length) ||
+        typeof c.email === 'string') {
+      contactObj = c;
+      // Extract first usable email
+      if (Array.isArray(emailList)) {
+        for (const e of emailList) {
+          const v = pickString(e, ['email', 'address', 'value', 'emailAddress']);
+          if (v && v.includes('@')) { email = v; break; }
+        }
+      }
+      if (!email && typeof c.email === 'string' && c.email.includes('@')) email = c.email;
+      // Extract phones, bucketing by type
+      if (Array.isArray(phoneList)) {
+        for (const p of phoneList) {
+          const num = pickString(p, ['number', 'internationalNumber', 'value', 'phone']);
+          if (!num) continue;
+          const type = (pickString(p, ['type', 'phoneType', 'numberType']) || '').toLowerCase();
+          if (type.includes('mobile') || type.includes('cell') || type.includes('personal')) mobile = mobile || num;
+          else if (type.includes('direct')) direct = direct || num;
+          else if (type.includes('work') || type.includes('office') || type.includes('hq')) office = office || num;
+          else if (!direct && !mobile && !office) direct = num;
+        }
+      }
+      break;
+    }
   }
 
-  return { email, mobile, direct, office, raw: d };
+  const anyData = !!(email || mobile || direct || office);
+  // When Lusha returns 200 but we couldn't parse any contact data,
+  // return a debug string with the top-level keys so the caller can
+  // see what shape came back. Truncated for log safety.
+  const debugSummary = anyData
+    ? `matched: email=${!!email} mobile=${!!mobile} direct=${!!direct} office=${!!office}`
+    : `200 but no extractable fields. Top-level keys: ${Object.keys(d || {}).join(', ')}. Sample: ${JSON.stringify(d).slice(0, 300)}`;
+  if (!anyData) console.warn(`Lusha no-extract for ${fn} ${ln}: ${debugSummary}`);
+
+  return { email, mobile, direct, office, raw: d, debug: debugSummary };
 }
 
 // gpt-4o-mini snippet extractor. Given a bundle of Google result
@@ -387,25 +431,34 @@ async function enrichContact(
         `Lusha(${fn} ${ln})`
       );
       if (l) {
-        res.lushaMatched = true;
-        if (!updates.email && !c.email && l.email) {
-          updates.email = l.email;
-          if (!res.fieldsUpdated.includes('email')) res.fieldsUpdated.push('email');
-          res.lushaHit = true;
+        // Lusha returned *something* (HTTP 200 or an error we parsed).
+        // The debug string tells us whether the response had
+        // extractable contact data.
+        const hasAnyData = !!(l.email || l.mobile || l.direct || l.office);
+        if (hasAnyData) {
+          res.lushaMatched = true;
+          if (!updates.email && !c.email && l.email) {
+            updates.email = l.email;
+            if (!res.fieldsUpdated.includes('email')) res.fieldsUpdated.push('email');
+            res.lushaHit = true;
+          }
+          if (!updates.phone_cell && !c.phone_cell && l.mobile) {
+            updates.phone_cell = l.mobile;
+            if (!res.fieldsUpdated.includes('phone_cell')) res.fieldsUpdated.push('phone_cell');
+            res.lushaHit = true;
+          }
+          // Direct dial beats office line; both land in phone_work.
+          const workPhone = l.direct || l.office;
+          if (!updates.phone_work && !c.phone_work && workPhone) {
+            updates.phone_work = workPhone;
+            if (!res.fieldsUpdated.includes('phone_work')) res.fieldsUpdated.push('phone_work');
+            res.lushaHit = true;
+          }
+          if (res.lushaHit) notes.push('Lusha filled: ' + res.fieldsUpdated.filter(f => f === 'email' || f === 'phone_cell' || f === 'phone_work').join(', '));
         }
-        if (!updates.phone_cell && !c.phone_cell && l.mobile) {
-          updates.phone_cell = l.mobile;
-          if (!res.fieldsUpdated.includes('phone_cell')) res.fieldsUpdated.push('phone_cell');
-          res.lushaHit = true;
-        }
-        // Direct dial beats office line; both land in phone_work.
-        const workPhone = l.direct || l.office;
-        if (!updates.phone_work && !c.phone_work && workPhone) {
-          updates.phone_work = workPhone;
-          if (!res.fieldsUpdated.includes('phone_work')) res.fieldsUpdated.push('phone_work');
-          res.lushaHit = true;
-        }
-        if (res.lushaHit) notes.push('Lusha filled: ' + res.fieldsUpdated.filter(f => f === 'email' || f === 'phone_cell' || f === 'phone_work').join(', '));
+        // Capture the debug line on first no-match of the run so the
+        // user can see what Lusha is actually returning.
+        (res as any).lushaDebug = l.debug || null;
       }
     }
   }
@@ -602,6 +655,13 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
     // attempts is a ceiling — actual billed credits are usually closer
     // to `lusha` (the successful-match count).
     diag.push(`Lusha attempts: ${totals.lushaCreditsUsed} (credits billed only on successful reveals, ≈ ${totals.lusha})`);
+    // If Lusha was attempted a lot but matched nothing, surface the
+    // first debug string so the user can see what Lusha returned and
+    // whether the parser is missing a response shape.
+    if (totals.lushaCreditsUsed > 0 && totals.lusha === 0) {
+      const firstDebug = (results.find(r => (r as any).lushaDebug) as any)?.lushaDebug;
+      if (firstDebug) diag.push(`Lusha debug sample: ${String(firstDebug).slice(0, 400)}`);
+    }
     await supabase.from('contact_runs').update({
       status: 'completed',
       completed_at: new Date().toISOString(),
