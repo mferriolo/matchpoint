@@ -39,6 +39,15 @@ function pickEnv(...names: string[]): string | undefined {
   return undefined;
 }
 
+// Reject strings that look like a profession/title (not a company).
+// Prevents cases like "Leslee Rice - Family Medicine Physician | LinkedIn"
+// returning "Family Medicine Physician" as her employer.
+function looksLikeProfession(s: string): boolean {
+  if (!s) return true;
+  const lower = s.toLowerCase().trim();
+  return /\b(physician|doctor|engineer|manager|director|officer|specialist|analyst|consultant|nurse|therapist|teacher|professor|scientist|researcher|developer|designer|architect|lawyer|attorney|accountant|advisor|coach|trainer|coordinator|administrator|assistant|executive|president|founder|owner|partner|representative|recruiter|technician|strategist|planner|controller|auditor|chef|surgeon|pediatrician|cardiologist|psychiatrist|oncologist|practitioner|dentist|pharmacist|veterinarian|dermatologist|radiologist|anesthesiologist|psychologist|nutritionist|dietitian|student|intern|resident|fellow|associate|vp|chief|head|lead|senior|junior|marketer|accountant|editor|writer|journalist|chiropractor|optometrist|podiatrist|orthopedist|neurologist|gastroenterologist|endocrinologist|nephrologist|urologist|gynecologist|obstetrician|hospitalist|pediatric|internal|family|emergency|primary\s+care)s?\b/i.test(lower);
+}
+
 // Reject strings that look like locations so we don't mistake a city
 // for a company name. Common bad cases: "Brooklyn, New York, United
 // States", "San Francisco Bay Area", "London, England".
@@ -72,17 +81,25 @@ function parseLinkedInTitle(titleRaw: string): { title: string | null; company: 
     .replace(/\s*\(\s*(Linked ?In|United\s+\w+|\w{2,3}\s?,\s?\w+)\s*\)\s*$/i, '')
     .trim();
   const parts = cleaned.split(/\s+[-–—]\s+/).map(s => s.trim()).filter(Boolean);
+  // A candidate company must NOT look like a location (Brooklyn, NY)
+  // OR a profession (Family Medicine Physician). Those are the two
+  // most common false-positive categories.
   const pick = (t: string | null, c: string | null) => ({
     title: t,
-    company: c && !looksLikeLocation(c) ? c : null,
+    company: c && !looksLikeLocation(c) && !looksLikeProfession(c) ? c : null,
   });
   if (parts.length >= 3) {
     return pick(parts[1] || null, parts[parts.length - 1] || null);
   }
   if (parts.length === 2) {
+    // "Name - Title at Company" → real company in the "at" segment.
     const atSplit = parts[1].split(/\s+\bat\b\s+/i).map(s => s.trim()).filter(Boolean);
     if (atSplit.length === 2) return pick(atSplit[0] || null, atSplit[1] || null);
-    return pick(null, parts[1] || null);
+    // "Name - Something" — too ambiguous to commit to. The "Something"
+    // could be a profession, a location, or a company. Refuse to
+    // guess; let a higher-quality source (Apollo, Experience snippet,
+    // or AI) take over. At most we can use it as a title candidate.
+    return { title: parts[1] || null, company: null };
   }
   return { title: null, company: null };
 }
@@ -211,10 +228,14 @@ Deno.serve(async (req) => {
         .eq('first_name_lower', fnLower)
         .eq('last_name_lower', lnLower)
         .maybeSingle();
-      // If the cached URL points to a person whose slug doesn't contain
-      // this person's first OR last name, the cache is poisoned (wrong
-      // person from an earlier lookup before resultMatchesPerson existed).
-      // Delete it so we re-query instead of serving the wrong profile.
+      // Cache-invalidation rules:
+      //  (a) cached URL's slug doesn't match this person (poisoned from
+      //      before resultMatchesPerson existed), OR
+      //  (b) cached company is clearly not a company (looks like a
+      //      profession, e.g. "Family Medicine Physician", or a
+      //      location, e.g. "Brooklyn, NY") — leftovers from earlier
+      //      naive regex extraction before the profession/location
+      //      filters were added.
       if (cached?.linkedin_url) {
         const slugRaw = (String(cached.linkedin_url).match(/\/in\/([^\/\?]+)/) || [])[1] || '';
         const slugNorm = normalizeToken(slugRaw);
@@ -229,6 +250,14 @@ Deno.serve(async (req) => {
             .eq('last_name_lower', lnLower);
           cached = null;
         }
+      }
+      if (cached?.current_company && (looksLikeProfession(cached.current_company) || looksLikeLocation(cached.current_company))) {
+        console.log(`Invalidating bad-company cache for ${firstName} ${lastName}: stored company "${cached.current_company}"`);
+        await supabase.from('linkedin_profile_cache')
+          .delete()
+          .eq('first_name_lower', fnLower)
+          .eq('last_name_lower', lnLower);
+        cached = null;
       }
       if (cached?.looked_up_at) {
         const age = Date.now() - new Date(cached.looked_up_at).getTime();
@@ -443,7 +472,7 @@ Use null for a field only when you genuinely cannot find it in the result text. 
     // has indexed their LinkedIn meta description.
     if (!currentCompany) {
       const expCompany = parseExperienceFromSnippet(firstLI.snippet || '');
-      if (expCompany && !looksLikeLocation(expCompany)) {
+      if (expCompany && !looksLikeLocation(expCompany) && !looksLikeProfession(expCompany)) {
         currentCompany = expCompany;
         extractionSource = 'snippet';
       }
