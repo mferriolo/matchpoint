@@ -21,6 +21,11 @@ export const corsHeaders = {
 };
 
 const SERP_BASE = "https://serpapi.com/search.json";
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Case-insensitive env lookup so secrets saved under different casing
 // (e.g. Serp_API_Key) still work.
@@ -47,6 +52,34 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ success: false, error: 'firstName and lastName are required' }), {
         status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
+    }
+
+    // Cache check first — save a SerpAPI credit if we looked this
+    // person up within the last 30 days. Keyed by lowercase first+last.
+    const fnLower = firstName.toLowerCase().trim();
+    const lnLower = lastName.toLowerCase().trim();
+    const force = !!body?.force; // optional bypass: { force: true } re-queries and updates the cache
+    if (!force) {
+      const { data: cached } = await supabase
+        .from('linkedin_profile_cache')
+        .select('*')
+        .eq('first_name_lower', fnLower)
+        .eq('last_name_lower', lnLower)
+        .maybeSingle();
+      if (cached?.looked_up_at) {
+        const age = Date.now() - new Date(cached.looked_up_at).getTime();
+        if (age < CACHE_TTL_MS) {
+          return new Response(JSON.stringify({
+            success: true,
+            linkedinUrl: cached.linkedin_url,
+            currentCompany: cached.current_company,
+            currentTitle: cached.current_title,
+            snippet: cached.snippet,
+            cached: true,
+            cached_age_days: Math.round(age / (24 * 60 * 60 * 1000)),
+          }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        }
+      }
     }
 
     const serpKey = pickEnv('SERP_API_KEY', 'SERPAPI_API_KEY', 'SERPAPI_KEY', 'SERP_KEY');
@@ -76,27 +109,38 @@ Deno.serve(async (req) => {
     const r = await fetch(url);
     if (!r.ok) {
       const txt = await r.text();
-      // Return 200 with success:false so the error surfaces to the
-      // client-side toast cleanly (supabase-js treats non-2xx as a
-      // generic FunctionsHttpError which hides the body).
-      return new Response(JSON.stringify({ success: false, error: `SerpAPI ${r.status}: ${txt.slice(0, 300)}` }), {
+      // Return 200 with success:false so the error body survives
+      // supabase-js's FunctionsHttpError wrapping.
+      let friendly = `SerpAPI ${r.status}: ${txt.slice(0, 300)}`;
+      if (r.status === 429) {
+        friendly = `SerpAPI rate limit hit (HTTP 429). Your plan's monthly/per-second cap has been reached. Options: wait a few minutes and retry, check your SerpAPI dashboard at serpapi.com/account for your usage, or upgrade the plan. Subsequent LinkedIn checks on the same person will use the 30-day cache and won't hit the API.`;
+      } else if (r.status === 401) {
+        friendly = `SerpAPI 401 Unauthorized — the SERP_API_KEY secret is wrong or revoked. Update it in Supabase → Edge Functions → Secrets and the function will pick it up on next deploy.`;
+      }
+      return new Response(JSON.stringify({ success: false, error: friendly }), {
         status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     }
     const d = await r.json();
     const results = d.organic_results || [];
 
-    // If we got nothing, don't try harder — return null and let the UI
-    // show a "no LinkedIn profile found" state.
-    if (results.length === 0) {
-      return new Response(JSON.stringify({ success: true, linkedinUrl: null, currentCompany: null, snippet: null }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
-    }
-
-    const firstLI = results.find((r2: any) => typeof r2?.link === 'string' && r2.link.includes('linkedin.com/in/'));
+    // If we got nothing, cache the negative result so we don't keep
+    // re-querying the same unfindable person on every click.
+    const firstLI = results.length > 0
+      ? results.find((r2: any) => typeof r2?.link === 'string' && r2.link.includes('linkedin.com/in/'))
+      : null;
     if (!firstLI) {
-      return new Response(JSON.stringify({ success: true, linkedinUrl: null, currentCompany: null, snippet: null }), {
+      await supabase.from('linkedin_profile_cache').upsert({
+        first_name_lower: fnLower,
+        last_name_lower: lnLower,
+        linkedin_url: null,
+        current_company: null,
+        current_title: null,
+        snippet: null,
+        hint_company: company || null,
+        looked_up_at: new Date().toISOString(),
+      }, { onConflict: 'first_name_lower,last_name_lower' });
+      return new Response(JSON.stringify({ success: true, linkedinUrl: null, currentCompany: null, currentTitle: null, snippet: null, cached: false }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     }
@@ -140,12 +184,25 @@ Use null for either field if you cannot determine it from the snippet. Do not gu
       }
     } catch {}
 
+    // Write/refresh the cache so the next lookup on this name is free.
+    await supabase.from('linkedin_profile_cache').upsert({
+      first_name_lower: fnLower,
+      last_name_lower: lnLower,
+      linkedin_url: firstLI.link || null,
+      current_company: currentCompany,
+      current_title: currentTitle,
+      snippet: snippet,
+      hint_company: company || null,
+      looked_up_at: new Date().toISOString(),
+    }, { onConflict: 'first_name_lower,last_name_lower' });
+
     return new Response(JSON.stringify({
       success: true,
       linkedinUrl: firstLI.link,
       currentCompany,
       currentTitle,
       snippet,
+      cached: false,
     }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 
   } catch (error) {

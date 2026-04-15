@@ -84,7 +84,7 @@ const MarketingNewJobs: React.FC = () => {
   // itself). Per-group LinkedIn lookups are on-demand; the user picks
   // which group to check, we call lookup-linkedin-profile for that one.
   const [showDuplicateReview, setShowDuplicateReview] = useState(false);
-  const [duplicateLinkedin, setDuplicateLinkedin] = useState<Record<string, { linkedinUrl: string|null; currentCompany: string|null; currentTitle: string|null; snippet?: string }>>({});
+  const [duplicateLinkedin, setDuplicateLinkedin] = useState<Record<string, { linkedinUrl: string|null; currentCompany: string|null; currentTitle: string|null; snippet?: string; cached?: boolean; cachedAgeDays?: number }>>({});
   const [duplicateLookingUp, setDuplicateLookingUp] = useState<string | null>(null);
   const [duplicateDeleteIds, setDuplicateDeleteIds] = useState<Set<string>>(new Set());
   const [duplicateDeleting, setDuplicateDeleting] = useState(false);
@@ -190,11 +190,11 @@ const MarketingNewJobs: React.FC = () => {
   // Ask the lookup-linkedin-profile function where a named person
   // currently works. Stores the result keyed by group key so the UI
   // can show it beside each duplicate group.
-  const handleLookupLinkedinForGroup = async (groupKey: string, firstName: string, lastName: string, hintCompany?: string) => {
+  const handleLookupLinkedinForGroup = async (groupKey: string, firstName: string, lastName: string, hintCompany?: string, force = false) => {
     setDuplicateLookingUp(groupKey);
     try {
       const { data, error } = await supabase.functions.invoke('lookup-linkedin-profile', {
-        body: { firstName, lastName, company: hintCompany || undefined },
+        body: { firstName, lastName, company: hintCompany || undefined, force },
       });
       if (error) {
         // supabase-js wraps 4xx/5xx responses in a FunctionsHttpError
@@ -225,6 +225,8 @@ const MarketingNewJobs: React.FC = () => {
           currentCompany: data.currentCompany || null,
           currentTitle: data.currentTitle || null,
           snippet: data.snippet || undefined,
+          cached: !!data.cached,
+          cachedAgeDays: data.cached_age_days || undefined,
         },
       }));
     } catch (err: any) {
@@ -2226,9 +2228,31 @@ const MarketingNewJobs: React.FC = () => {
                           <div className="text-xs text-right">
                             {li.currentCompany ? (
                               <>
-                                <div>Current: <strong className="text-emerald-700">{li.currentCompany}</strong></div>
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <span>Current: <strong className="text-emerald-700">{li.currentCompany}</strong></span>
+                                  {li.cached && (
+                                    <span className="text-[9px] uppercase tracking-wider bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-semibold" title={`Served from cache${li.cachedAgeDays !== undefined ? ` (${li.cachedAgeDays}d old)` : ''} — no SerpAPI credit used`}>
+                                      Cached{li.cachedAgeDays !== undefined ? ` ${li.cachedAgeDays}d` : ''}
+                                    </span>
+                                  )}
+                                </div>
                                 {li.currentTitle && (
                                   <div className="text-gray-600 mt-0.5">Title: <span className="font-medium">{li.currentTitle}</span></div>
+                                )}
+                                {li.cached && (
+                                  <button
+                                    onClick={() => {
+                                      const hint = g.contacts[0]?.company_name;
+                                      const [fn, ...rest] = g.name.split(' ');
+                                      const ln = rest.join(' ');
+                                      handleLookupLinkedinForGroup(g.key, fn, ln, hint, true);
+                                    }}
+                                    disabled={duplicateLookingUp === g.key}
+                                    className="text-[10px] text-gray-500 hover:text-[#911406] underline mt-1"
+                                    title="Force a fresh SerpAPI lookup (bypasses the 30-day cache)"
+                                  >
+                                    {duplicateLookingUp === g.key ? 'Refreshing…' : 'Refresh from SerpAPI'}
+                                  </button>
                                 )}
                               </>
                             ) : (
