@@ -205,12 +205,31 @@ Deno.serve(async (req) => {
     const lnLower = lastName.toLowerCase().trim();
     const force = !!body?.force; // optional bypass: { force: true } re-queries and updates the cache
     if (!force) {
-      const { data: cached } = await supabase
+      let { data: cached } = await supabase
         .from('linkedin_profile_cache')
         .select('*')
         .eq('first_name_lower', fnLower)
         .eq('last_name_lower', lnLower)
         .maybeSingle();
+      // If the cached URL points to a person whose slug doesn't contain
+      // this person's first OR last name, the cache is poisoned (wrong
+      // person from an earlier lookup before resultMatchesPerson existed).
+      // Delete it so we re-query instead of serving the wrong profile.
+      if (cached?.linkedin_url) {
+        const slugRaw = (String(cached.linkedin_url).match(/\/in\/([^\/\?]+)/) || [])[1] || '';
+        const slugNorm = normalizeToken(slugRaw);
+        const fnNorm = normalizeToken(firstName);
+        const lnNorm = normalizeToken(lastName);
+        const slugMatches = (fnNorm && slugNorm.includes(fnNorm)) || (lnNorm && slugNorm.includes(lnNorm));
+        if (!slugMatches) {
+          console.log(`Invalidating wrong-person cache for ${firstName} ${lastName}: stored slug "${slugRaw}"`);
+          await supabase.from('linkedin_profile_cache')
+            .delete()
+            .eq('first_name_lower', fnLower)
+            .eq('last_name_lower', lnLower);
+          cached = null;
+        }
+      }
       if (cached?.looked_up_at) {
         const age = Date.now() - new Date(cached.looked_up_at).getTime();
         // If we have a LinkedIn URL but the company extraction came back
