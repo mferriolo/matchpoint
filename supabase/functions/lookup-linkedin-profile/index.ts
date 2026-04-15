@@ -39,6 +39,40 @@ function pickEnv(...names: string[]): string | undefined {
   return undefined;
 }
 
+// Regex-based extraction from a LinkedIn Google-result title. Examples:
+//   "Nishit Jhaveri - Senior Manager, Product Analytics - ChenMed | LinkedIn"
+//   "Jane Doe - CMO at DaVita Kidney Care | LinkedIn"
+//   "John Smith - ChenMed | LinkedIn"
+//   "Nishit Jhaveri – VP Engineering – ChenMed | LinkedIn"   (em-dash variant)
+// Returns whatever it can parse; callers should fall back to AI when
+// the title doesn't match a recognisable format.
+function parseLinkedInTitle(titleRaw: string): { title: string | null; company: string | null } {
+  if (!titleRaw) return { title: null, company: null };
+  // Strip the " | LinkedIn" / " - LinkedIn" suffix plus country tags
+  // like "(United States)" that sometimes appear.
+  let cleaned = titleRaw
+    .replace(/\s*\|\s*LinkedIn(\s+.*)?$/i, '')
+    .replace(/\s*[-–—]\s*LinkedIn(\s+.*)?$/i, '')
+    .replace(/\s*\(\s*(Linked ?In|United\s+\w+|\w{2,3}\s?,\s?\w+)\s*\)\s*$/i, '')
+    .trim();
+  // Split on any dash variant (ASCII -, en-dash, em-dash) with spaces.
+  const parts = cleaned.split(/\s+[-–—]\s+/).map(s => s.trim()).filter(Boolean);
+  if (parts.length >= 3) {
+    // "Name - Title - Company" (or more parts — last is usually company).
+    return {
+      title: parts[1] || null,
+      company: parts[parts.length - 1] || null,
+    };
+  }
+  if (parts.length === 2) {
+    // Might be "Name - Title at Company" or "Name - Company".
+    const atSplit = parts[1].split(/\s+\bat\b\s+/i).map(s => s.trim()).filter(Boolean);
+    if (atSplit.length === 2) return { title: atSplit[0] || null, company: atSplit[1] || null };
+    return { title: null, company: parts[1] || null };
+  }
+  return { title: null, company: null };
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
@@ -68,7 +102,46 @@ Deno.serve(async (req) => {
         .maybeSingle();
       if (cached?.looked_up_at) {
         const age = Date.now() - new Date(cached.looked_up_at).getTime();
-        if (age < CACHE_TTL_MS) {
+        // If we have a LinkedIn URL but the company extraction came back
+        // null, that's usually a transient extraction failure rather
+        // than a real miss. Try re-parsing the stored snippet's title
+        // part with the current regex — extraction logic may have
+        // improved since the row was cached. If that still fails,
+        // treat the row as stale after just 1 hour so a fresh query
+        // eventually runs instead of being stuck.
+        if (cached.linkedin_url && !cached.current_company && cached.snippet) {
+          const rawTitle = String(cached.snippet).split(/\s+—\s+|\s+--\s+/)[0] || '';
+          const reparsed = parseLinkedInTitle(rawTitle);
+          if (reparsed.company) {
+            await supabase.from('linkedin_profile_cache').update({
+              current_company: reparsed.company,
+              current_title: reparsed.title || cached.current_title,
+              looked_up_at: new Date().toISOString(),
+            }).eq('first_name_lower', fnLower).eq('last_name_lower', lnLower);
+            return new Response(JSON.stringify({
+              success: true,
+              linkedinUrl: cached.linkedin_url,
+              currentCompany: reparsed.company,
+              currentTitle: reparsed.title || cached.current_title,
+              snippet: cached.snippet,
+              cached: true,
+              cached_age_days: 0,
+            }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+          }
+          if (age >= 60 * 60 * 1000) {
+            // Stale null-extraction; fall through to re-query SerpAPI.
+          } else {
+            return new Response(JSON.stringify({
+              success: true,
+              linkedinUrl: cached.linkedin_url,
+              currentCompany: null,
+              currentTitle: cached.current_title,
+              snippet: cached.snippet,
+              cached: true,
+              cached_age_days: Math.round(age / (24 * 60 * 60 * 1000)),
+            }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+          }
+        } else if (age < CACHE_TTL_MS) {
           return new Response(JSON.stringify({
             success: true,
             linkedinUrl: cached.linkedin_url,
@@ -124,12 +197,16 @@ Deno.serve(async (req) => {
     const d = await r.json();
     const results = d.organic_results || [];
 
-    // If we got nothing, cache the negative result so we don't keep
-    // re-querying the same unfindable person on every click.
-    const firstLI = results.length > 0
-      ? results.find((r2: any) => typeof r2?.link === 'string' && r2.link.includes('linkedin.com/in/'))
-      : null;
-    if (!firstLI) {
+    // Collect up to the top 3 LinkedIn results so the AI has multiple
+    // signals (profile title, snippet, sub-results). LinkedIn snippets
+    // vary — sometimes the profile title clearly shows "Name - Title -
+    // Company | LinkedIn" and sometimes Google returns an activity post
+    // snippet where the company is only implicit.
+    const linkedinResults = results.filter((r2: any) =>
+      typeof r2?.link === 'string' && r2.link.includes('linkedin.com/in/')
+    ).slice(0, 3);
+    if (linkedinResults.length === 0) {
+      // True miss — no LinkedIn profile found at all. Cache it.
       await supabase.from('linkedin_profile_cache').upsert({
         first_name_lower: fnLower,
         last_name_lower: lnLower,
@@ -144,45 +221,84 @@ Deno.serve(async (req) => {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     }
+    const firstLI = linkedinResults[0];
 
-    // LinkedIn snippets are formatted like: "Name — Title at Company ·
-    // Location · Mutual connections". Ask the AI to pull both the
-    // current title and the current company. Strict JSON response; no
-    // guessing — return nulls when unclear.
+    // Build a richer context block — full title, snippet, URL, and any
+    // rich_snippet metadata from each of the top LinkedIn results.
+    const contextBlocks = linkedinResults.map((r2: any, i: number) => {
+      const extra: string[] = [];
+      if (r2.rich_snippet && typeof r2.rich_snippet === 'object') {
+        try { extra.push(`Meta: ${JSON.stringify(r2.rich_snippet).slice(0, 400)}`); } catch {}
+      }
+      if (r2.sitelinks && Array.isArray(r2.sitelinks)) {
+        try { extra.push(`Sitelinks: ${JSON.stringify(r2.sitelinks).slice(0, 200)}`); } catch {}
+      }
+      return `Result ${i + 1}
+Title: ${r2.title || '(empty)'}
+Snippet: ${r2.snippet || '(empty)'}
+URL: ${r2.link || '(empty)'}${extra.length ? '\n' + extra.join('\n') : ''}`;
+    }).join('\n\n');
     const snippet = `${firstLI.title || ''} — ${firstLI.snippet || ''}`;
-    const prompt = `You are reading the Google result snippet for a LinkedIn profile. Extract the person's CURRENT job title and CURRENT company (the ones most recently listed / listed first in the snippet).
 
-Person: ${firstName} ${lastName}
-Snippet: ${snippet}
+    // Improved prompt — explicitly teaches gpt-4o-mini how LinkedIn
+    // titles are formatted so it doesn't bail when the answer is
+    // visible. LinkedIn profile Google result titles are almost always:
+    //   "First Last - Role - Company | LinkedIn"
+    //   "First Last - Role at Company | LinkedIn"
+    //   "First Last - Company | LinkedIn"
+    const prompt = `You are extracting employment information from Google search results that link to a LinkedIn profile.
 
-Return strict JSON with two fields:
+TARGET PERSON: ${firstName} ${lastName}${company ? ` (search hinted: ${company})` : ''}
+
+LINKEDIN RESULTS (top ${linkedinResults.length}):
+${contextBlocks}
+
+The profile title format is almost always one of:
+  "<Name> - <Title> - <Company> | LinkedIn"
+  "<Name> - <Title> at <Company> | LinkedIn"
+  "<Name> - <Company> | LinkedIn"
+
+Extract the person's CURRENT company and job title from the FIRST result primarily (fall back to the others only if the first result is ambiguous). The company name almost always appears after " - " or " at " in the title. Do NOT abbreviate. Do NOT guess when the answer isn't present. But when the title plainly says the company, return it — don't be overly conservative.
+
+Return strict JSON with exactly these two fields:
 {"current_title": "<job title as written>", "current_company": "<company name>"}
 
-Use null for either field if you cannot determine it from the snippet. Do not guess. Do not abbreviate. The title should match how the person writes it on their profile (e.g. "Chief Medical Officer", not "CMO", unless the snippet itself uses CMO).`;
+Use null for a field only when you genuinely cannot find it in the result text. A company name literally present in the title is NOT a guess.`;
 
-    const aiRes = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.1,
-        response_format: { type: 'json_object' },
-        max_tokens: 160,
-      }),
-    });
-    const aiData = await aiRes.json();
+    // Regex parse of the LinkedIn result title is the primary path. It's
+    // more reliable than any LLM on a standardised title format and
+    // doesn't consume OpenAI tokens when it works.
     let currentCompany: string | null = null;
     let currentTitle: string | null = null;
-    try {
-      const parsed = JSON.parse(aiData.choices?.[0]?.message?.content || '{}');
-      if (parsed && typeof parsed.current_company === 'string' && parsed.current_company.trim()) {
-        currentCompany = parsed.current_company.trim();
-      }
-      if (parsed && typeof parsed.current_title === 'string' && parsed.current_title.trim()) {
-        currentTitle = parsed.current_title.trim();
-      }
-    } catch {}
+    const regex = parseLinkedInTitle(firstLI.title || '');
+    if (regex.company) currentCompany = regex.company;
+    if (regex.title) currentTitle = regex.title;
+
+    // AI fallback only when the regex couldn't pull out a company name
+    // (e.g. non-standard title formats). Same prompt as before.
+    if (!currentCompany) {
+      const aiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.1,
+          response_format: { type: 'json_object' },
+          max_tokens: 200,
+        }),
+      });
+      const aiData = await aiRes.json();
+      try {
+        const parsed = JSON.parse(aiData.choices?.[0]?.message?.content || '{}');
+        if (parsed && typeof parsed.current_company === 'string' && parsed.current_company.trim()) {
+          currentCompany = parsed.current_company.trim();
+        }
+        if (!currentTitle && parsed && typeof parsed.current_title === 'string' && parsed.current_title.trim()) {
+          currentTitle = parsed.current_title.trim();
+        }
+      } catch {}
+    }
 
     // Write/refresh the cache so the next lookup on this name is free.
     await supabase.from('linkedin_profile_cache').upsert({

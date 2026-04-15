@@ -2260,7 +2260,27 @@ const MarketingNewJobs: React.FC = () => {
                                 )}
                               </>
                             ) : (
-                              <span className="text-gray-500 italic">LinkedIn found but couldn't extract current company</span>
+                              <div className="space-y-1">
+                                <span className="text-gray-500 italic">LinkedIn profile found but couldn't extract a current company from the Google snippet.</span>
+                                {li.snippet && (
+                                  <details className="text-[10px] text-gray-400 cursor-pointer">
+                                    <summary className="hover:text-gray-600">show raw snippet</summary>
+                                    <pre className="whitespace-pre-wrap break-all font-mono bg-gray-50 p-2 rounded mt-1 max-w-xs text-left">{li.snippet}</pre>
+                                  </details>
+                                )}
+                                <button
+                                  onClick={() => {
+                                    const hint = g.contacts[0]?.company_name;
+                                    const [fn, ...rest] = g.name.split(' ');
+                                    const ln = rest.join(' ');
+                                    handleLookupLinkedinForGroup(g.key, fn, ln, hint, true);
+                                  }}
+                                  disabled={duplicateLookingUp.has(g.key)}
+                                  className="text-[11px] text-[#911406] hover:underline font-medium"
+                                >
+                                  {duplicateLookingUp.has(g.key) ? 'Refreshing…' : 'Re-run with fresh SerpAPI query'}
+                                </button>
+                              </div>
                             )}
                           </div>
                         ) : (
