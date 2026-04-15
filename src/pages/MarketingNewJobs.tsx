@@ -196,7 +196,27 @@ const MarketingNewJobs: React.FC = () => {
       const { data, error } = await supabase.functions.invoke('lookup-linkedin-profile', {
         body: { firstName, lastName, company: hintCompany || undefined },
       });
-      if (error) throw error;
+      if (error) {
+        // supabase-js wraps 4xx/5xx responses in a FunctionsHttpError
+        // whose .message is just "Edge Function returned a non-2xx
+        // status code". The actual error is in .context (a Response).
+        let detail = error.message || 'Unknown error';
+        try {
+          const ctx: any = (error as any).context;
+          if (ctx && typeof ctx.text === 'function') {
+            const raw = await ctx.text();
+            try {
+              const parsed = JSON.parse(raw);
+              if (parsed?.error) detail = parsed.error;
+              else if (raw) detail = raw.slice(0, 500);
+            } catch {
+              if (raw) detail = raw.slice(0, 500);
+            }
+          }
+        } catch {}
+        console.error('lookup-linkedin-profile error detail:', detail);
+        throw new Error(detail);
+      }
       if (!data?.success) throw new Error(data?.error || 'Lookup failed');
       setDuplicateLinkedin(prev => ({
         ...prev,

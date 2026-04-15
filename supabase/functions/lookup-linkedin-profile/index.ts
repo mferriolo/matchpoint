@@ -52,7 +52,15 @@ Deno.serve(async (req) => {
     const serpKey = pickEnv('SERP_API_KEY', 'SERPAPI_API_KEY', 'SERPAPI_KEY', 'SERP_KEY');
     const openaiKey = pickEnv('OPENAI_API_KEY', 'OPENAI_KEY', 'OPENAI_TOKEN');
     if (!serpKey || !openaiKey) {
-      return new Response(JSON.stringify({ success: false, error: 'SERP_API_KEY and OPENAI_API_KEY must both be configured' }), {
+      // Report which names the function actually sees so the user can
+      // spot a misnamed secret. Same pattern the enrich function uses.
+      const envKeys = Object.keys(Deno.env.toObject())
+        .filter(k => !/^(PATH|HOME|PWD|USER|HOSTNAME|LANG|TERM|DENO_|SUPABASE_INTERNAL_)/.test(k))
+        .sort();
+      return new Response(JSON.stringify({
+        success: false,
+        error: `Missing key(s): ${!serpKey ? 'SerpAPI ' : ''}${!openaiKey ? 'OpenAI ' : ''}(case-insensitive lookup tried). Env vars visible to the function: ${envKeys.join(', ')}`,
+      }), {
         status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     }
@@ -68,8 +76,11 @@ Deno.serve(async (req) => {
     const r = await fetch(url);
     if (!r.ok) {
       const txt = await r.text();
-      return new Response(JSON.stringify({ success: false, error: `SerpAPI ${r.status}: ${txt.slice(0, 200)}` }), {
-        status: 502, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      // Return 200 with success:false so the error surfaces to the
+      // client-side toast cleanly (supabase-js treats non-2xx as a
+      // generic FunctionsHttpError which hides the body).
+      return new Response(JSON.stringify({ success: false, error: `SerpAPI ${r.status}: ${txt.slice(0, 300)}` }), {
+        status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     }
     const d = await r.json();
