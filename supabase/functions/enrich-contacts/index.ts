@@ -56,35 +56,81 @@ async function serpSearch(query: string, serpKey: string, num = 10): Promise<any
 async function lushaEnrich(
   fn: string, ln: string, companyName: string, domain: string | null, lushaKey: string, linkedinUrl?: string
 ): Promise<{ email: string; mobile: string; direct: string; office: string; raw: any; debug: string } | null> {
-  // Lusha v2 /person — bulk format, fullName only (no firstName/lastName).
-  // LinkedIn URL is the strongest identifier — pass it when available so
-  // Lusha can do a direct profile lookup instead of fuzzy name matching.
-  const contactEntry: Record<string, any> = {
-    contactId: '0',
-    fullName: `${fn} ${ln}`.trim(),
+  const headers: Record<string, string> = {
+    'api_key': lushaKey,
+    'Content-Type': 'application/json',
   };
-  if (linkedinUrl && linkedinUrl.includes('linkedin.com/in/')) {
-    contactEntry.linkedinUrl = linkedinUrl;
+  const fullName = `${fn} ${ln}`.trim();
+
+  // Lusha has multiple API products — the enrichment endpoint (/v2/person)
+  // returns empty on contacts that the PROSPECTING search finds. We try
+  // several endpoints to hit whichever one the user's plan supports.
+  // Each attempt logs its status so the debug output shows which
+  // endpoints were tried and what each returned.
+  const attempts: string[] = [];
+  let d: any = null;
+
+  // Attempt 1: Prospecting search — this is what powers Lusha's UI
+  // search that found 10,000 CMOs. Different endpoint + body shape.
+  const prospectingBodies = [
+    // Shape A: filters with name object
+    { filters: { name: { first: fn, last: ln }, company: domain ? { domains: [domain] } : { names: [companyName] } }, limit: 1 },
+    // Shape B: flatter filter
+    { filters: { contactName: fullName, ...(domain ? { companyDomains: [domain] } : { companyNames: [companyName] }) }, limit: 1 },
+  ];
+  const prospectingPaths = [
+    '/prospecting/api/v2/points-of-contact/search',
+    '/api/public/v2/person/search',
+    '/prospecting/api/v2/contact/search',
+  ];
+  for (const path of prospectingPaths) {
+    for (const body of prospectingBodies) {
+      try {
+        const r = await fetch(`${LUSHA_BASE}${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
+        const txt = await r.text();
+        attempts.push(`${path} → ${r.status}: ${txt.slice(0, 150)}`);
+        if (r.ok) {
+          try {
+            const parsed = JSON.parse(txt);
+            // Check if we got actual results (not empty)
+            const hasResults = parsed?.data?.length > 0 || parsed?.results?.length > 0 ||
+              parsed?.contacts?.length > 0 || (parsed?.contacts && Object.keys(parsed.contacts).length > 0);
+            if (hasResults) {
+              d = parsed;
+              break;
+            }
+          } catch {}
+        }
+      } catch (e) {
+        attempts.push(`${path} → error: ${(e as Error).message}`);
+      }
+    }
+    if (d) break;
   }
-  const companies: any[] = [];
-  if (domain) companies.push({ domain });
-  if (companyName) companies.push({ name: companyName });
-  if (companies.length > 0) contactEntry.companies = companies;
-  const body = { contacts: [contactEntry] };
-  const r = await fetch(`${LUSHA_BASE}/v2/person`, {
-    method: 'POST',
-    headers: {
-      'api_key': lushaKey,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    const txt = await r.text();
-    console.warn(`Lusha ${r.status} for ${fn} ${ln}: ${txt.slice(0, 400)}`);
-    return { email: '', mobile: '', direct: '', office: '', raw: null, debug: `HTTP ${r.status}: ${txt.slice(0, 200)}` };
+
+  // Attempt 2: Original enrichment endpoint (bulk format) as fallback.
+  if (!d) {
+    const contactEntry: Record<string, any> = { contactId: '0', fullName };
+    if (linkedinUrl && linkedinUrl.includes('linkedin.com/in/')) contactEntry.linkedinUrl = linkedinUrl;
+    const companies: any[] = [];
+    if (domain) companies.push({ domain });
+    if (companyName) companies.push({ name: companyName });
+    if (companies.length > 0) contactEntry.companies = companies;
+    try {
+      const r = await fetch(`${LUSHA_BASE}/v2/person`, { method: 'POST', headers, body: JSON.stringify({ contacts: [contactEntry] }) });
+      const txt = await r.text();
+      attempts.push(`/v2/person → ${r.status}: ${txt.slice(0, 150)}`);
+      if (r.ok) {
+        try { d = JSON.parse(txt); } catch {}
+      }
+    } catch (e) {
+      attempts.push(`/v2/person → error: ${(e as Error).message}`);
+    }
   }
-  const d = await r.json();
+
+  if (!d) {
+    return { email: '', mobile: '', direct: '', office: '', raw: null, debug: `All endpoints failed. Attempts: ${attempts.join(' || ')}` };
+  }
 
   // Bulk response is keyed by contactId:
   //   { "contacts": { "0": { "data": {...} } } }
@@ -153,12 +199,9 @@ async function lushaEnrich(
   }
 
   const anyData = !!(email || mobile || direct || office);
-  // When Lusha returns 200 but we couldn't parse any contact data,
-  // return a debug string with the top-level keys so the caller can
-  // see what shape came back. Truncated for log safety.
   const debugSummary = anyData
     ? `matched: email=${!!email} mobile=${!!mobile} direct=${!!direct} office=${!!office}`
-    : `200 but no extractable fields. Top-level keys: ${Object.keys(d || {}).join(', ')}. Sample: ${JSON.stringify(d).slice(0, 300)}`;
+    : `No extractable fields. Top-level keys: ${Object.keys(d || {}).join(', ')}. Sample: ${JSON.stringify(d).slice(0, 200)}. Endpoints tried: ${attempts.join(' || ')}`;
   if (!anyData) console.warn(`Lusha no-extract for ${fn} ${ln}: ${debugSummary}`);
 
   return { email, mobile, direct, office, raw: d, debug: debugSummary };
