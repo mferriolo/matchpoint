@@ -62,53 +62,99 @@ async function lushaEnrich(
   };
   const fullName = `${fn} ${ln}`.trim();
 
-  // Lusha has multiple API products — the enrichment endpoint (/v2/person)
-  // returns empty on contacts that the PROSPECTING search finds. We try
-  // several endpoints to hit whichever one the user's plan supports.
-  // Each attempt logs its status so the debug output shows which
-  // endpoints were tried and what each returned.
+  // Lusha has multiple API shapes. The POST /v2/person bulk enrichment
+  // returns empty for contacts their UI search finds. The prospecting
+  // endpoints return 404. So we systematically try GET endpoints (the
+  // original single-person enrichment), POST v1, and different auth
+  // header styles. Each attempt is logged so the debug output shows
+  // exactly which endpoint+method+auth combo Lusha responds to.
   const attempts: string[] = [];
   let d: any = null;
 
-  // Attempt 1: Prospecting search — this is what powers Lusha's UI
-  // search that found 10,000 CMOs. Different endpoint + body shape.
-  const prospectingBodies = [
-    // Shape A: filters with name object
-    { filters: { name: { first: fn, last: ln }, company: domain ? { domains: [domain] } : { names: [companyName] } }, limit: 1 },
-    // Shape B: flatter filter
-    { filters: { contactName: fullName, ...(domain ? { companyDomains: [domain] } : { companyNames: [companyName] }) }, limit: 1 },
+  // Build query string for GET endpoints
+  const qp = new URLSearchParams({ firstName: fn, lastName: ln });
+  if (domain) qp.set('domain', domain);
+  else if (companyName) qp.set('company', companyName);
+  if (linkedinUrl) qp.set('linkedinUrl', linkedinUrl);
+
+  // Auth header variants: Lusha docs have used api_key, but some
+  // tenants need Authorization: Bearer or X-Api-Key.
+  const authVariants: Record<string, string>[] = [
+    { 'api_key': lushaKey },
+    { 'Authorization': `Bearer ${lushaKey}` },
+    { 'x-api-key': lushaKey },
+    { 'Api-Key': lushaKey },
   ];
-  const prospectingPaths = [
-    '/prospecting/api/v2/points-of-contact/search',
-    '/api/public/v2/person/search',
-    '/prospecting/api/v2/contact/search',
-  ];
-  for (const path of prospectingPaths) {
-    for (const body of prospectingBodies) {
+
+  // GET endpoints — original single-person enrichment
+  const getPaths = ['/person', '/v2/person', '/v1/person', '/api/public/person'];
+  for (const path of getPaths) {
+    if (d) break;
+    for (const authH of authVariants) {
+      if (d) break;
       try {
-        const r = await fetch(`${LUSHA_BASE}${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
+        const r = await fetch(`${LUSHA_BASE}${path}?${qp.toString()}`, {
+          method: 'GET',
+          headers: { ...authH, 'Accept': 'application/json' },
+        });
         const txt = await r.text();
-        attempts.push(`${path} → ${r.status}: ${txt.slice(0, 150)}`);
-        if (r.ok) {
+        const label = `GET ${path} [${Object.keys(authH)[0]}]`;
+        attempts.push(`${label} → ${r.status}: ${txt.slice(0, 120)}`);
+        if (r.ok && r.status === 200) {
           try {
             const parsed = JSON.parse(txt);
-            // Check if we got actual results (not empty)
-            const hasResults = parsed?.data?.length > 0 || parsed?.results?.length > 0 ||
-              parsed?.contacts?.length > 0 || (parsed?.contacts && Object.keys(parsed.contacts).length > 0);
-            if (hasResults) {
+            // Check for any useful data (not just empty wrappers)
+            const j = JSON.stringify(parsed);
+            if (j.length > 30 && j !== '{}' && j !== '{"contacts":{},"companies":{}}') {
               d = parsed;
-              break;
             }
           } catch {}
         }
+        // Only try one auth variant per path if we got a clear 401/403
+        // (wrong auth) vs 404 (wrong path). 404 = skip to next path.
+        if (r.status === 404) break;
       } catch (e) {
-        attempts.push(`${path} → error: ${(e as Error).message}`);
+        attempts.push(`GET ${path} → error: ${(e as Error).message}`);
       }
     }
-    if (d) break;
   }
 
-  // Attempt 2: Original enrichment endpoint (bulk format) as fallback.
+  // POST v1 — flat body (older API)
+  if (!d) {
+    const v1Body: Record<string, any> = { firstName: fn, lastName: ln };
+    if (domain) v1Body.domain = domain;
+    else if (companyName) v1Body.company = companyName;
+    if (linkedinUrl) v1Body.linkedinUrl = linkedinUrl;
+    for (const path of ['/v1/person', '/person']) {
+      if (d) break;
+      for (const authH of authVariants.slice(0, 2)) {
+        try {
+          const r = await fetch(`${LUSHA_BASE}${path}`, {
+            method: 'POST',
+            headers: { ...authH, 'Content-Type': 'application/json' },
+            body: JSON.stringify(v1Body),
+          });
+          const txt = await r.text();
+          const label = `POST ${path} [${Object.keys(authH)[0]}]`;
+          attempts.push(`${label} → ${r.status}: ${txt.slice(0, 120)}`);
+          if (r.ok && r.status === 200) {
+            try {
+              const parsed = JSON.parse(txt);
+              const j = JSON.stringify(parsed);
+              if (j.length > 30 && j !== '{}' && j !== '{"contacts":{},"companies":{}}') {
+                d = parsed;
+              }
+            } catch {}
+          }
+          if (r.status === 404) break;
+        } catch (e) {
+          attempts.push(`POST ${path} → error: ${(e as Error).message}`);
+        }
+      }
+    }
+  }
+
+  // POST /v2/person bulk format (what we know works for auth but returns empty)
   if (!d) {
     const contactEntry: Record<string, any> = { contactId: '0', fullName };
     if (linkedinUrl && linkedinUrl.includes('linkedin.com/in/')) contactEntry.linkedinUrl = linkedinUrl;
@@ -119,17 +165,23 @@ async function lushaEnrich(
     try {
       const r = await fetch(`${LUSHA_BASE}/v2/person`, { method: 'POST', headers, body: JSON.stringify({ contacts: [contactEntry] }) });
       const txt = await r.text();
-      attempts.push(`/v2/person → ${r.status}: ${txt.slice(0, 150)}`);
+      attempts.push(`POST /v2/person [bulk] → ${r.status}: ${txt.slice(0, 120)}`);
       if (r.ok) {
-        try { d = JSON.parse(txt); } catch {}
+        try {
+          const parsed = JSON.parse(txt);
+          const j = JSON.stringify(parsed);
+          if (j.length > 30 && j !== '{}' && j !== '{"contacts":{},"companies":{}}') {
+            d = parsed;
+          }
+        } catch {}
       }
     } catch (e) {
-      attempts.push(`/v2/person → error: ${(e as Error).message}`);
+      attempts.push(`POST /v2/person [bulk] → error: ${(e as Error).message}`);
     }
   }
 
   if (!d) {
-    return { email: '', mobile: '', direct: '', office: '', raw: null, debug: `All endpoints failed. Attempts: ${attempts.join(' || ')}` };
+    return { email: '', mobile: '', direct: '', office: '', raw: null, debug: `All ${attempts.length} endpoint attempts returned no data. ${attempts.join(' || ')}` };
   }
 
   // Bulk response is keyed by contactId:
