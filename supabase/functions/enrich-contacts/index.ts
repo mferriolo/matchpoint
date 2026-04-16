@@ -62,110 +62,55 @@ async function lushaEnrich(
   };
   const fullName = `${fn} ${ln}`.trim();
 
-  // Lusha has multiple API shapes. The POST /v2/person bulk enrichment
-  // returns empty for contacts their UI search finds. The prospecting
-  // endpoints return 404. So we systematically try GET endpoints (the
-  // original single-person enrichment), POST v1, and different auth
-  // header styles. Each attempt is logged so the debug output shows
-  // exactly which endpoint+method+auth combo Lusha responds to.
+  // CONFIRMED WORKING: GET /v2/person with api_key header.
+  //   GET /person → 404
+  //   GET /v2/person [api_key] → 400 "domain should not exist" (endpoint
+  //       EXISTS, auth works, just wrong query params)
+  //   GET /v2/person [Authorization Bearer] → 401
+  //
+  // So the endpoint is GET /v2/person, auth is api_key header, and
+  // query params must be: firstName, lastName, company (NOT domain,
+  // NOT linkedinUrl — those trigger 400).
   const attempts: string[] = [];
   let d: any = null;
 
-  // Build query string for GET endpoints
+  // Primary: GET /v2/person with just firstName + lastName + company
   const qp = new URLSearchParams({ firstName: fn, lastName: ln });
-  if (domain) qp.set('domain', domain);
-  else if (companyName) qp.set('company', companyName);
-  if (linkedinUrl) qp.set('linkedinUrl', linkedinUrl);
-
-  // Auth header variants: Lusha docs have used api_key, but some
-  // tenants need Authorization: Bearer or X-Api-Key.
-  const authVariants: Record<string, string>[] = [
-    { 'api_key': lushaKey },
-    { 'Authorization': `Bearer ${lushaKey}` },
-    { 'x-api-key': lushaKey },
-    { 'Api-Key': lushaKey },
-  ];
-
-  // GET endpoints — original single-person enrichment
-  const getPaths = ['/person', '/v2/person', '/v1/person', '/api/public/person'];
-  for (const path of getPaths) {
-    if (d) break;
-    for (const authH of authVariants) {
-      if (d) break;
+  if (companyName) qp.set('company', companyName);
+  try {
+    const r = await fetch(`${LUSHA_BASE}/v2/person?${qp.toString()}`, {
+      method: 'GET',
+      headers: { 'api_key': lushaKey, 'Accept': 'application/json' },
+    });
+    const txt = await r.text();
+    attempts.push(`GET /v2/person?${qp.toString()} → ${r.status}: ${txt.slice(0, 200)}`);
+    if (r.ok) {
       try {
-        const r = await fetch(`${LUSHA_BASE}${path}?${qp.toString()}`, {
-          method: 'GET',
-          headers: { ...authH, 'Accept': 'application/json' },
-        });
-        const txt = await r.text();
-        const label = `GET ${path} [${Object.keys(authH)[0]}]`;
-        attempts.push(`${label} → ${r.status}: ${txt.slice(0, 120)}`);
-        if (r.ok && r.status === 200) {
-          try {
-            const parsed = JSON.parse(txt);
-            // Check for any useful data (not just empty wrappers)
-            const j = JSON.stringify(parsed);
-            if (j.length > 30 && j !== '{}' && j !== '{"contacts":{},"companies":{}}') {
-              d = parsed;
-            }
-          } catch {}
+        const parsed = JSON.parse(txt);
+        const j = JSON.stringify(parsed);
+        if (j.length > 30 && j !== '{}' && j !== '{"contacts":{},"companies":{}}') {
+          d = parsed;
         }
-        // Only try one auth variant per path if we got a clear 401/403
-        // (wrong auth) vs 404 (wrong path). 404 = skip to next path.
-        if (r.status === 404) break;
-      } catch (e) {
-        attempts.push(`GET ${path} → error: ${(e as Error).message}`);
-      }
+      } catch {}
     }
+    // If this specific param set got 400, log which param was rejected
+    // so we can strip it on the next iteration.
+  } catch (e) {
+    attempts.push(`GET /v2/person → error: ${(e as Error).message}`);
   }
 
-  // POST v1 — flat body (older API)
-  if (!d) {
-    const v1Body: Record<string, any> = { firstName: fn, lastName: ln };
-    if (domain) v1Body.domain = domain;
-    else if (companyName) v1Body.company = companyName;
-    if (linkedinUrl) v1Body.linkedinUrl = linkedinUrl;
-    for (const path of ['/v1/person', '/person']) {
-      if (d) break;
-      for (const authH of authVariants.slice(0, 2)) {
-        try {
-          const r = await fetch(`${LUSHA_BASE}${path}`, {
-            method: 'POST',
-            headers: { ...authH, 'Content-Type': 'application/json' },
-            body: JSON.stringify(v1Body),
-          });
-          const txt = await r.text();
-          const label = `POST ${path} [${Object.keys(authH)[0]}]`;
-          attempts.push(`${label} → ${r.status}: ${txt.slice(0, 120)}`);
-          if (r.ok && r.status === 200) {
-            try {
-              const parsed = JSON.parse(txt);
-              const j = JSON.stringify(parsed);
-              if (j.length > 30 && j !== '{}' && j !== '{"contacts":{},"companies":{}}') {
-                d = parsed;
-              }
-            } catch {}
-          }
-          if (r.status === 404) break;
-        } catch (e) {
-          attempts.push(`POST ${path} → error: ${(e as Error).message}`);
-        }
-      }
-    }
-  }
-
-  // POST /v2/person bulk format (what we know works for auth but returns empty)
+  // Fallback: POST /v2/person bulk format (works for auth but usually empty)
   if (!d) {
     const contactEntry: Record<string, any> = { contactId: '0', fullName };
-    if (linkedinUrl && linkedinUrl.includes('linkedin.com/in/')) contactEntry.linkedinUrl = linkedinUrl;
-    const companies: any[] = [];
-    if (domain) companies.push({ domain });
-    if (companyName) companies.push({ name: companyName });
-    if (companies.length > 0) contactEntry.companies = companies;
+    if (companyName) contactEntry.companies = [{ name: companyName }];
     try {
-      const r = await fetch(`${LUSHA_BASE}/v2/person`, { method: 'POST', headers, body: JSON.stringify({ contacts: [contactEntry] }) });
+      const r = await fetch(`${LUSHA_BASE}/v2/person`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ contacts: [contactEntry] }),
+      });
       const txt = await r.text();
-      attempts.push(`POST /v2/person [bulk] → ${r.status}: ${txt.slice(0, 120)}`);
+      attempts.push(`POST /v2/person [bulk] → ${r.status}: ${txt.slice(0, 150)}`);
       if (r.ok) {
         try {
           const parsed = JSON.parse(txt);
@@ -181,7 +126,7 @@ async function lushaEnrich(
   }
 
   if (!d) {
-    return { email: '', mobile: '', direct: '', office: '', raw: null, debug: `All ${attempts.length} endpoint attempts returned no data. ${attempts.join(' || ')}` };
+    return { email: '', mobile: '', direct: '', office: '', raw: null, debug: `${attempts.length} attempts, no data. ${attempts.join(' || ')}` };
   }
 
   // Bulk response is keyed by contactId:
