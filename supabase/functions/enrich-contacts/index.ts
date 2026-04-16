@@ -62,13 +62,15 @@ async function lushaEnrich(
   //   "property contactInfo should not exist"
   //   "property companyInfo should not exist"
   //   "contacts must contain no more than 100 elements"
+  // Lusha's current v2 bulk schema rejects firstName/lastName as
+  // separate fields — only fullName + companies are accepted:
+  //   "contacts.0.property firstName should not exist"
+  //   "contacts.0.property lastName should not exist"
   const contactEntry: Record<string, any> = {
     contactId: '0',
-    firstName: fn,
-    lastName: ln,
-    fullName: `${fn} ${ln}`,
+    fullName: `${fn} ${ln}`.trim(),
     companies: [
-      domain ? { domain, isCurrent: true } : { name: companyName, isCurrent: true },
+      domain ? { domain } : { name: companyName },
     ],
   };
   const body = { contacts: [contactEntry] };
