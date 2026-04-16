@@ -54,25 +54,22 @@ async function serpSearch(query: string, serpKey: string, num = 10): Promise<any
 // { email, mobile, direct, office } — callers pick the fields they
 // actually need.
 async function lushaEnrich(
-  fn: string, ln: string, companyName: string, domain: string | null, lushaKey: string
+  fn: string, ln: string, companyName: string, domain: string | null, lushaKey: string, linkedinUrl?: string
 ): Promise<{ email: string; mobile: string; direct: string; office: string; raw: any; debug: string } | null> {
-  // Lusha's current v2 /person endpoint requires bulk format even for a
-  // single contact. Body must be { contacts: [{...fields...}] } — they
-  // reject contactInfo/companyInfo explicitly:
-  //   "property contactInfo should not exist"
-  //   "property companyInfo should not exist"
-  //   "contacts must contain no more than 100 elements"
-  // Lusha's current v2 bulk schema rejects firstName/lastName as
-  // separate fields — only fullName + companies are accepted:
-  //   "contacts.0.property firstName should not exist"
-  //   "contacts.0.property lastName should not exist"
+  // Lusha v2 /person — bulk format, fullName only (no firstName/lastName).
+  // LinkedIn URL is the strongest identifier — pass it when available so
+  // Lusha can do a direct profile lookup instead of fuzzy name matching.
   const contactEntry: Record<string, any> = {
     contactId: '0',
     fullName: `${fn} ${ln}`.trim(),
-    companies: [
-      domain ? { domain } : { name: companyName },
-    ],
   };
+  if (linkedinUrl && linkedinUrl.includes('linkedin.com/in/')) {
+    contactEntry.linkedinUrl = linkedinUrl;
+  }
+  const companies: any[] = [];
+  if (domain) companies.push({ domain });
+  if (companyName) companies.push({ name: companyName });
+  if (companies.length > 0) contactEntry.companies = companies;
   const body = { contacts: [contactEntry] };
   const r = await fetch(`${LUSHA_BASE}/v2/person`, {
     method: 'POST',
@@ -440,8 +437,12 @@ async function enrichContact(
       res.lushaSkippedForCredits = true;
     } else {
       res.lushaAttempted = true;
+      // Use the LinkedIn URL when available — it's the strongest
+      // match signal and dramatically improves Lusha's hit rate vs
+      // name + company alone.
+      const liUrl = updates.linkedin_url || c.linkedin_url || (isLinkedInUrl(c.source_url) ? c.source_url : undefined);
       const l = await withTimeout(
-        lushaEnrich(fn, ln, c.company_name!, companyDomain, lushaKey),
+        lushaEnrich(fn, ln, c.company_name!, companyDomain, lushaKey, liUrl),
         15_000,
         `Lusha(${fn} ${ln})`
       );
