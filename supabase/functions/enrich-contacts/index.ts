@@ -155,6 +155,7 @@ async function lushaEnrich(
   }
   // Legacy single-person envelopes too, just in case.
   if (d?.data?.contact) candidates.push(d.data.contact);
+  if (d?.contact?.data) candidates.push(d.contact.data); // GET /v2/person shape: { contact: { data: { phoneNumbers, emailAddresses } } }
   if (d?.contact) candidates.push(d.contact);
   if (d?.data && !Array.isArray(d.data)) candidates.push(d.data);
   candidates.push(d);
@@ -478,11 +479,9 @@ async function enrichContact(
   //    wasted since Lusha's biggest value-add is phone + email pairs.
   //    Also skip if SerpAPI already filled both email AND a phone.
   if (lushaKey) {
-    const emailAfterSerp = updates.email || c.email;
-    const phoneAfterSerp = updates.phone_work || updates.phone_cell || c.phone_work || c.phone_cell;
-    if (emailAfterSerp && phoneAfterSerp) {
-      res.lushaSkippedForCredits = true;
-    } else {
+    // No credit-conservation skip — Lusha charges per lookup (isCreditCharged:true)
+    // regardless of whether the person is found, so skipping saves nothing.
+    {
       res.lushaAttempted = true;
       // Use the LinkedIn URL when available — it's the strongest
       // match signal and dramatically improves Lusha's hit rate vs
