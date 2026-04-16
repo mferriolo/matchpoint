@@ -74,9 +74,16 @@ async function lushaEnrich(
   const attempts: string[] = [];
   let d: any = null;
 
-  // Primary: GET /v2/person with just firstName + lastName + company
+  // Primary: GET /v2/person. Lusha's error told us the exact params:
+  //   "property company should not exist"
+  //   "contact must have a combination of:
+  //     1. linkedin url
+  //     2. firstName + lastName + company domain/name"
+  // So the field names are companyName / companyDomain (not company / domain).
   const qp = new URLSearchParams({ firstName: fn, lastName: ln });
-  if (companyName) qp.set('company', companyName);
+  if (domain) qp.set('companyDomain', domain);
+  if (companyName) qp.set('companyName', companyName);
+  if (linkedinUrl && linkedinUrl.includes('linkedin.com/in/')) qp.set('linkedinUrl', linkedinUrl);
   try {
     const r = await fetch(`${LUSHA_BASE}/v2/person?${qp.toString()}`, {
       method: 'GET',
