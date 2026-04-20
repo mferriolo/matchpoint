@@ -21,6 +21,8 @@ Deno.serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
+    const wordMatch = (text: string, keyword: string) => new RegExp('\\b' + keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i').test(text);
+
     const details: string[] = [];
 
     // ---- STEP 1: Fetch all data upfront ----
@@ -42,8 +44,7 @@ Deno.serve(async (req) => {
     const companyIdsWithVBCJobs = new Set<string>();
     for (const job of (jobs || [])) {
       if (job.company_id && job.job_category) {
-        const cat = job.job_category.toUpperCase();
-        if (cat.includes('VALUE BASED CARE') || cat.includes('VBC')) {
+        if (wordMatch(job.job_category, 'VALUE BASED CARE') || wordMatch(job.job_category, 'VBC')) {
           companyIdsWithVBCJobs.add(job.company_id);
         }
       }
@@ -53,11 +54,12 @@ Deno.serve(async (req) => {
     const companyIdsWithMDCMO = new Set<string>();
     for (const job of (jobs || [])) {
       if (job.company_id && !job.is_closed && job.status !== 'Closed') {
-        const titleUpper = (job.job_title || '').toUpperCase();
-        const typeUpper = (job.job_type || '').toUpperCase();
-        if (titleUpper.includes('MEDICAL DIRECTOR') || typeUpper.includes('MEDICAL DIRECTOR') ||
-            titleUpper.includes('CHIEF MEDICAL') || typeUpper.includes('CHIEF MEDICAL') ||
-            titleUpper.includes('CMO') || typeUpper.includes('CMO')) {
+        const titleStr = job.job_title || '';
+        const typeStr = job.job_type || '';
+        const combinedStr = `${titleStr} ${typeStr}`;
+        if (wordMatch(combinedStr, 'MEDICAL DIRECTOR') ||
+            wordMatch(combinedStr, 'CHIEF MEDICAL') ||
+            wordMatch(combinedStr, 'CMO')) {
           companyIdsWithMDCMO.add(job.company_id);
         }
       }
@@ -68,10 +70,10 @@ Deno.serve(async (req) => {
     const companyIdsToMark: string[] = [];
 
     for (const company of (companies || [])) {
-      const industryStr = (company.industry || '').toUpperCase();
-      const isVBCByIndustry = industryStr.includes('VALUE BASED CARE') || industryStr.includes('VBC');
-      const compTypeStr = (company.company_type || '').toUpperCase();
-      const isVBCByType = compTypeStr.includes('VALUE BASED CARE') || compTypeStr.includes('VBC');
+      const industryStr = company.industry || '';
+      const isVBCByIndustry = wordMatch(industryStr, 'VALUE BASED CARE') || wordMatch(industryStr, 'VBC');
+      const compTypeStr = company.company_type || '';
+      const isVBCByType = wordMatch(compTypeStr, 'VALUE BASED CARE') || wordMatch(compTypeStr, 'VBC');
       const isVBCByJobs = companyIdsWithVBCJobs.has(company.id);
       const isVBC = isVBCByIndustry || isVBCByType || isVBCByJobs;
       const hasMany = (company.open_roles_count || 0) >= 10;
@@ -119,15 +121,12 @@ Deno.serve(async (req) => {
     const jobIdsToMark: string[] = [];
 
     for (const job of (jobs || [])) {
-      const titleText = (job.job_title || '').toUpperCase();
-      const typeText = (job.job_type || '').toUpperCase();
-      const oppText = (job.opportunity_type || '').toUpperCase();
-      const combined = `${titleText} ${typeText} ${oppText}`;
-      
-      const isMedicalDirector = combined.includes('MEDICAL DIRECTOR');
-      const isCMO = combined.includes('CMO') || 
-                     combined.includes('CHIEF MEDICAL OFFICER') || 
-                     combined.includes('CHIEF MEDICAL');
+      const combined = `${job.job_title || ''} ${job.job_type || ''} ${job.opportunity_type || ''}`;
+
+      const isMedicalDirector = wordMatch(combined, 'MEDICAL DIRECTOR');
+      const isCMO = wordMatch(combined, 'CMO') ||
+                     wordMatch(combined, 'CHIEF MEDICAL OFFICER') ||
+                     wordMatch(combined, 'CHIEF MEDICAL');
       const isFromHighPriorityCompany = job.company_id && highPriorityCompanyIds.has(job.company_id);
       
       const shouldBeHighPriority = isMedicalDirector || isCMO || isFromHighPriorityCompany;

@@ -226,6 +226,8 @@ const PushToCrelate: React.FC<PushToCrelateProps> = ({ companies = [], contacts 
     setExpandedSections(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
+  const stripHtml = (s: string) => s.replace(/<[^>]*>/g, '');
+
   // Strip records to only include fields needed for the push (reduces payload size dramatically)
   const stripCompanyRecord = (rec: any) => {
     const stripped: any = { id: rec.id };
@@ -235,7 +237,7 @@ const PushToCrelate: React.FC<PushToCrelateProps> = ({ companies = [], contacts 
     // Include only mapped fields
     Object.values(companyMappings).forEach(field => {
       if (field && rec[field] !== undefined && rec[field] !== null) {
-        stripped[field] = typeof rec[field] === 'string' ? rec[field].substring(0, 2000) : rec[field];
+        stripped[field] = typeof rec[field] === 'string' ? stripHtml(rec[field]).substring(0, 2000) : rec[field];
       }
     });
     return stripped;
@@ -246,18 +248,18 @@ const PushToCrelate: React.FC<PushToCrelateProps> = ({ companies = [], contacts 
     if (rec.crelate_contact_id) stripped.crelate_contact_id = rec.crelate_contact_id;
     Object.values(contactMappings).forEach(field => {
       if (field && rec[field] !== undefined && rec[field] !== null) {
-        stripped[field] = typeof rec[field] === 'string' ? rec[field].substring(0, 2000) : rec[field];
+        stripped[field] = typeof rec[field] === 'string' ? stripHtml(rec[field]).substring(0, 2000) : rec[field];
       }
     });
     // Always include these essential fields for contact creation + company linking
-    if (rec.company_name) stripped.company_name = rec.company_name;
-    if (rec.first_name) stripped.first_name = rec.first_name;
-    if (rec.last_name) stripped.last_name = rec.last_name;
-    if (rec.title) stripped.title = rec.title;
-    if (rec.email) stripped.email = rec.email;
-    if (rec.phone_work) stripped.phone_work = rec.phone_work;
-    if (rec.notes) stripped.notes = typeof rec.notes === 'string' ? rec.notes.substring(0, 1000) : rec.notes;
-    if (rec.source) stripped.source = rec.source;
+    if (rec.company_name) stripped.company_name = stripHtml(rec.company_name);
+    if (rec.first_name) stripped.first_name = stripHtml(rec.first_name);
+    if (rec.last_name) stripped.last_name = stripHtml(rec.last_name);
+    if (rec.title) stripped.title = stripHtml(rec.title);
+    if (rec.email) stripped.email = stripHtml(rec.email);
+    if (rec.phone_work) stripped.phone_work = stripHtml(rec.phone_work);
+    if (rec.notes) stripped.notes = typeof rec.notes === 'string' ? stripHtml(rec.notes).substring(0, 1000) : rec.notes;
+    if (rec.source) stripped.source = stripHtml(rec.source);
     return stripped;
   };
 
@@ -268,17 +270,17 @@ const PushToCrelate: React.FC<PushToCrelateProps> = ({ companies = [], contacts 
       if (field && rec[field] !== undefined && rec[field] !== null) {
         // Truncate very long description fields to keep payload manageable
         if (field === 'website_job_desc' || field === 'description') {
-          stripped[field] = typeof rec[field] === 'string' ? rec[field].substring(0, 5000) : rec[field];
+          stripped[field] = typeof rec[field] === 'string' ? stripHtml(rec[field]).substring(0, 5000) : rec[field];
         } else {
-          stripped[field] = typeof rec[field] === 'string' ? rec[field].substring(0, 2000) : rec[field];
+          stripped[field] = typeof rec[field] === 'string' ? stripHtml(rec[field]).substring(0, 2000) : rec[field];
         }
       }
     });
     // Always include these for job processing
-    if (rec.company_name) stripped.company_name = rec.company_name;
-    if (rec.job_title) stripped.job_title = rec.job_title;
-    if (rec.title) stripped.title = rec.title;
-    if (rec.Name) stripped.Name = rec.Name;
+    if (rec.company_name) stripped.company_name = stripHtml(rec.company_name);
+    if (rec.job_title) stripped.job_title = stripHtml(rec.job_title);
+    if (rec.title) stripped.title = stripHtml(rec.title);
+    if (rec.Name) stripped.Name = stripHtml(rec.Name);
     if (rec.location) stripped.location = rec.location;
     if (rec.city) stripped.city = rec.city;
     if (rec.state) stripped.state = rec.state;

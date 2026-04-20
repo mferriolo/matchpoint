@@ -10,6 +10,8 @@ function getCorsHeaders(req: Request) {
   };
 }
 
+let cachedToken: { token: string; expiresAt: number } | null = null;
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: getCorsHeaders(req) });
@@ -24,24 +26,35 @@ serve(async (req) => {
       throw new Error('Missing Zoom credentials');
     }
 
-    console.log('Getting OAuth token...');
-    
-    const tokenResponse = await fetch('https://zoom.us/oauth/token', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Basic ${btoa(`${ZOOM_CLIENT_ID}:${ZOOM_CLIENT_SECRET}`)}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: `grant_type=account_credentials&account_id=${ZOOM_ACCOUNT_ID}`,
-    });
+    let access_token: string;
 
-    if (!tokenResponse.ok) {
-      const errorText = await tokenResponse.text();
-      throw new Error(`OAuth failed: ${errorText}`);
+    // Use cached token if still valid (with 60s buffer)
+    if (cachedToken && Date.now() < cachedToken.expiresAt - 60000) {
+      access_token = cachedToken.token;
+      console.log('Using cached OAuth token');
+    } else {
+      console.log('Getting OAuth token...');
+
+      const tokenResponse = await fetch('https://zoom.us/oauth/token', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${btoa(`${ZOOM_CLIENT_ID}:${ZOOM_CLIENT_SECRET}`)}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: `grant_type=account_credentials&account_id=${ZOOM_ACCOUNT_ID}`,
+      });
+
+      if (!tokenResponse.ok) {
+        const errorText = await tokenResponse.text();
+        throw new Error(`OAuth failed: ${errorText}`);
+      }
+
+      const tokenData = await tokenResponse.json();
+      access_token = tokenData.access_token;
+      const expiresIn = tokenData.expires_in || 3600; // default 1 hour
+      cachedToken = { token: access_token, expiresAt: Date.now() + expiresIn * 1000 };
+      console.log('OAuth token obtained and cached');
     }
-
-    const { access_token } = await tokenResponse.json();
-    console.log('OAuth token obtained');
 
     const { topic = 'Interview Call', duration = 60 } = await req.json();
     
@@ -58,8 +71,8 @@ serve(async (req) => {
         settings: {
           host_video: true,
           participant_video: true,
-          join_before_host: true,
-          waiting_room: false,
+          join_before_host: false,
+          waiting_room: true,
           audio: 'both',
         },
       }),

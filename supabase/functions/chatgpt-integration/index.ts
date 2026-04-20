@@ -218,30 +218,45 @@ Deno.serve(async (req) => {
     console.log('System prompt length:', systemPrompt.length);
     console.log('User prompt length:', userPrompt.length);
     
-    const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: temperature,
-        max_tokens: maxTokens,
-        response_format: (action === 'analyze_job_order') ? { type: "json_object" } : undefined
-      })
-    });
+    let openaiResponse: Response | null = null;
+    for (let attempt = 0; attempt <= 2; attempt++) {
+      try {
+        openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${OPENAI_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt }
+            ],
+            temperature: temperature,
+            max_tokens: maxTokens,
+            response_format: (action === 'analyze_job_order') ? { type: "json_object" } : undefined
+          })
+        });
+        if (openaiResponse.status === 429 && attempt < 2) {
+          console.warn(`OpenAI 429 rate limit on attempt ${attempt + 1}, retrying...`);
+          await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+          continue;
+        }
+        break;
+      } catch (fetchErr) {
+        console.warn(`OpenAI fetch error on attempt ${attempt + 1}:`, (fetchErr as Error).message);
+        if (attempt === 2) throw fetchErr;
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }
 
-    if (!openaiResponse.ok) {
-      const errorText = await openaiResponse.text();
-      console.error('OpenAI API error:', openaiResponse.status, errorText);
-      
+    if (!openaiResponse!.ok) {
+      const errorText = await openaiResponse!.text();
+      console.error('OpenAI API error:', openaiResponse!.status, errorText);
+
       let errorMessage = 'OpenAI API error';
-      
+
       // Parse error for better message
       try {
         const errorJson = JSON.parse(errorText);
@@ -251,23 +266,23 @@ Deno.serve(async (req) => {
       } catch {
         errorMessage = errorText.substring(0, 200);
       }
-      
+
       // Check for specific error types
-      if (openaiResponse.status === 401) {
+      if (openaiResponse!.status === 401) {
         errorMessage = 'Invalid OpenAI API key. Please verify the API key is correct and has not expired.';
-      } else if (openaiResponse.status === 429) {
+      } else if (openaiResponse!.status === 429) {
         errorMessage = 'OpenAI API rate limit exceeded. Please try again later.';
-      } else if (openaiResponse.status === 500 || openaiResponse.status === 503) {
+      } else if (openaiResponse!.status === 500 || openaiResponse!.status === 503) {
         errorMessage = 'OpenAI service is temporarily unavailable. Please try again.';
       } else if (errorMessage.includes('model')) {
         errorMessage = `Model error: ${model} may not be available. Please check your model configuration.`;
       }
-      
+
       return new Response(
-        JSON.stringify({ 
-          success: false, 
+        JSON.stringify({
+          success: false,
           error: errorMessage,
-          status: openaiResponse.status
+          status: openaiResponse!.status
         }),
         { 
           status: 400,
@@ -279,7 +294,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    const result = await openaiResponse.json();
+    const result = await openaiResponse!.json();
     const content = result.choices[0]?.message?.content || '';
     
     console.log('OpenAI API call successful, content length:', content.length);

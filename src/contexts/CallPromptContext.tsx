@@ -837,11 +837,11 @@ Provide only the JSON response with actual answers based on the job information 
         }
       }
 
-      
+
       console.log('=== END CALL COMPLETE ===');
       setLastCall(currentCall);
+      setCurrentCall(null);
     }
-    setCurrentCall(null);
   };
 
 

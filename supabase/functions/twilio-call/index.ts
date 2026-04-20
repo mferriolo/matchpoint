@@ -9,6 +9,8 @@ function getCorsHeaders(req: Request) {
   };
 }
 
+const escXml = (s: string) => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: getCorsHeaders(req) });
@@ -94,9 +96,10 @@ Deno.serve(async (req) => {
 
       if (action === 'leave_voicemail') {
         // Generate TwiML for voicemail recording
+        const safeMessage = message ? escXml(message) : 'Hi, you\'ve reached the voicemail. Please leave a message after the beep.';
         const twiml = `<?xml version="1.0" encoding="UTF-8"?>
         <Response>
-          <Say voice="alice">Hi, you've reached the voicemail. Please leave a message after the beep.</Say>
+          <Say voice="alice">${safeMessage}</Say>
           <Record maxLength="60" timeout="5" transcribe="true" />
           <Say voice="alice">Thank you for your message. Goodbye.</Say>
         </Response>`;

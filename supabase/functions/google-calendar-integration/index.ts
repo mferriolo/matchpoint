@@ -9,6 +9,8 @@ function getCorsHeaders(req: Request) {
   };
 }
 
+const escHtml = (s: string) => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: getCorsHeaders(req) });
@@ -74,12 +76,12 @@ Deno.serve(async (req) => {
               subject: `Call Scheduled: ${title}`,
               html: `
                 <h2>You have a scheduled call</h2>
-                <p><strong>Title:</strong> ${title}</p>
+                <p><strong>Title:</strong> ${escHtml(title)}</p>
                 <p><strong>Date/Time:</strong> ${new Date(startTime).toLocaleString()}</p>
                 <p><strong>Duration:</strong> ${Math.round((new Date(endTime).getTime() - new Date(startTime).getTime()) / 60000)} minutes</p>
-                <p><strong>Description:</strong> ${description}</p>
+                <p><strong>Description:</strong> ${escHtml(description)}</p>
                 <br>
-                <p><a href="${zoomLink}" style="background: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Join Zoom Call</a></p>
+                ${zoomLink && zoomLink.startsWith('https://') ? `<p><a href="${escHtml(zoomLink)}" style="background: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Join Zoom Call</a></p>` : ''}
                 <br>
                 <p>Add to your calendar:</p>
                 <ul>

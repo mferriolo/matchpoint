@@ -333,14 +333,9 @@ Deno.serve(async (req) => {
     const openaiKey = pickEnv('OPENAI_API_KEY', 'OPENAI_KEY', 'OPENAI_TOKEN');
     const apolloKey = pickEnv('APOLLO_API_KEY', 'APOLLO_KEY', 'APOLLO_TOKEN', 'APOLLO_IO_API_KEY', 'APOLLO_IO_KEY');
     if (!serpKey || !openaiKey) {
-      // Report which names the function actually sees so the user can
-      // spot a misnamed secret. Same pattern the enrich function uses.
-      const envKeys = Object.keys(Deno.env.toObject())
-        .filter(k => !/^(PATH|HOME|PWD|USER|HOSTNAME|LANG|TERM|DENO_|SUPABASE_INTERNAL_)/.test(k))
-        .sort();
       return new Response(JSON.stringify({
         success: false,
-        error: `Missing key(s): ${!serpKey ? 'SerpAPI ' : ''}${!openaiKey ? 'OpenAI ' : ''}(case-insensitive lookup tried). Env vars visible to the function: ${envKeys.join(', ')}`,
+        error: `Required API keys not configured: ${!serpKey ? 'SerpAPI ' : ''}${!openaiKey ? 'OpenAI ' : ''}. Please add the missing key(s) to Supabase Edge Function secrets.`,
       }), {
         status: 500, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
       });

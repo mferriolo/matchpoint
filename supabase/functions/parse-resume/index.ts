@@ -151,7 +151,7 @@ Deno.serve(async (req) => {
     if (!openaiApiKey) {
       return new Response(
         JSON.stringify({ error: 'API key not configured' }),
-        { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }
+        { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 500 }
       )
     }
 
@@ -232,7 +232,7 @@ Return ONLY valid JSON, no explanations.`
         console.error('Vision API error:', await visionResponse.text())
         return new Response(
           JSON.stringify({ error: 'Vision API error' }),
-          { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }
+          { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 502 }
         )
       }
 
@@ -240,15 +240,15 @@ Return ONLY valid JSON, no explanations.`
       const content = visionData?.choices?.[0]?.message?.content || ''
       const jsonStr = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
       try { parsedData = JSON.parse(jsonStr) }
-      catch { return new Response(JSON.stringify({ error: 'AI returned invalid JSON', raw: jsonStr.substring(0, 500) }), { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }) }
-      
+      catch { return new Response(JSON.stringify({ error: 'AI returned invalid JSON', raw: jsonStr.substring(0, 500) }), { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 422 }) }
+
     } else if (resumeText && typeof resumeText === 'string') {
       console.log('Using text mode, length:', resumeText.length)
       
       if (resumeText.trim().length < 50) {
         return new Response(
           JSON.stringify({ error: 'Resume text too short' }),
-          { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }
+          { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 422 }
         )
       }
 
@@ -309,7 +309,7 @@ Return ONLY valid JSON, no explanations.`
       if (!openaiResponse.ok) {
         return new Response(
           JSON.stringify({ error: 'AI service error' }),
-          { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }
+          { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 502 }
         )
       }
 
@@ -317,12 +317,12 @@ Return ONLY valid JSON, no explanations.`
       const content = openaiData?.choices?.[0]?.message?.content || ''
       const jsonStr = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
       try { parsedData = JSON.parse(jsonStr) }
-      catch { return new Response(JSON.stringify({ error: 'AI returned invalid JSON', raw: jsonStr.substring(0, 500) }), { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }) }
-      
+      catch { return new Response(JSON.stringify({ error: 'AI returned invalid JSON', raw: jsonStr.substring(0, 500) }), { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 422 }) }
+
     } else {
       return new Response(
         JSON.stringify({ error: 'No resume text or images provided' }),
-        { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }
+        { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 422 }
       )
     }
 
@@ -370,7 +370,7 @@ Return ONLY valid JSON, no explanations.`
     console.error('Error:', error)
     return new Response(
       JSON.stringify({ error: 'Internal server error' }),
-      { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }
+      { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 500 }
     )
   }
 })

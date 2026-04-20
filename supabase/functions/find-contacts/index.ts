@@ -74,6 +74,8 @@ function parseArr(text: string): any[] {
   return [];
 }
 
+const sanitize = (s: string) => s.replace(/["\\\n\r\t<>{}[\]|]/g, ' ').substring(0, 200);
+
 const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 // Race a promise against a timeout. Returns null on timeout rather than
@@ -194,7 +196,7 @@ async function scrapeLeadershipPages(co: { company_name: string; website?: strin
     const text = htmlToText(html);
     if (text.length < 200) continue;
     const prompt =
-      `From the leadership/team page below for "${co.company_name}", extract people whose roles relate to hiring, HR, talent acquisition, recruiting, or clinical leadership (Medical Director, Chief Medical Officer, etc.). Skip board members and investors unless they hold an operating role.\n` +
+      `From the leadership/team page below for "${sanitize(co.company_name)}", extract people whose roles relate to hiring, HR, talent acquisition, recruiting, or clinical leadership (Medical Director, Chief Medical Officer, etc.). Skip board members and investors unless they hold an operating role.\n` +
       `Return a JSON array. Each item: {"first_name":"","last_name":"","title":"","email":"","source_url":"${url}"}\n` +
       `Use only what is literally on the page — no guessing. If no relevant people are present return [].\n\n` +
       `--- PAGE TEXT ---\n${text}\n--- END ---\nReturn only JSON.`;
@@ -310,7 +312,7 @@ async function aiBrainstorm(co: { company_name: string }, here: ContactRow[], op
     ? `\n\nWe already have these contacts — do NOT return them, find OTHER people:\n${here.map(c => `- ${c.first_name} ${c.last_name}`).join('\n')}\n`
     : '';
   const prompt =
-    `Find hiring-related contacts at "${co.company_name}". Target roles: ${TARGET_TITLES.join(', ')}.` +
+    `Find hiring-related contacts at "${sanitize(co.company_name)}". Target roles: ${TARGET_TITLES.join(', ')}.` +
     knownList +
     `\nONLY return real, publicly verifiable information (LinkedIn profile, company staff page, press release, etc.). No guessed emails, no fabricated names.` +
     `\nReturn a JSON array. Each item: {"first_name":"","last_name":"","email":"","phone_work":"","phone_cell":"","phone_home":"","title":"","source":"","source_url":""}` +
@@ -531,7 +533,11 @@ async function enrichCompany(
     }
 
     const { error } = await supabase.from('marketing_contacts').insert(insertRow);
-    if (error) continue;
+    if (error) {
+      // 23505 = unique_violation — concurrent request already inserted this contact
+      if (error.code === '23505') { result.duplicates_skipped++; }
+      continue;
+    }
 
     existingKeys.add(dk);
     if (cand.crelate_contact_id) existingCrelateIds.add(cand.crelate_contact_id);

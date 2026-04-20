@@ -83,7 +83,7 @@ export const useZoomSDK = () => {
     } catch (err: any) {
       console.error('useZoomSDK: Init error:', err);
       setError(err.message);
-      initializationAttempted.current = false;
+      // Don't reset initializationAttempted - prevents concurrent re-init race condition
       throw err;
     }
   }, [isInitialized]);

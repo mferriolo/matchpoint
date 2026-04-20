@@ -285,25 +285,23 @@ const LiveCall: React.FC<LiveCallProps> = ({ onEndCall }) => {
     // CRITICAL: Also check knockout questions for auto-detection
     if (knockoutQuestions.length > 0) {
       knockoutQuestions.forEach((question, index) => {
-        // Skip if already asked
-        if (askedKnockoutQuestions.includes(index)) return;
-        
         const normalizedQuestion = question.toLowerCase().trim();
-        
+
         // Check for close matches (contains key words)
         const questionWords = normalizedQuestion.split(' ').filter(word => word.length > 3);
         const matchCount = questionWords.filter(word => normalizedText.includes(word)).length;
         const matchPercentage = matchCount / Math.max(questionWords.length, 1);
-        
+
         // Mark as asked if 40% or more words match
         if (matchPercentage >= 0.4) {
-          console.log('Auto-detected knockout question:', question);
-          
-          // Mark as asked
-          setAskedKnockoutQuestions(prev => [...prev, index]);
-          
-          // Add to transcript
-          handleQuestionAsked(question);
+          // Use functional setter to avoid stale closure reads
+          setAskedKnockoutQuestions(prev => {
+            if (prev.includes(index)) return prev;
+            console.log('Auto-detected knockout question:', question);
+            // Add to transcript (scheduled outside setter)
+            setTimeout(() => handleQuestionAsked(question), 0);
+            return [...prev, index];
+          });
         }
       });
     }
@@ -392,8 +390,8 @@ const LiveCall: React.FC<LiveCallProps> = ({ onEndCall }) => {
 
     window.addEventListener('participantConnected', handleParticipantConnected);
 
-    // Only start listening if participant is already connected
-    if (participantConnected && isRecording && isSupported) {
+    // Only start listening if participant is already connected and not already listening
+    if (participantConnected && isRecording && isSupported && !isListening) {
       startListening();
     } else if (!isRecording) {
       stopListening();
@@ -402,7 +400,7 @@ const LiveCall: React.FC<LiveCallProps> = ({ onEndCall }) => {
     return () => {
       window.removeEventListener('participantConnected', handleParticipantConnected);
     };
-  }, [isRecording, isSupported, participantConnected, startListening, stopListening]);
+  }, [isRecording, isSupported, isListening, participantConnected, startListening, stopListening]);
 
 
   // Effect to handle final transcript updates (only when speech is finalized)
@@ -460,7 +458,15 @@ const LiveCall: React.FC<LiveCallProps> = ({ onEndCall }) => {
         const savedJobOrder = localStorage.getItem(`jobOrder_${currentJob.id}`);
         
         if (savedJobOrder) {
-          const parsed = JSON.parse(savedJobOrder);
+          let parsed;
+          try {
+            parsed = JSON.parse(savedJobOrder);
+          } catch {
+            console.warn('Corrupted jobOrder localStorage, removing:', currentJob.id);
+            localStorage.removeItem(`jobOrder_${currentJob.id}`);
+            parsed = null;
+          }
+          if (!parsed) return;
           const questionsToShow: string[] = [];
           
           // Get all questions from the job order data structure

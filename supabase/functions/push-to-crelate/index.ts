@@ -25,9 +25,11 @@ async function safeDbUpdate(table:string,updates:Record<string,any>,col:string,v
 const CC:Record<string,string>={};
 let allCrelateCompanies:Array<{id:string;name:string;n:string}>=[];
 let companiesLoadedAt=0;
+let companyCacheLoading=false;
 const COMPANY_CACHE_TTL=10*60*1000;
 async function loadAllCrelateCompanies(k:string):Promise<void>{
   if(allCrelateCompanies.length>0&&(Date.now()-companiesLoadedAt)<COMPANY_CACHE_TTL)return;
+  companyCacheLoading=true;
   const seen=new Set<string>();const companies:typeof allCrelateCompanies=[];
   for(let skip=0;skip<2000;skip+=50){
     const r=await G('/companies',k,{limit:'50',offset:String(skip)});
@@ -44,6 +46,7 @@ async function loadAllCrelateCompanies(k:string):Promise<void>{
   }
   allCrelateCompanies=companies;
   companiesLoadedAt=Date.now();
+  companyCacheLoading=false;
   console.log(`[v54] Loaded ${allCrelateCompanies.length} Crelate companies into cache`);
 }
 async function lCC(){const{data}=await sb.from('marketing_companies').select('company_name,crelate_id').not('crelate_id','is',null);if(data)for(const r of data)if(r.crelate_id&&ok(r.crelate_id)&&r.company_name)CC[r.company_name.toLowerCase().trim()]=r.crelate_id;}
@@ -58,6 +61,7 @@ async function rC(n:string,k:string):Promise<{id:string|null;log:string;error?:s
     if(r.ok){const id=xI(r.data);if(id){CC[c]=id;await safeDbUpdate('marketing_companies',{crelate_id:id},'company_name',n);return{id,log:'+'};}else return{id:null,log:'x:no-id',error:`POST OK but no ID. Body: ${(r.rawBody||'').substring(0,200)}`};}
     else{
       if(r.status===409){
+        if(companyCacheLoading){await W(2000);}
         companiesLoadedAt=0;
         await loadAllCrelateCompanies(k);
         for(const co of allCrelateCompanies){
@@ -92,7 +96,7 @@ let allTitles:CachedTitle[]=[];let titlesLoadedAt=0;let titleLoadApiCalls=0;cons
 async function loadAllJobTitles(k:string):Promise<void>{
   if(allTitles.length>0&&(Date.now()-titlesLoadedAt)<TITLE_CACHE_TTL)return;
   const startMs=Date.now();const seen=new Set<string>();const newTitles:CachedTitle[]=[];let apiCalls=0;let noNewCount=0;
-  for(let skip=0;skip<5000;skip+=100){const r=await G('/jobtitles',k,{limit:'100',offset:String(skip)});apiCalls++;await W(DL);if(!r?.Data||!Array.isArray(r.Data)||r.Data.length===0)break;let newInPage=0;for(const j of r.Data){if(!j.Id||!ok(j.Id)||!j.Title||seen.has(j.Id))continue;seen.add(j.Id);const n=N(j.Title);const words=new Set(n.split(/\s+/).filter((w:string)=>w.length>1));newTitles.push({id:j.Id,title:j.Title,n,words});newInPage++;}if(newInPage===0){noNewCount++;if(noNewCount>=1)break;}else{noNewCount=0;}}
+  for(let skip=0;skip<5000;skip+=100){const r=await G('/jobtitles',k,{limit:'100',offset:String(skip)});apiCalls++;await W(DL);if(!r?.Data||!Array.isArray(r.Data)||r.Data.length===0)break;let newInPage=0;for(const j of r.Data){if(!j.Id||!ok(j.Id)||!j.Title||seen.has(j.Id))continue;seen.add(j.Id);const n=N(j.Title);const words=new Set(n.split(/\s+/).filter((w:string)=>w.length>1));newTitles.push({id:j.Id,title:j.Title,n,words});newInPage++;}if(newInPage===0){noNewCount++;if(noNewCount>=2)break;}else{noNewCount=0;}}
   allTitles=newTitles;titlesLoadedAt=Date.now();titleLoadApiCalls=apiCalls;
   console.log(`[v54] Loaded ${allTitles.length} titles in ${Date.now()-startMs}ms (${apiCalls} calls)`);
 }
@@ -183,7 +187,7 @@ if(!a||!recs?.length)return R({error:"Need action+records",success:false});
 await lCC();await loadTitleMappings();
 const results:any[]=[];
 
-if(a==='push_companies'){for(const rec of recs){try{if(Date.now()-st>45000){results.push({id:rec.id,status:'error',message:'TO'});continue;}const cn=rec.company_name||rec.Name;if(!cn||bad(cn)){results.push({id:rec.id,status:'error',message:'M'});continue;}const r=await rC(cn,k);if(r.id){results.push({id:rec.id,name:cn,status:'success',crelateId:r.id,_409Debug:r._409Debug});await safeDbUpdate('marketing_companies',{crelate_id:r.id},'id',rec.id);}else results.push({id:rec.id,name:cn,status:'error',message:r.log,detail:r.error,_409Debug:r._409Debug});}catch(e){results.push({id:rec.id,status:'error',message:(e as Error).message});}}}
+if(a==='push_companies'){for(const rec of recs){try{if(Date.now()-st>45000){results.push({id:rec.id,status:'error',message:'TO'});continue;}const cn=rec.company_name||rec.Name;if(!cn||bad(cn)){results.push({id:rec.id,status:'error',message:'M'});continue;}const r=await rC(cn,k);if(r.id){results.push({id:rec.id,name:cn,status:'success',crelateId:r.id});await safeDbUpdate('marketing_companies',{crelate_id:r.id},'id',rec.id);}else results.push({id:rec.id,name:cn,status:'error',message:r.log,detail:r.error});}catch(e){results.push({id:rec.id,status:'error',message:(e as Error).message});}}}
 
 else if(a==='push_contacts'){for(const rec of recs){try{if(Date.now()-st>45000){results.push({id:rec.id,status:'error',message:'TO'});continue;}const fn=vN(rec.first_name)?rec.first_name.trim():'',ln=vN(rec.last_name)?rec.last_name.trim():'';if(!fn&&!ln){results.push({id:rec.id,status:'skipped'});continue;}const dn=`${fn} ${ln}`.trim();if(rec.crelate_contact_id){results.push({id:rec.id,name:dn,status:'skipped'});continue;}if(!sd&&fn&&ln){const e=await fCt(fn,ln,k);if(e){results.push({id:rec.id,name:dn,status:'skipped',crelateId:e});await safeDbUpdate('marketing_contacts',{crelate_contact_id:e},'id',rec.id);await W(DL);continue;}}const ent:any={};if(fn)ent.FirstName=fn;if(ln)ent.LastName=ln;if(fn&&!ln){ent.LastName='(Unknown)';ent.FirstName=fn;}if(rec.email)ent.EmailAddresses_Work={Value:rec.email,IsPrimary:true};if(rec.title)ent.CurrentPosition={JobTitle:rec.title,IsPrimary:true};const cn=rec.company_name||'';if(cn&&!bad(cn)){const cr=await rC(cn,k);if(cr.id){if(!ent.CurrentPosition)ent.CurrentPosition={IsPrimary:true};ent.CurrentPosition.CompanyId={Id:cr.id};}}const res=await Po('/contacts',k,ent);await W(DL);if(res.ok){const cid=xI(res.data);results.push({id:rec.id,name:dn,status:'success',crelateId:cid});if(cid)await safeDbUpdate('marketing_contacts',{crelate_contact_id:cid},'id',rec.id);}else if(res.status===409&&fn&&ln){const dup=await fCt(fn,ln,k);if(dup){results.push({id:rec.id,name:dn,status:'skipped',crelateId:dup,message:'409-resolved'});await safeDbUpdate('marketing_contacts',{crelate_contact_id:dup},'id',rec.id);}else{results.push({id:rec.id,name:dn,status:'error',message:`409 duplicate but lookup failed`});}}else results.push({id:rec.id,name:dn,status:'error',message:res.err});}catch(e){results.push({id:rec.id,status:'error',message:(e as Error).message});}}}
 
@@ -220,14 +224,14 @@ else if(a==='push_jobs'){
   
   const companyDebug:any={rawCompanyName:rawCompanyName===undefined?'UNDEFINED':rawCompanyName===null?'NULL':rawCompanyName===''?'EMPTY_STRING':rawCompanyName,rawCompany:rawCompany===undefined?'UNDEFINED':rawCompany===null?'NULL':rawCompany===''?'EMPTY_STRING':rawCompany,companyVar:company||'(empty)',companySource,isBad:companyBadCheck,wasResolutionAttempted:!!(company&&!companyBadCheck),resolutionLog:crLog,resolvedId:crId||'NULL',resolvedIdType:typeof crId,resolvedIdStringified:JSON.stringify(crId),resolvedIdIsValidUuid:typeof crId==='string'?ok(crId):false,accountIdOnEntity:ent.AccountId===undefined?'NOT_SET':JSON.stringify(ent.AccountId),entityName:dn};
   
-  if(companyFailed){results.push({id:rec.id,name:title,status:'error',message:`Company failed: ${cl} | ${companyError}`,_companyDebug:companyDebug,_409Debug:cr409Debug});continue;}
+  if(companyFailed){results.push({id:rec.id,name:title,status:'error',message:`Company failed: ${cl} | ${companyError}`});continue;}
   
   let jl='n/a',mt:string|undefined;let titleDebug:any=undefined;
   try{const jt=await rJ(title,k);jl=jt.log;mt=jt.mt;if(jt.id)ent.JobTitleId={Id:jt.id};else{titleDebug={originalTitle:title,simplified:jt.simplified||sT(title),baseRole:jt.baseRole||gR(title)||'(none)',top3:jt.top3||[],matchLog:jt.log,bestScore:jt.bestScore,bestCandidate:jt.bestCandidate};const nk=N(title);if(unmatchedDuringPush[nk]){unmatchedDuringPush[nk].count++;if(company&&!unmatchedDuringPush[nk].companies.includes(company))unmatchedDuringPush[nk].companies.push(company);}else unmatchedDuringPush[nk]={title,count:1,companies:company?[company]:[],bestScore:jt.bestScore||0,bestCandidate:jt.bestCandidate||'',simplified:jt.simplified||sT(title),baseRole:jt.baseRole||gR(title)||'',top3:jt.top3||[]};}}catch{jl='x';}
   
   const res=await Po('/jobs',k,ent);await W(DL);
-  if(res.ok){const cid=xI(res.data);const ro:any={id:rec.id,name:title,status:'success',message:`co:${cl} jt:${jl}${mt?' ['+mt+']':''}`,crelateId:cid,matchedTitle:mt,_companyDebug:companyDebug};if(cr409Debug)ro._409Debug=cr409Debug;if(titleDebug)ro._titleDebug=titleDebug;results.push(ro);if(cid)await safeDbUpdate('marketing_jobs',{crelate_id:cid,notes:`v52:${cid}`,updated_at:new Date().toISOString()},'id',rec.id);
-  }else{const ro:any={id:rec.id,name:title,status:'error',message:`${res.err} co:${cl} jt:${jl}`,_companyDebug:companyDebug};if(cr409Debug)ro._409Debug=cr409Debug;if(titleDebug)ro._titleDebug=titleDebug;results.push(ro);}
+  if(res.ok){const cid=xI(res.data);const ro:any={id:rec.id,name:title,status:'success',message:`co:${cl} jt:${jl}${mt?' ['+mt+']':''}`,crelateId:cid,matchedTitle:mt};if(titleDebug)ro._titleDebug=titleDebug;results.push(ro);if(cid)await safeDbUpdate('marketing_jobs',{crelate_id:cid,notes:`v52:${cid}`,updated_at:new Date().toISOString()},'id',rec.id);
+  }else{const ro:any={id:rec.id,name:title,status:'error',message:`${res.err} co:${cl} jt:${jl}`};if(titleDebug)ro._titleDebug=titleDebug;results.push(ro);}
   }catch(e){results.push({id:rec?.id,name:rec?.job_title||'?',status:'error',message:(e as Error).message.substring(0,200)});}}
   const unmatchedTitles=Object.values(unmatchedDuringPush).sort((a,b)=>b.count-a.count).map(u=>({title:u.title,count:u.count,companies:u.companies.slice(0,10),bestScore:Math.round(u.bestScore*100),bestCandidate:u.bestCandidate,simplified:u.simplified,baseRole:u.baseRole,top3:u.top3}));
   const totalJobsPushed=results.filter(r=>r.status==='success').length;const jobsWithTitle=results.filter(r=>r.status==='success'&&r.matchedTitle).length;

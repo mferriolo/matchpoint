@@ -116,39 +116,14 @@ Deno.serve(async (req) => {
       }
     }
 
-    // If nothing worked, try to update the most recent job order
-    console.log('Attempting to update most recent job order');
-    updateResult = await supabase
-      .from('job_orders')
-      .update({ google_doc_url: googleDocUrl })
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .select();
-
-    if (updateResult.error) {
-      console.error('All update attempts failed. Final error:', updateResult.error);
-      return new Response(JSON.stringify({
-        success: false,
-        error: 'Failed to update job order with Google Doc URL',
-        details: updateResult.error.message,
-        receivedData: requestBody
-      }), {
-        status: 500,
-        headers: {
-          "Content-Type": "application/json",
-          ...getCorsHeaders(req)
-        }
-      });
-    }
-
-    console.log('Successfully updated most recent job order. Final URL in database:', updateResult.data[0].google_doc_url);
-
+    // No matching job found — return error instead of blindly updating the most recent one
+    console.error('Could not identify which job to update. jobId:', jobId, 'job_title:', job_title, 'company:', company);
     return new Response(JSON.stringify({
-      success: true,
-      googleDocUrl: updateResult.data[0].google_doc_url,
-      message: 'Google Doc URL saved successfully to most recent job order',
-      updatedRecord: updateResult.data[0]
+      success: false,
+      error: 'Could not identify which job to update. Please provide a valid jobId or matching job_title and company.',
+      receivedData: { jobId, job_title, company, googleDocUrl }
     }), {
+      status: 404,
       headers: {
         "Content-Type": "application/json",
         ...getCorsHeaders(req)

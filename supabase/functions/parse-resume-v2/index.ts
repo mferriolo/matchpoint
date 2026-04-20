@@ -44,7 +44,7 @@ Deno.serve(async (req) => {
       } else if (fileType.includes('word')) {
         // Basic DOCX text extraction
         resumeText = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
-        const matches = resumeText.match(/[\x20-\x7E]+/g)
+        const matches = resumeText.match(/[\x20-\x7E\xA0-\xFF\u0100-\u024F]+/g)
         if (matches) resumeText = matches.join(' ')
       }
     } else if (body.resumeText) {

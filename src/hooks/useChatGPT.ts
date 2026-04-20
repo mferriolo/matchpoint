@@ -235,7 +235,6 @@ export const useChatGPT = () => {
         // Retry on fetch/network errors
         if (retries > 0 && (error.message?.includes('fetch') || error.message?.includes('network') || error.message?.includes('Failed'))) {
           console.warn(`Retrying AI call (${retries} retries left) after error:`, error.message);
-          setLoading(false);
           await new Promise(r => setTimeout(r, 1500));
           return callChatGPT(action, data, retries - 1);
         }
@@ -266,7 +265,6 @@ export const useChatGPT = () => {
       // Retry on fetch failures
       if (retries > 0 && (error?.message?.includes('fetch') || error?.message?.includes('Failed to fetch') || error?.message?.includes('network'))) {
         console.warn(`Retrying AI call (${retries} retries left) after error:`, error.message);
-        setLoading(false);
         await new Promise(r => setTimeout(r, 1500));
         return callChatGPT(action, data, retries - 1);
       }
