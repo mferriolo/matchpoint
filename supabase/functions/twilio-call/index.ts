@@ -34,7 +34,10 @@ Deno.serve(async (req) => {
         const formData = new URLSearchParams();
         formData.append('To', to);
         formData.append('From', twilioPhone);
-        formData.append('Url', callbackUrl || 'http://demo.twilio.com/docs/voice.xml');
+        if (!callbackUrl) {
+          throw new Error('callbackUrl is required for make_call');
+        }
+        formData.append('Url', callbackUrl);
         
         // Add voicemail handling if provided
         if (voicemailUrl) {

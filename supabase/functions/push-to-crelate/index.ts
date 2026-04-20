@@ -10,7 +10,7 @@ function getCorsHeaders(req: Request) {
 }
 const SU=Deno.env.get("SUPABASE_URL")!,SK=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const sb=createClient(SU,SK);
-const CB="https://app.crelate.com/api3",BO="91835d38-fcfd-4128-10d3-f959ef60dc08",SL="05bdf87b-cdde-48d2-bfe7-aa6a0126d947",DL=400;
+const CB="https://app.crelate.com/api3",BO=Deno.env.get("CRELATE_OPPORTUNITY_TYPE_ID")||"91835d38-fcfd-4128-10d3-f959ef60dc08",SL=Deno.env.get("CRELATE_SALES_WORKFLOW_STATUS_ID")||"05bdf87b-cdde-48d2-bfe7-aa6a0126d947",DL=400;
 const W=(ms:number)=>new Promise(r=>setTimeout(r,ms));
 const UI=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ok=(v:any)=>typeof v==='string'&&UI.test(v);

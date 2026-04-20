@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { ThemeProvider } from "@/components/theme-provider";
 import { CallPromptProvider } from "@/contexts/CallPromptContext";
+import ErrorBoundary from "@/components/ErrorBoundary";
 import Index from "./pages/Index";
 import Admin from "./pages/Admin";
 import ResumeParser from "./pages/ResumeParser";
@@ -21,6 +22,7 @@ import MarketingNewJobs from "./pages/MarketingNewJobs";
 const queryClient = new QueryClient();
 
 const App = () => (
+  <ErrorBoundary>
   <ThemeProvider defaultTheme="light">
     <CallPromptProvider>
       <QueryClientProvider client={queryClient}>
@@ -47,6 +49,7 @@ const App = () => (
       </QueryClientProvider>
     </CallPromptProvider>
   </ThemeProvider>
+  </ErrorBoundary>
 );
 
 

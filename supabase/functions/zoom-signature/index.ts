@@ -23,15 +23,13 @@ Deno.serve(async (req) => {
     const sdkKey = Deno.env.get("ZOOM_SDK_KEY");
     const sdkSecret = Deno.env.get("ZOOM_SDK_SECRET");
 
-    console.log('SDK Key available:', !!sdkKey);
-    console.log('SDK Secret available:', !!sdkSecret);
 
     if (!sdkKey || !sdkSecret) {
       throw new Error('Zoom SDK credentials not configured');
     }
 
     // Create JWT payload for Zoom Web SDK
-    const iat = Math.round(new Date().getTime() / 1000) - 30;
+    const iat = Math.round(new Date().getTime() / 1000);
     const exp = iat + 60 * 60 * 2; // 2 hours
 
     const header = {
@@ -49,7 +47,6 @@ Deno.serve(async (req) => {
       alg: 'HS256'
     };
 
-    console.log('Generating signature for meeting:', meetingNumber, 'with role:', role);
 
     // Base64 URL encode function
     const base64UrlEncode = (obj: any) => {
@@ -85,7 +82,6 @@ Deno.serve(async (req) => {
 
     const signature = `${headerEncoded}.${payloadEncoded}.${signatureBase64}`;
 
-    console.log('Generated signature successfully');
 
     return new Response(JSON.stringify({ 
       signature,
