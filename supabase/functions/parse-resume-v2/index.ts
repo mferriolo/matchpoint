@@ -1,13 +1,18 @@
 import * as pdfjsLib from 'npm:pdfjs-dist@4.0.379'
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+const ALLOWED_ORIGINS = ['https://matchpoint-nu-dun.vercel.app', 'http://localhost:8080', 'http://localhost:5173'];
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  };
 }
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders })
+    return new Response('ok', { headers: getCorsHeaders(req) })
   }
 
   try {
@@ -51,7 +56,7 @@ Deno.serve(async (req) => {
         JSON.stringify({ 
           error: 'Could not extract text. File may be scanned/image-based. Try a text-based PDF or DOCX.'
         }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' } }
       )
     }
 
@@ -74,17 +79,20 @@ Deno.serve(async (req) => {
     })
 
     const data = await aiRes.json()
-    const parsed = JSON.parse(data.choices[0].message.content.replace(/```json|```/g, ''))
-    
+    const rawContent = (data?.choices?.[0]?.message?.content || '').replace(/```json\n?|```\n?/g, '').trim()
+    let parsed: any
+    try { parsed = JSON.parse(rawContent) }
+    catch { return new Response(JSON.stringify({ error: 'AI returned invalid JSON', raw: rawContent.substring(0, 500) }), { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' } }) }
+
     return new Response(
       JSON.stringify(parsed),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' } }
     )
 
   } catch (error) {
     return new Response(
       JSON.stringify({ error: error.message }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' } }
     )
   }
 })

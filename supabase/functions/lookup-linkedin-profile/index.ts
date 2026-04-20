@@ -1,3 +1,14 @@
+
+const ALLOWED_ORIGINS = ['https://matchpoint-nu-dun.vercel.app', 'http://localhost:8080', 'http://localhost:5173'];
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  };
+}
+
 // lookup-linkedin-profile — given a name, return the person's CURRENT
 // company and LinkedIn URL per their most recent LinkedIn profile
 // snippet. Used by the duplicate-review UI so the user can see which
@@ -15,10 +26,6 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-export const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
-};
 
 const SERP_BASE = "https://serpapi.com/search.json";
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -202,7 +209,7 @@ function resultMatchesPerson(r: any, firstName: string, lastName: string): boole
 }
 
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: getCorsHeaders(req) });
 
   try {
     const body = await req.json().catch(() => ({}));
@@ -218,7 +225,7 @@ Deno.serve(async (req) => {
 
     if (!firstName || !lastName) {
       return new Response(JSON.stringify({ success: false, error: 'firstName and lastName are required' }), {
-        status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        status: 400, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
       });
     }
 
@@ -293,7 +300,7 @@ Deno.serve(async (req) => {
               snippet: cached.snippet,
               cached: true,
               cached_age_days: 0,
-            }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+            }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
           }
           if (age >= 60 * 60 * 1000) {
             // Stale null-extraction; fall through to re-query SerpAPI.
@@ -306,7 +313,7 @@ Deno.serve(async (req) => {
               snippet: cached.snippet,
               cached: true,
               cached_age_days: Math.round(age / (24 * 60 * 60 * 1000)),
-            }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+            }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
           }
         } else if (age < CACHE_TTL_MS) {
           return new Response(JSON.stringify({
@@ -317,7 +324,7 @@ Deno.serve(async (req) => {
             snippet: cached.snippet,
             cached: true,
             cached_age_days: Math.round(age / (24 * 60 * 60 * 1000)),
-          }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+          }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
         }
       }
     }
@@ -335,7 +342,7 @@ Deno.serve(async (req) => {
         success: false,
         error: `Missing key(s): ${!serpKey ? 'SerpAPI ' : ''}${!openaiKey ? 'OpenAI ' : ''}(case-insensitive lookup tried). Env vars visible to the function: ${envKeys.join(', ')}`,
       }), {
-        status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        status: 500, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
       });
     }
 
@@ -359,7 +366,7 @@ Deno.serve(async (req) => {
         friendly = `SerpAPI 401 Unauthorized — the SERP_API_KEY secret is wrong or revoked. Update it in Supabase → Edge Functions → Secrets and the function will pick it up on next deploy.`;
       }
       return new Response(JSON.stringify({ success: false, error: friendly }), {
-        status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        status: 200, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
       });
     }
     const d = await r.json();
@@ -427,7 +434,7 @@ Deno.serve(async (req) => {
           : `SerpAPI returned 0 LinkedIn profiles for "${firstName} ${lastName}".`,
         rejected_candidates: rejectedTrail,
         cached: false,
-      }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+      }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
     }
     const firstLI = primary;
     // Alternative profiles = all other name-matching LinkedIn results.
@@ -580,12 +587,12 @@ Use null for a field only when you genuinely cannot find it in the result text. 
       alternative_profiles: alternativeProfiles,
       manual_override: !!manualUrl,
       cached: false,
-    }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+    }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
 
   } catch (error) {
     console.error('lookup-linkedin-profile error:', error);
     return new Response(JSON.stringify({ success: false, error: (error as Error).message }), {
-      status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      status: 500, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
     });
   }
 });

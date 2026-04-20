@@ -1,3 +1,14 @@
+
+const ALLOWED_ORIGINS = ['https://matchpoint-nu-dun.vercel.app', 'http://localhost:8080', 'http://localhost:5173'];
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  };
+}
+
 // enrich-contacts — fills in missing fields on EXISTING contacts.
 // Different from find-contacts (which discovers new people at a
 // company). Here we take a list of contact IDs the user has selected
@@ -21,10 +32,6 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 declare const EdgeRuntime: { waitUntil: (p: Promise<unknown>) => void };
 
-export const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
-};
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
 const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -778,14 +785,14 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
 // ----------------- HTTP handler -----------------
 
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: getCorsHeaders(req) });
 
   try {
     const body = await req.json().catch(() => ({}));
     const contactIds: string[] = Array.isArray(body.contactIds) ? body.contactIds.filter((x: any) => typeof x === 'string') : [];
     if (contactIds.length === 0) {
       return new Response(JSON.stringify({ success: false, error: 'contactIds array is required and must be non-empty' }), {
-        status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        status: 400, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
       });
     }
 
@@ -839,7 +846,7 @@ Deno.serve(async (req) => {
         },
         visible_env_var_names: visible,
       }), {
-        status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        status: 500, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
       });
     }
     console.log(`enrich-contacts keys: SerpAPI=${serpPick.matched || '(none)'}, OpenAI=${openaiPick.matched || '(none)'}, Lusha=${lushaPick.matched || '(none)'}, Apollo=${apolloPick.matched || '(none)'}, Hunter=${hunterPick.matched || '(none)'}`);
@@ -861,7 +868,7 @@ Deno.serve(async (req) => {
     }).select('id').single();
     if (insertErr || !runRow) {
       return new Response(JSON.stringify({ success: false, error: `Failed to create run: ${insertErr?.message || 'unknown'}` }), {
-        status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        status: 500, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
       });
     }
 
@@ -879,12 +886,12 @@ Deno.serve(async (req) => {
         apollo: !!apolloKey,
         hunter: !!hunterKey,
       },
-    }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+    }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
 
   } catch (error) {
     console.error('enrich-contacts error:', error);
     return new Response(JSON.stringify({ success: false, error: (error as Error).message }), {
-      status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      status: 500, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
     });
   }
 });

@@ -1,7 +1,13 @@
-export const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
-};
+
+const ALLOWED_ORIGINS = ['https://matchpoint-nu-dun.vercel.app', 'http://localhost:8080', 'http://localhost:5173'];
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  };
+}
 
 const CRELATE_BASE = "https://app.crelate.com/api3";
 
@@ -35,11 +41,11 @@ async function cPut(path: string, apiKey: string, entity: Record<string, any>): 
 }
 
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: getCorsHeaders(req) });
 
   try {
     const apiKey = Deno.env.get("CRELATE_API_KEY");
-    if (!apiKey) return new Response(JSON.stringify({ error: "No API key" }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+    if (!apiKey) return new Response(JSON.stringify({ error: "No API key" }), { status: 500, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
 
     const body = await req.json().catch(() => ({}));
     const testType = body.test || 'help';
@@ -150,6 +156,242 @@ Deno.serve(async (req) => {
       results.uniqueSalesStagesFromJobs = salesStages;
     }
 
+    else if (testType === 'list_opportunity_types') {
+      const r = await cGet('/opportunitytypes', apiKey, { take: '50' });
+      results.dataCount = r?.Data?.length;
+      results.types = (r?.Data || []).map((t: any) => ({
+        Id: t.Id,
+        Name: t.Name,
+        Description: t.Description,
+        DefaultWorkflowId: t.DefaultWorkflowId,
+        DefaultStatusId: t.DefaultStatusId,
+        WorkflowId: t.WorkflowId,
+        SalesWorkflowId: t.SalesWorkflowId,
+        SortOrder: t.SortOrder,
+      }));
+      results.firstFullEntry = (r?.Data || [])[0];
+    }
+
+    else if (testType === 'list_workflow_statuses') {
+      const r = await cGet('/workflowstatuses', apiKey, { take: '200' });
+      results.dataCount = r?.Data?.length;
+      results.statuses = (r?.Data || []).map((s: any) => ({
+        Id: s.Id,
+        Name: s.Name,
+        Description: s.Description,
+        EntityType: s.EntityType,
+        WorkflowId: s.WorkflowId,
+        MeaningId: s.MeaningId,
+        SortOrder: s.SortOrder,
+      }));
+    }
+
+    else if (testType === 'patch_sales_stage_test') {
+      const jobId = body.jobId;
+      const stageId = body.stageId || '05bdf87b-cdde-48d2-bfe7-aa6a0126d947';
+      if (!jobId) return new Response(JSON.stringify({ error: "Need jobId" }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
+      const before = await cGet(`/jobs/${jobId}`, apiKey);
+      results.before = { SalesWorkflowItemStatusId: before?.Data?.SalesWorkflowItemStatusId, IsLead: before?.Data?.IsLead };
+      const patchRes = await cPatch(`/jobs/${jobId}`, apiKey, { SalesWorkflowItemStatusId: { Id: stageId } });
+      results.patch = { status: patchRes.status, ok: patchRes.ok, data: typeof patchRes.data === 'string' ? patchRes.data.substring(0, 300) : patchRes.data };
+      await new Promise(r => setTimeout(r, 1500));
+      const after = await cGet(`/jobs/${jobId}`, apiKey);
+      results.after = { SalesWorkflowItemStatusId: after?.Data?.SalesWorkflowItemStatusId, IsLead: after?.Data?.IsLead };
+      results.stuck = after?.Data?.SalesWorkflowItemStatusId?.Id === stageId;
+    }
+
+    else if (testType === 'try_lead_payloads') {
+      // Tries multiple payload shapes against a real job and reports which (if any) make the status stick to Lead.
+      const jobId = body.jobId;
+      const leadId = '05bdf87b-cdde-48d2-bfe7-aa6a0126d947';
+      if (!jobId) return new Response(JSON.stringify({ error: "Need jobId" }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
+      const tries: Array<{ name: string; payload: Record<string, any> }> = [
+        { name: 'IsLead_true_only', payload: { IsLead: true } },
+        { name: 'IsLead_true_with_status', payload: { IsLead: true, SalesWorkflowItemStatusId: { Id: leadId } } },
+        { name: 'WorkflowItemStatusId', payload: { WorkflowItemStatusId: { Id: leadId } } },
+        { name: 'WorkflowStatusId', payload: { WorkflowStatusId: { Id: leadId } } },
+        { name: 'StatusId', payload: { StatusId: { Id: leadId } } },
+        { name: 'Status_Title', payload: { SalesWorkflowItemStatusId: { Id: leadId, Title: 'Lead' } } },
+      ];
+      const trial: any[] = [];
+      for (const t of tries) {
+        const r = await cPatch(`/jobs/${jobId}`, apiKey, t.payload);
+        await new Promise(r2 => setTimeout(r2, 1200));
+        const rb = await cGet(`/jobs/${jobId}`, apiKey);
+        trial.push({
+          name: t.name,
+          patch_status: r.status,
+          patch_ok: r.ok,
+          after_SalesWorkflowItemStatusId: rb?.Data?.SalesWorkflowItemStatusId,
+          after_IsLead: rb?.Data?.IsLead,
+          stuck: rb?.Data?.SalesWorkflowItemStatusId?.Id === leadId,
+        });
+        await new Promise(r2 => setTimeout(r2, 800));
+      }
+      results.trials = trial;
+    }
+
+    else if (testType === 'try_status_transition_methods') {
+      const jobId = body.jobId;
+      const leadId = '05bdf87b-cdde-48d2-bfe7-aa6a0126d947';
+      if (!jobId) return new Response(JSON.stringify({ error: "Need jobId" }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
+      const trial: any[] = [];
+
+      // 1) PUT full entity (read-modify-write)
+      const cur = await cGet(`/jobs/${jobId}`, apiKey);
+      if (cur?.Data) {
+        const ent = { ...cur.Data, SalesWorkflowItemStatusId: { Id: leadId } };
+        const r = await cPut(`/jobs/${jobId}`, apiKey, ent);
+        await new Promise(r2 => setTimeout(r2, 1200));
+        const rb = await cGet(`/jobs/${jobId}`, apiKey);
+        trial.push({ method: 'PUT_full_entity', status: r.status, ok: r.ok, after: rb?.Data?.SalesWorkflowItemStatusId, stuck: rb?.Data?.SalesWorkflowItemStatusId?.Id === leadId });
+      }
+
+      // 2) PUT just status
+      {
+        const r = await cPut(`/jobs/${jobId}`, apiKey, { Id: jobId, SalesWorkflowItemStatusId: { Id: leadId } });
+        await new Promise(r2 => setTimeout(r2, 1200));
+        const rb = await cGet(`/jobs/${jobId}`, apiKey);
+        trial.push({ method: 'PUT_id_status', status: r.status, ok: r.ok, after: rb?.Data?.SalesWorkflowItemStatusId, stuck: rb?.Data?.SalesWorkflowItemStatusId?.Id === leadId });
+      }
+
+      // 3) POST to /jobs/{id}/status
+      try {
+        const res = await fetch(`${CRELATE_BASE}/jobs/${jobId}/status`, { method: 'POST', headers: { 'X-Api-Key': apiKey, 'Accept': 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ entity: { SalesWorkflowItemStatusId: { Id: leadId } } }) });
+        const t = await res.text();
+        trial.push({ method: 'POST_status_endpoint', status: res.status, body: t.substring(0, 200) });
+      } catch (e) { trial.push({ method: 'POST_status_endpoint', error: (e as Error).message }); }
+
+      // 4) PATCH using only the bare ID (string instead of object)
+      {
+        const r = await cPatch(`/jobs/${jobId}`, apiKey, { SalesWorkflowItemStatusId: leadId });
+        await new Promise(r2 => setTimeout(r2, 1200));
+        const rb = await cGet(`/jobs/${jobId}`, apiKey);
+        trial.push({ method: 'PATCH_id_string', status: r.status, ok: r.ok, after: rb?.Data?.SalesWorkflowItemStatusId, stuck: rb?.Data?.SalesWorkflowItemStatusId?.Id === leadId });
+      }
+
+      // 5) PATCH with title-only object (no Id)
+      {
+        const r = await cPatch(`/jobs/${jobId}`, apiKey, { SalesWorkflowItemStatusId: { Title: 'Lead' } });
+        await new Promise(r2 => setTimeout(r2, 1200));
+        const rb = await cGet(`/jobs/${jobId}`, apiKey);
+        trial.push({ method: 'PATCH_title_only', status: r.status, ok: r.ok, after: rb?.Data?.SalesWorkflowItemStatusId, stuck: rb?.Data?.SalesWorkflowItemStatusId?.Id === leadId });
+      }
+
+      // 6) PATCH wrapped in an array (Crelate sometimes uses arrays for these "lookup" fields)
+      {
+        const r = await cPatch(`/jobs/${jobId}`, apiKey, { SalesWorkflowItemStatusId: [{ Id: leadId }] });
+        await new Promise(r2 => setTimeout(r2, 1200));
+        const rb = await cGet(`/jobs/${jobId}`, apiKey);
+        trial.push({ method: 'PATCH_array_wrap', status: r.status, ok: r.ok, after: rb?.Data?.SalesWorkflowItemStatusId, stuck: rb?.Data?.SalesWorkflowItemStatusId?.Id === leadId });
+      }
+
+      results.trials = trial;
+    }
+
+    else if (testType === 'patch_lead_with_close') {
+      const jobId = body.jobId;
+      const leadId = '05bdf87b-cdde-48d2-bfe7-aa6a0126d947';
+      if (!jobId) return new Response(JSON.stringify({ error: "Need jobId" }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
+      const now = new Date().toISOString();
+      const before = await cGet(`/jobs/${jobId}`, apiKey);
+      results.before = { SalesWorkflowItemStatusId: before?.Data?.SalesWorkflowItemStatusId, ClosedOn: before?.Data?.ClosedOn };
+      const r = await cPatch(`/jobs/${jobId}`, apiKey, { SalesWorkflowItemStatusId: { Id: leadId }, ClosedOn: now, UserCloseDate: now });
+      results.patch = { status: r.status, ok: r.ok };
+      await new Promise(r2 => setTimeout(r2, 1500));
+      const after = await cGet(`/jobs/${jobId}`, apiKey);
+      results.after = { SalesWorkflowItemStatusId: after?.Data?.SalesWorkflowItemStatusId, ClosedOn: after?.Data?.ClosedOn };
+      results.stuck_at_lead = after?.Data?.SalesWorkflowItemStatusId?.Id === leadId;
+    }
+
+    else if (testType === 'cleanup_test_lead_jobs') {
+      // Deletes any job created by our test runs (LEAD-TEST or OPP-TEST prefixes).
+      const r = await cGet('/jobs', apiKey, { take: '100', search: 'TEST' });
+      const targets = (r?.Data || []).filter((j: any) => /^(LEAD-TEST|OPP-TEST)/i.test(j.Name || ''));
+      results.found = targets.length;
+      results.deleted = [];
+      for (const j of targets) {
+        const dr = await fetch(`${CRELATE_BASE}/jobs/${j.Id}`, { method: 'DELETE', headers: { 'X-Api-Key': apiKey, 'Accept': 'application/json' } });
+        results.deleted.push({ id: j.Id, name: j.Name, status: dr.status });
+        await new Promise(r2 => setTimeout(r2, 400));
+      }
+    }
+
+    else if (testType === 'try_opp_types') {
+      // POST a throwaway job under each interesting OpportunityTypeId, observe where it lands.
+      const baseName = body.name || `OPP-TEST ${Date.now()}`;
+      const leadId = '05bdf87b-cdde-48d2-bfe7-aa6a0126d947';
+      const types: Array<{ name: string; id: string }> = [
+        { name: 'BusinessDevelopmentOpportunity', id: '91835d38-fcfd-4128-10d3-f959ef60dc08' },
+        { name: 'Job', id: '68c36ca7-bc76-4ca0-8584-a813004b9fbd' },
+        { name: 'ExecutiveSearchMedCentric', id: '065e04c5-872f-42b0-99b1-a9cb00f30dcc' },
+        { name: 'EmploymentSearch', id: '178677e5-8187-447a-a455-a813004b9fbd' },
+      ];
+      const trial: any[] = [];
+      for (const t of types) {
+        // Try plain (no status), then with explicit Lead status, then with IsLead.
+        for (const variant of [
+          { v: 'plain', extra: {} },
+          { v: 'with_lead_status', extra: { SalesWorkflowItemStatusId: { Id: leadId } } },
+          { v: 'with_isLead', extra: { IsLead: true } },
+        ]) {
+          const ent: Record<string, any> = { Name: `${baseName} ${t.name} ${variant.v}`, NumberOfOpenings: 1, OpportunityTypeId: { Id: t.id }, ...variant.extra };
+          const r = await cPost('/jobs', apiKey, ent);
+          let createdId: string | null = null;
+          if (r.ok) createdId = (typeof r.data?.Data === 'string') ? r.data.Data : (r.data?.Data?.Id || null);
+          await new Promise(r2 => setTimeout(r2, 1000));
+          let after: any = null;
+          if (createdId) { const rb = await cGet(`/jobs/${createdId}`, apiKey); after = rb?.Data; }
+          trial.push({
+            opportunityType: t.name,
+            variant: variant.v,
+            post_status: r.status,
+            createdId,
+            after_SalesWorkflowItemStatusId: after?.SalesWorkflowItemStatusId,
+            after_WorkflowTypeId: after?.WorkflowTypeId,
+            after_IsLead: after?.IsLead,
+            stuck_at_lead: after?.SalesWorkflowItemStatusId?.Id === leadId,
+          });
+          await new Promise(r2 => setTimeout(r2, 500));
+        }
+      }
+      results.trials = trial;
+    }
+
+    else if (testType === 'try_lead_create') {
+      // POST a brand new throwaway job with various payload shapes; report which ones actually create the job at Lead.
+      const leadId = '05bdf87b-cdde-48d2-bfe7-aa6a0126d947';
+      const baseName = body.name || `LEAD-TEST ${Date.now()}`;
+      const tries: Array<{ name: string; extra: Record<string, any> }> = [
+        { name: 'plain_status_only', extra: { SalesWorkflowItemStatusId: { Id: leadId } } },
+        { name: 'isLead_only', extra: { IsLead: true } },
+        { name: 'isLead_plus_status', extra: { IsLead: true, SalesWorkflowItemStatusId: { Id: leadId } } },
+        { name: 'workflowStatusId', extra: { WorkflowStatusId: { Id: leadId } } },
+      ];
+      const trial: any[] = [];
+      for (const t of tries) {
+        const ent: Record<string, any> = { Name: `${baseName} ${t.name}`, NumberOfOpenings: 1, OpportunityTypeId: { Id: '91835d38-fcfd-4128-10d3-f959ef60dc08' }, ...t.extra };
+        const r = await cPost('/jobs', apiKey, ent);
+        let createdId: string | null = null;
+        if (r.ok) createdId = (typeof r.data?.Data === 'string') ? r.data.Data : (r.data?.Data?.Id || null);
+        await new Promise(r2 => setTimeout(r2, 1200));
+        let after: any = null;
+        if (createdId) { const rb = await cGet(`/jobs/${createdId}`, apiKey); after = rb?.Data; }
+        trial.push({
+          name: t.name,
+          post_status: r.status,
+          post_ok: r.ok,
+          createdId,
+          after_SalesWorkflowItemStatusId: after?.SalesWorkflowItemStatusId,
+          after_IsLead: after?.IsLead,
+          after_ClosedOn: after?.ClosedOn,
+          stuck: after?.SalesWorkflowItemStatusId?.Id === leadId,
+        });
+        await new Promise(r2 => setTimeout(r2, 600));
+      }
+      results.trials = trial;
+    }
+
     else if (testType === 'create_job_title') {
       const title = body.title || "Medical Director";
       const r1 = await cPost('/jobtitles', apiKey, { Title: title });
@@ -158,14 +400,14 @@ Deno.serve(async (req) => {
 
     else if (testType === 'search_company') {
       const name = body.name || body.search || '';
-      if (!name) return new Response(JSON.stringify({ error: "Need name" }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+      if (!name) return new Response(JSON.stringify({ error: "Need name" }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
       const r1 = await cGet('/companies', apiKey, { search: name, take: '25' });
       results.searchResults = (r1?.Data || []).map((c: any) => ({ Id: c.Id, Name: c.Name }));
     }
 
     else if (testType === 'read_existing_job') {
       const jobId = body.jobId;
-      if (!jobId) return new Response(JSON.stringify({ error: "Need jobId" }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+      if (!jobId) return new Response(JSON.stringify({ error: "Need jobId" }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
       const getRes = await cGet(`/jobs/${jobId}`, apiKey);
       const jobData = getRes?.Data || getRes || {};
       results.nonNullFields = {};
@@ -181,7 +423,7 @@ Deno.serve(async (req) => {
 
     else if (testType === 'delete_job') {
       const jobId = body.jobId;
-      if (!jobId) return new Response(JSON.stringify({ error: "Need jobId" }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+      if (!jobId) return new Response(JSON.stringify({ error: "Need jobId" }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
       const res = await fetch(`${CRELATE_BASE}/jobs/${jobId}`, { method: 'DELETE', headers: { 'X-Api-Key': apiKey, 'Accept': 'application/json' } });
       results.delete = { status: res.status, body: await res.text() };
     }
@@ -221,11 +463,11 @@ Deno.serve(async (req) => {
     }
 
     return new Response(JSON.stringify({ success: true, results }, null, 2), {
-      headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
     });
   } catch (error) {
     return new Response(JSON.stringify({ error: (error as Error).message }), {
-      status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      status: 500, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
     });
   }
 });

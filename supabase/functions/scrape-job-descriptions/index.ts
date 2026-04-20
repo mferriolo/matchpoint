@@ -1,9 +1,14 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-export const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
-};
+const ALLOWED_ORIGINS = ['https://matchpoint-nu-dun.vercel.app', 'http://localhost:8080', 'http://localhost:5173'];
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  };
+}
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
 const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -200,10 +205,10 @@ async function scrapeJobDescription(url: string): Promise<{ text: string | null;
 }
 
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: getCorsHeaders(req) });
 
   try {
-    const R = (o: any) => new Response(JSON.stringify(o), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+    const R = (o: any) => new Response(JSON.stringify(o), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
     const st = Date.now();
 
     let body: any = {};
@@ -314,7 +319,7 @@ Deno.serve(async (req) => {
   } catch (e) {
     console.error('TOP ERROR:', (e as Error).message);
     return new Response(JSON.stringify({ success: false, error: (e as Error).message }), {
-      headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
     });
   }
 });

@@ -1,11 +1,17 @@
-export const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
-};
+
+const ALLOWED_ORIGINS = ['https://matchpoint-nu-dun.vercel.app', 'http://localhost:8080', 'http://localhost:5173'];
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  };
+}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
+    return new Response('ok', { headers: getCorsHeaders(req) });
   }
 
   try {
@@ -80,17 +86,19 @@ Create 5-7 knockout questions that will help screen candidates for both qualific
     
     // Clean up any markdown formatting
     content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    
-    // Parse the JSON
-    const result = JSON.parse(content);
-    
+
+    // Parse the JSON safely
+    let result: any;
+    try { result = JSON.parse(content); }
+    catch { result = { questions: [], error: 'AI returned invalid JSON' }; }
+
     console.log('Parsed questions:', result.questions);
     
     return new Response(
       JSON.stringify(result),
       { 
         status: 200,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
       }
     );
     
@@ -103,7 +111,7 @@ Create 5-7 knockout questions that will help screen candidates for both qualific
       }),
       { 
         status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
       }
     );
   }

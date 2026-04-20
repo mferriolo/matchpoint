@@ -1,5 +1,13 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-export const corsHeaders = {'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'authorization, x-client-info, apikey, content-type'};
+const ALLOWED_ORIGINS = ['https://matchpoint-nu-dun.vercel.app', 'http://localhost:8080', 'http://localhost:5173'];
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  };
+}
 const SU=Deno.env.get("SUPABASE_URL")!,SK=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const sb=createClient(SU,SK);
 const CB="https://app.crelate.com/api3",BO="91835d38-fcfd-4128-10d3-f959ef60dc08",SL="05bdf87b-cdde-48d2-bfe7-aa6a0126d947",DL=400;
@@ -125,10 +133,10 @@ async function fCt(fn:string,ln:string,k:string){try{const r=await G('/contacts'
 
 Deno.serve(async(req)=>{
   console.log('[v54] Function invoked, method:', req.method, 'url:', req.url);
-  if(req.method==='OPTIONS')return new Response('ok',{headers:corsHeaders});
+  if(req.method==='OPTIONS')return new Response('ok',{headers:getCorsHeaders(req)});
   try{
     const st=Date.now();
-    const R=(o:any)=>new Response(JSON.stringify(o),{headers:{'Content-Type':'application/json',...corsHeaders}});
+    const R=(o:any)=>new Response(JSON.stringify(o),{headers:{'Content-Type':'application/json',...getCorsHeaders(req)}});
     const k=Deno.env.get("CRELATE_API_KEY");
     if(!k)return R({error:"No key",success:false});
     let b:any;
@@ -231,6 +239,6 @@ return R({success:true,v:'51',summary:{total:recs.length,ok:results.filter(r=>r.
 
   }catch(topErr){
     console.error('[v54] TOP-LEVEL ERROR:', (topErr as Error).message, (topErr as Error).stack);
-    return new Response(JSON.stringify({success:false,v:'51',error:(topErr as Error).message,stack:((topErr as Error).stack||'').substring(0,500),note:'Top-level catch triggered'}),{headers:{'Content-Type':'application/json',...corsHeaders}});
+    return new Response(JSON.stringify({success:false,v:'51',error:(topErr as Error).message,stack:((topErr as Error).stack||'').substring(0,500),note:'Top-level catch triggered'}),{headers:{'Content-Type':'application/json',...getCorsHeaders(req)}});
   }
 });

@@ -1,12 +1,18 @@
-export const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
-};
+
+const ALLOWED_ORIGINS = ['https://matchpoint-nu-dun.vercel.app', 'http://localhost:8080', 'http://localhost:5173'];
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  };
+}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', {
-      headers: corsHeaders
+      headers: getCorsHeaders(req)
     });
   }
 
@@ -89,7 +95,7 @@ Deno.serve(async (req) => {
     }), {
       headers: {
         "Content-Type": "application/json",
-        ...corsHeaders
+        ...getCorsHeaders(req)
       }
     });
 
@@ -101,7 +107,7 @@ Deno.serve(async (req) => {
       status: 400,
       headers: {
         "Content-Type": "application/json",
-        ...corsHeaders
+        ...getCorsHeaders(req)
       }
     });
   }

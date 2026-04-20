@@ -1,9 +1,14 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-export const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
-};
+const ALLOWED_ORIGINS = ['https://matchpoint-nu-dun.vercel.app', 'http://localhost:8080', 'http://localhost:5173'];
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  };
+}
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
 const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -1149,7 +1154,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
 // HTTP HANDLER
 // ============================================================
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: getCorsHeaders(req) });
   try {
     await cleanupStaleRuns();
     const body = await req.json().catch(() => ({}));
@@ -1171,13 +1176,13 @@ Deno.serve(async (req) => {
     // error string from the helper).
     if (action === 'debug_serp_query') {
       const q = body.q || body.query || '';
-      if (!q) return new Response(JSON.stringify({ success: false, error: 'q required' }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+      if (!q) return new Response(JSON.stringify({ success: false, error: 'q required' }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
       const r = await searchSerpApiBroad(q);
       return new Response(JSON.stringify({
         success: true, query: q, searchSuccess: r.searchSuccess, error: r.error,
         jobsFound: r.jobsFound.length,
         sample: r.jobsFound.slice(0, 3).map(j => ({ title: j.title, company: j.company_name, location: j.location, via: j.via, apply_urls: j.apply_urls }))
-      }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+      }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
     }
 
     // Debug helper: scrape a single career URL and return the extracted
@@ -1185,9 +1190,9 @@ Deno.serve(async (req) => {
     // pulling out without doing any DB writes.
     if (action === 'debug_scrape_career_page') {
       const debugUrl = body.url;
-      if (!debugUrl) return new Response(JSON.stringify({ success: false, error: 'url required' }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+      if (!debugUrl) return new Response(JSON.stringify({ success: false, error: 'url required' }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
       const r = await scrapeCareerPage(debugUrl, body.company || '');
-      return new Response(JSON.stringify({ success: true, url: debugUrl, ats: r.ats, error: r.error, count: r.jobs.length, jobs: r.jobs }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+      return new Response(JSON.stringify({ success: true, url: debugUrl, ats: r.ats, error: r.error, count: r.jobs.length, jobs: r.jobs }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
     }
 
     // ------------------------------------------------------------------
@@ -1202,7 +1207,7 @@ Deno.serve(async (req) => {
       const startMs = Date.now();
       const limit = Math.min(Math.max(Number(body.limit) || 20, 1), 50);
       const offset = Math.max(Number(body.offset) || 0, 0);
-      const R = (o: any) => new Response(JSON.stringify(o), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+      const R = (o: any) => new Response(JSON.stringify(o), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
 
       const serpKey = Deno.env.get("SERP_API_KEY");
       if (!serpKey) return R({ success: false, error: 'SERP_API_KEY not configured' });
@@ -1308,7 +1313,7 @@ Deno.serve(async (req) => {
       const startMs = Date.now();
       const limit = Math.min(Math.max(Number(body.limit) || 25, 1), 100);
       const offset = Math.max(Number(body.offset) || 0, 0);
-      const R = (o: any) => new Response(JSON.stringify(o), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+      const R = (o: any) => new Response(JSON.stringify(o), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
 
       const { data: companies, error: coErr } = await supabase
         .from('marketing_companies')
@@ -1427,9 +1432,9 @@ Deno.serve(async (req) => {
       supabase.from('tracker_runs').update({ status: 'failed', current_step: 'error', completed_at: new Date().toISOString(), error_message: `Background crash: ${err.message}` }).eq('id', rid);
     });
 
-    return new Response(JSON.stringify({ success: true, run_id: rid, message: 'Tracker started. Poll tracker_runs table for progress.' }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+    return new Response(JSON.stringify({ success: true, run_id: rid, message: 'Tracker started. Poll tracker_runs table for progress.' }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
   } catch (error) {
     console.error('Tracker startup error:', error);
-    return new Response(JSON.stringify({ error: (error as Error).message, success: false }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+    return new Response(JSON.stringify({ error: (error as Error).message, success: false }), { status: 500, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
   }
 });

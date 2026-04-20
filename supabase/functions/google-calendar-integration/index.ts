@@ -1,11 +1,17 @@
-export const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
-};
+
+const ALLOWED_ORIGINS = ['https://matchpoint-nu-dun.vercel.app', 'http://localhost:8080', 'http://localhost:5173'];
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  };
+}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
+    return new Response('ok', { headers: getCorsHeaders(req) });
   }
 
   try {
@@ -119,13 +125,21 @@ Deno.serve(async (req) => {
             message: 'Call scheduled successfully',
             event 
           }),
-          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' } }
         );
       }
 
       case 'getAuthUrl': {
         // Generate Google OAuth URL for calendar access
-        const redirectUri = `${req.headers.get('origin')}/auth/google/callback`;
+        // C4 fix: Validate origin against allowlist to prevent open redirect
+        const requestOrigin = req.headers.get('origin') || '';
+        if (!ALLOWED_ORIGINS.includes(requestOrigin)) {
+          return new Response(
+            JSON.stringify({ error: 'Invalid origin' }),
+            { status: 403, headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' } }
+          );
+        }
+        const redirectUri = `${requestOrigin}/auth/google/callback`;
         const scope = 'https://www.googleapis.com/auth/calendar.events';
         
         const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` +
@@ -138,21 +152,21 @@ Deno.serve(async (req) => {
 
         return new Response(
           JSON.stringify({ authUrl }),
-          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' } }
         );
       }
 
       default:
         return new Response(
           JSON.stringify({ error: 'Invalid action' }),
-          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          { status: 400, headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' } }
         );
     }
   } catch (error) {
     console.error('Error:', error);
     return new Response(
       JSON.stringify({ error: error.message }),
-      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      { status: 500, headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' } }
     );
   }
 });

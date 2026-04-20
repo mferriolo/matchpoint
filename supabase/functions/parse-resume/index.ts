@@ -1,8 +1,13 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+const ALLOWED_ORIGINS = ['https://matchpoint-nu-dun.vercel.app', 'http://localhost:8080', 'http://localhost:5173'];
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  };
 }
 
 const toTitleCase = (str: string | null | undefined): string => {
@@ -134,7 +139,7 @@ CRITICAL RULES:
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders })
+    return new Response('ok', { headers: getCorsHeaders(req) })
   }
 
   try {
@@ -146,7 +151,7 @@ Deno.serve(async (req) => {
     if (!openaiApiKey) {
       return new Response(
         JSON.stringify({ error: 'API key not configured' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+        { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }
       )
     }
 
@@ -227,14 +232,15 @@ Return ONLY valid JSON, no explanations.`
         console.error('Vision API error:', await visionResponse.text())
         return new Response(
           JSON.stringify({ error: 'Vision API error' }),
-          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+          { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }
         )
       }
 
       const visionData = await visionResponse.json()
-      const content = visionData.choices[0].message.content
+      const content = visionData?.choices?.[0]?.message?.content || ''
       const jsonStr = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-      parsedData = JSON.parse(jsonStr)
+      try { parsedData = JSON.parse(jsonStr) }
+      catch { return new Response(JSON.stringify({ error: 'AI returned invalid JSON', raw: jsonStr.substring(0, 500) }), { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }) }
       
     } else if (resumeText && typeof resumeText === 'string') {
       console.log('Using text mode, length:', resumeText.length)
@@ -242,7 +248,7 @@ Return ONLY valid JSON, no explanations.`
       if (resumeText.trim().length < 50) {
         return new Response(
           JSON.stringify({ error: 'Resume text too short' }),
-          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+          { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }
         )
       }
 
@@ -303,19 +309,20 @@ Return ONLY valid JSON, no explanations.`
       if (!openaiResponse.ok) {
         return new Response(
           JSON.stringify({ error: 'AI service error' }),
-          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+          { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }
         )
       }
 
       const openaiData = await openaiResponse.json()
-      const content = openaiData.choices[0].message.content
+      const content = openaiData?.choices?.[0]?.message?.content || ''
       const jsonStr = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-      parsedData = JSON.parse(jsonStr)
+      try { parsedData = JSON.parse(jsonStr) }
+      catch { return new Response(JSON.stringify({ error: 'AI returned invalid JSON', raw: jsonStr.substring(0, 500) }), { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }) }
       
     } else {
       return new Response(
         JSON.stringify({ error: 'No resume text or images provided' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+        { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }
       )
     }
 
@@ -356,14 +363,14 @@ Return ONLY valid JSON, no explanations.`
 
     return new Response(
       JSON.stringify(parsedData),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+      { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }
     )
 
   } catch (error) {
     console.error('Error:', error)
     return new Response(
       JSON.stringify({ error: 'Internal server error' }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 }
+      { headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' }, status: 200 }
     )
   }
 })

@@ -1,10 +1,14 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-};
+const ALLOWED_ORIGINS = ['https://matchpoint-nu-dun.vercel.app', 'http://localhost:8080', 'http://localhost:5173'];
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  };
+}
 
 function log(level: string, step: string, message: string, data?: any) {
   const entry = { ts: new Date().toISOString(), level, step, message, ...(data ? { data } : {}) };
@@ -12,9 +16,10 @@ function log(level: string, step: string, message: string, data?: any) {
   else console.log(JSON.stringify(entry));
 }
 
-function jsonResp(data: any, status = 200) {
+function jsonResp(data: any, status = 200, req?: Request) {
+  const cors = req ? getCorsHeaders(req) : { 'Access-Control-Allow-Origin': ALLOWED_ORIGINS[0], 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' };
   return new Response(JSON.stringify(data), {
-    status, headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    status, headers: { 'Content-Type': 'application/json', ...cors },
   });
 }
 
@@ -333,7 +338,8 @@ LIVE = real active healthcare org plausibly hiring this role. DEAD = company doe
         if (bestUrl.includes('google.com/search')) upd.google_jobs_url = bestUrl;
         await sb.from('marketing_jobs').update(upd).eq('id', jobId);
       } else {
-        await sb.from('marketing_jobs').update({ is_closed: true, status: 'Closed', closed_at: now, closed_reason: `Scrub: ${fullReason}`.substring(0, 500), url_status: 'dead', url_check_result: fullReason.substring(0, 500), last_url_check: now, updated_at: now }).eq('id', jobId);
+        // C3 fix: Don't auto-close based on AI alone — flag for human review
+        await sb.from('marketing_jobs').update({ url_status: 'flagged_dead', url_check_result: `Needs review: ${fullReason}`.substring(0, 500), last_url_check: now, updated_at: now }).eq('id', jobId);
       }
     } catch (e: any) { log('ERROR', 'process:db', e.message); }
 
@@ -397,12 +403,12 @@ async function handleLegacyVerify(body: any): Promise<Response> {
     if (r.ok) { const d = await r.json(); const txt = (d?.choices?.[0]?.message?.content || '').trim(); const parts = txt.split('|'); live = (parts[0] || '').toUpperCase().includes('LIVE'); reason = parts.slice(1).join(' ').substring(0, 300) || txt.substring(0, 300); }
   } catch (e: any) { return jsonResp({ total: 1, live_count: 0, dead_count: 0, results: [{ id: jobId, is_live: false, details: 'AI failed', source: 'ai_failed' }], live_job_ids: [], dead_job_ids: [], elapsed_ms: Date.now() - start }); }
   const sb = getSupabaseClient(); const now = new Date().toISOString(); const tag = mode === 'serp_api+ai' ? '[SerpAPI+AI]' : '[AI-only]';
-  try { if (live) await sb.from('marketing_jobs').update({ url_status: 'live', url_check_result: `${tag} ${reason}`.substring(0, 500), last_url_check: now, updated_at: now }).eq('id', jobId); else await sb.from('marketing_jobs').update({ is_closed: true, status: 'Closed', closed_at: now, closed_reason: `Scrub ${tag}: ${reason}`.substring(0, 500), url_status: 'dead', last_url_check: now, updated_at: now }).eq('id', jobId); } catch {}
+  try { if (live) await sb.from('marketing_jobs').update({ url_status: 'live', url_check_result: `${tag} ${reason}`.substring(0, 500), last_url_check: now, updated_at: now }).eq('id', jobId); else await sb.from('marketing_jobs').update({ url_status: 'flagged_dead', url_check_result: `Needs review ${tag}: ${reason}`.substring(0, 500), last_url_check: now, updated_at: now }).eq('id', jobId); } catch {}
   return jsonResp({ total: 1, live_count: live ? 1 : 0, dead_count: live ? 0 : 1, results: [{ id: jobId, job_title: jobTitle, company_name: company, is_live: live, details: reason, source: mode === 'ai_only' ? 'ai_verified' : 'serp_verified', search_mode: mode }], live_job_ids: live ? [jobId] : [], dead_job_ids: live ? [] : [jobId], elapsed_ms: Date.now() - start });
 }
 
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: getCorsHeaders(req) });
   if (req.method === 'GET') { try { return await handleHealthCheck(); } catch (e: any) { return jsonResp({ status: 'error', message: e.message }, 500); } }
   if (req.method === 'POST') {
     let body: any;

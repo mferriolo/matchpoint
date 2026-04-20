@@ -206,17 +206,42 @@ export const CallPromptProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         .insert([dbData])
         .select()
         .single();
-      
+
       console.log('=== DATABASE RESPONSE ===');
       console.log('Error:', error);
       console.log('Returned data:', JSON.stringify(data, null, 2));
-      
+
       if (error) {
-        console.error('❌ Database error saving job:', error);
-        
-        // Check if it's a duplicate key error
+        console.error('Database error saving job:', error);
+
+        // C5 fix: On duplicate key (race condition), fetch the existing job instead of failing silently
         if (error.code === '23505') {
-          console.log('Duplicate key error - job already exists');
+          console.log('Duplicate key - fetching existing job');
+          const { data: existing } = await supabase
+            .from('job_orders')
+            .select('*')
+            .eq('company', jobData.company)
+            .or(`title.eq."${jobData.title.replace(/"/g, '\\"')}",job_title.eq."${jobData.title.replace(/"/g, '\\"')}"`)
+            .limit(1)
+            .single();
+          if (existing) {
+            const existingJob: Job = {
+              id: existing.id,
+              title: existing.title || existing.job_title,
+              company: existing.company,
+              location: existing.location || '',
+              jobType: existing.job_type || undefined,
+              description: existing.description || '',
+              questions: existing.questions || [],
+              sellingPoints: existing.selling_points || [],
+              objections: existing.objections || [],
+              categorizedQuestions: { specificJobQuestions: [], candidateNeeds: [], candidateQualifications: [] },
+              createdAt: new Date(existing.created_at),
+              isActive: existing.is_active !== false,
+              callNotes: []
+            };
+            setJobs(prev => prev.some(j => j.id === existingJob.id) ? prev : [...prev, existingJob]);
+          }
         }
         return;
       }

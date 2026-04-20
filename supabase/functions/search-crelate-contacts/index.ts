@@ -1,9 +1,14 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-export const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
-};
+const ALLOWED_ORIGINS = ['https://matchpoint-nu-dun.vercel.app', 'http://localhost:8080', 'http://localhost:5173'];
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  };
+}
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
 const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -71,7 +76,7 @@ function extractCompanyName(contact: any): string {
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
+    return new Response('ok', { headers: getCorsHeaders(req) });
   }
 
   try {
@@ -90,7 +95,7 @@ Deno.serve(async (req) => {
 
     if (!companiesToSearch?.length) {
       return new Response(JSON.stringify({ success: true, apiVersion: 'v3', contacts_found: 0, contacts_added: 0, companies_searched: 0, duplicates_skipped: 0, companies_with_matches: 0, search_log: [] }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
       });
     }
 
@@ -239,12 +244,12 @@ Deno.serve(async (req) => {
       companies_with_matches: companiesWithMatches, 
       search_log: searchLog,
       timestamp: new Date().toISOString()
-    }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+    }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
 
   } catch (error) {
     console.error('Error:', error);
     return new Response(JSON.stringify({ error: (error as Error).message, success: false }), {
-      status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      status: 500, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
     });
   }
 });
