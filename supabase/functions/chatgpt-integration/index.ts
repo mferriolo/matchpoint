@@ -251,9 +251,12 @@ Deno.serve(async (req) => {
       }
     }
 
-    if (!openaiResponse!.ok) {
-      const errorText = await openaiResponse!.text();
-      console.error('OpenAI API error:', openaiResponse!.status, errorText);
+    if (!openaiResponse || !openaiResponse.ok) {
+      if (!openaiResponse) {
+        return new Response(JSON.stringify({ success: false, error: 'OpenAI request failed after all retries', status: 0 }), { status: 502, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
+      }
+      const errorText = await openaiResponse.text();
+      console.error('OpenAI API error:', openaiResponse.status, errorText);
 
       let errorMessage = 'OpenAI API error';
 
@@ -268,11 +271,11 @@ Deno.serve(async (req) => {
       }
 
       // Check for specific error types
-      if (openaiResponse!.status === 401) {
+      if (openaiResponse.status === 401) {
         errorMessage = 'Invalid OpenAI API key. Please verify the API key is correct and has not expired.';
-      } else if (openaiResponse!.status === 429) {
+      } else if (openaiResponse.status === 429) {
         errorMessage = 'OpenAI API rate limit exceeded. Please try again later.';
-      } else if (openaiResponse!.status === 500 || openaiResponse!.status === 503) {
+      } else if (openaiResponse.status === 500 || openaiResponse.status === 503) {
         errorMessage = 'OpenAI service is temporarily unavailable. Please try again.';
       } else if (errorMessage.includes('model')) {
         errorMessage = `Model error: ${model} may not be available. Please check your model configuration.`;
@@ -282,7 +285,7 @@ Deno.serve(async (req) => {
         JSON.stringify({
           success: false,
           error: errorMessage,
-          status: openaiResponse!.status
+          status: openaiResponse.status
         }),
         { 
           status: 400,
@@ -294,7 +297,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    const result = await openaiResponse!.json();
+    const result = await openaiResponse.json();
     const content = result.choices[0]?.message?.content || '';
     
     console.log('OpenAI API call successful, content length:', content.length);

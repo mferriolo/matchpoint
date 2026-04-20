@@ -81,11 +81,11 @@ Deno.serve(async (req) => {
                 <p><strong>Duration:</strong> ${Math.round((new Date(endTime).getTime() - new Date(startTime).getTime()) / 60000)} minutes</p>
                 <p><strong>Description:</strong> ${escHtml(description)}</p>
                 <br>
-                ${zoomLink && zoomLink.startsWith('https://') ? `<p><a href="${escHtml(zoomLink)}" style="background: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Join Zoom Call</a></p>` : ''}
+                ${zoomLink && zoomLink.startsWith('https://') ? `<p><a href="${encodeURI(zoomLink)}" style="background: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Join Zoom Call</a></p>` : ''}
                 <br>
                 <p>Add to your calendar:</p>
                 <ul>
-                  <li><a href="https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(title)}&dates=${startTime.replace(/[-:]/g, '').replace('.000', '')}/${endTime.replace(/[-:]/g, '').replace('.000', '')}&details=${encodeURIComponent(description + '\n\nZoom Link: ' + zoomLink)}">Add to Google Calendar</a></li>
+                  <li><a href="https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(title)}&dates=${(startTime||'').replace(/[-:.]/g, '').replace(/\d{3}Z?$/, 'Z')}/${(endTime||'').replace(/[-:.]/g, '').replace(/\d{3}Z?$/, 'Z')}&details=${encodeURIComponent((description||'') + (zoomLink ? '\n\nZoom Link: ' + zoomLink : ''))}">Add to Google Calendar</a></li>
                 </ul>
               `
             })

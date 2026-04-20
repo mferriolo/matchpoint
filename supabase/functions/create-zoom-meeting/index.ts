@@ -49,7 +49,9 @@ serve(async (req) => {
         throw new Error(`OAuth failed: ${errorText}`);
       }
 
-      const tokenData = await tokenResponse.json();
+      let tokenData: any;
+      try { tokenData = await tokenResponse.json(); }
+      catch { throw new Error('Zoom OAuth returned invalid JSON'); }
       access_token = tokenData.access_token;
       const expiresIn = tokenData.expires_in || 3600; // default 1 hour
       cachedToken = { token: access_token, expiresAt: Date.now() + expiresIn * 1000 };

@@ -95,6 +95,7 @@ const LiveCall: React.FC<LiveCallProps> = ({ onEndCall }) => {
   const promptsLoadedRef = useRef(false);
   const knockoutQuestionsLoadedRef = useRef(false);
   const currentCallIdRef = useRef<string | null>(null);
+  const pendingTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
 
 
@@ -227,8 +228,9 @@ const LiveCall: React.FC<LiveCallProps> = ({ onEndCall }) => {
 
   // Toggle function for knockout questions
   const toggleKnockoutQuestionAsked = (index: number) => {
+    if (index < 0 || index >= knockoutQuestions.length) return;
     console.log('Toggling knockout question:', index);
-    
+
     setAskedKnockoutQuestions(prev => {
       if (prev.includes(index)) {
         return prev.filter(i => i !== index);
@@ -236,10 +238,10 @@ const LiveCall: React.FC<LiveCallProps> = ({ onEndCall }) => {
         return [...prev, index];
       }
     });
-    
+
     // Add to transcript
     const question = knockoutQuestions[index];
-    handleQuestionAsked(question);
+    if (question) handleQuestionAsked(question);
   };
 
   // Function to capitalize sentences
@@ -299,7 +301,8 @@ const LiveCall: React.FC<LiveCallProps> = ({ onEndCall }) => {
             if (prev.includes(index)) return prev;
             console.log('Auto-detected knockout question:', question);
             // Add to transcript (scheduled outside setter)
-            setTimeout(() => handleQuestionAsked(question), 0);
+            const tid = setTimeout(() => handleQuestionAsked(question), 0);
+            pendingTimeoutsRef.current.push(tid);
             return [...prev, index];
           });
         }
@@ -367,11 +370,12 @@ const LiveCall: React.FC<LiveCallProps> = ({ onEndCall }) => {
     ));
     
     // Stop flashing after 3 seconds and move to bottom
-    setTimeout(() => {
-      setPrompts(current => current.map(p => 
+    const flashTid = setTimeout(() => {
+      setPrompts(current => current.map(p =>
         p.id === promptId ? { ...p, isFlashing: false, acknowledged: true } : p
       ));
     }, 3000);
+    pendingTimeoutsRef.current.push(flashTid);
   };
 
   // Effect to handle speech recognition and recording - WAIT for participant
@@ -608,6 +612,8 @@ const LiveCall: React.FC<LiveCallProps> = ({ onEndCall }) => {
 
     return () => {
       clearInterval(timer);
+      pendingTimeoutsRef.current.forEach(t => clearTimeout(t));
+      pendingTimeoutsRef.current = [];
     };
   }, [currentCall?.id]);
 

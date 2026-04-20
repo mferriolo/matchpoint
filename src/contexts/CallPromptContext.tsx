@@ -125,6 +125,7 @@ export const CallPromptProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       
       if (checkError) {
         console.error('Error checking for existing jobs:', checkError);
+        return; // Don't proceed with insert if we can't verify duplicates
       }
       
       console.log('Existing jobs found:', existingJobs?.length || 0);
