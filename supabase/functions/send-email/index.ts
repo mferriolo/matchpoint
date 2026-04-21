@@ -104,7 +104,9 @@ Deno.serve(async (req)=>{
       },
       body: JSON.stringify(emailData)
     });
-    const result = await response.json();
+    let result: any;
+    try { result = await response.json(); }
+    catch { result = { message: `Resend returned non-JSON response (HTTP ${response.status})` }; }
     if (!response.ok) {
       console.error('Resend API error:', result);
       // Provide helpful error messages

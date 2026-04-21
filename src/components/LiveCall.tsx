@@ -96,6 +96,7 @@ const LiveCall: React.FC<LiveCallProps> = ({ onEndCall }) => {
   const knockoutQuestionsLoadedRef = useRef(false);
   const currentCallIdRef = useRef<string | null>(null);
   const pendingTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const knockoutDetectionLockRef = useRef(false);
 
 
 
@@ -285,7 +286,9 @@ const LiveCall: React.FC<LiveCallProps> = ({ onEndCall }) => {
     }));
     
     // CRITICAL: Also check knockout questions for auto-detection
-    if (knockoutQuestions.length > 0) {
+    // Lock prevents rapid transcript updates from firing duplicate detections
+    if (knockoutQuestions.length > 0 && !knockoutDetectionLockRef.current) {
+      knockoutDetectionLockRef.current = true;
       knockoutQuestions.forEach((question, index) => {
         const normalizedQuestion = question.toLowerCase().trim();
 
@@ -307,6 +310,7 @@ const LiveCall: React.FC<LiveCallProps> = ({ onEndCall }) => {
           });
         }
       });
+      knockoutDetectionLockRef.current = false;
     }
   };
 

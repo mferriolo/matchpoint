@@ -65,6 +65,7 @@ async function aiCall(key: string, prompt: string, maxTok = 3000): Promise<strin
       max_tokens: maxTok,
     }),
   });
+  if (!r.ok) { console.log(`[aiCall] OpenAI HTTP ${r.status}`); return ''; }
   const d = await r.json();
   return d.choices?.[0]?.message?.content || '';
 }

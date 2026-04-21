@@ -57,11 +57,14 @@ Deno.serve(async (req) => {
         });
 
         const result = await response.json();
-        
-        return new Response(JSON.stringify({ 
-          success: true, 
+        if (!response.ok) {
+          return new Response(JSON.stringify({ success: false, error: result.message || `Twilio call failed: HTTP ${response.status}` }), { status: response.status, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
+        }
+
+        return new Response(JSON.stringify({
+          success: true,
           callSid: result.sid,
-          status: result.status 
+          status: result.status
         }), {
           headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
         });
@@ -69,14 +72,14 @@ Deno.serve(async (req) => {
 
       if (action === 'send_sms') {
         const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
-        
+
         const formData = new URLSearchParams();
         formData.append('To', to);
         formData.append('From', twilioPhone);
         formData.append('Body', message || 'Hi, I tried calling you but couldn\'t reach you. Please call me back when you get a chance.');
 
         const auth = btoa(`${accountSid}:${authToken}`);
-        
+
         const response = await fetch(twilioUrl, {
           method: 'POST',
           headers: {
@@ -87,11 +90,14 @@ Deno.serve(async (req) => {
         });
 
         const result = await response.json();
-        
-        return new Response(JSON.stringify({ 
-          success: true, 
+        if (!response.ok) {
+          return new Response(JSON.stringify({ success: false, error: result.message || `Twilio SMS failed: HTTP ${response.status}` }), { status: response.status, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
+        }
+
+        return new Response(JSON.stringify({
+          success: true,
           messageSid: result.sid,
-          status: result.status 
+          status: result.status
         }), {
           headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
         });
