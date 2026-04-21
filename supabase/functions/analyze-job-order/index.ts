@@ -27,6 +27,10 @@ Deno.serve(async (req) => {
       hiringQuestions
     } = await req.json();
 
+    if (!Array.isArray(timingQuestions) || !Array.isArray(jobQuestions) || !Array.isArray(companyQuestions) || !Array.isArray(hiringQuestions)) {
+      return new Response(JSON.stringify({ error: 'Missing required question arrays', timingQuestions: {}, jobQuestions: {}, companyQuestions: {}, hiringQuestions: {} }), { status: 400, headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' } });
+    }
+
     const openAIKey = Deno.env.get("OPENAI_API_KEY");
     if (!openAIKey) {
       throw new Error("OpenAI API key not configured");

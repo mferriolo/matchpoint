@@ -16,7 +16,14 @@ Deno.serve(async (req) => {
 
   try {
     const { candidate, job } = await req.json();
-    
+
+    if (!candidate || typeof candidate !== 'object' || !candidate.first_name || !candidate.last_name) {
+      return new Response(JSON.stringify({ error: 'candidate object with first_name and last_name is required' }), { status: 400, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
+    }
+    if (!job || typeof job !== 'object' || !job.title) {
+      return new Response(JSON.stringify({ error: 'job object with title is required' }), { status: 400, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
+    }
+
     const apiKey = Deno.env.get("OPENAI_API_KEY");
     if (!apiKey) {
       throw new Error("OpenAI API key not configured");

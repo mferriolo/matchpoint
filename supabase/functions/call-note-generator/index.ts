@@ -18,7 +18,11 @@ Deno.serve(async (req) => {
 
   try {
     const { candidateName, jobTitle, callType, questionsAndResponses } = await req.json();
-    
+
+    if (!Array.isArray(questionsAndResponses) || questionsAndResponses.length === 0) {
+      return new Response(JSON.stringify({ error: 'questionsAndResponses is required and must be a non-empty array' }), { status: 400, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
+    }
+
     const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
     if (!OPENAI_API_KEY) {
       throw new Error("OpenAI API key not configured");

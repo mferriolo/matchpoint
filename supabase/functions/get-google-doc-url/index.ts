@@ -18,7 +18,14 @@ serve(async (req) => {
 
   try {
     const { jobTitle, company, jobId } = await req.json()
-    
+
+    if (!jobId || typeof jobId !== 'string') {
+      return new Response(
+        JSON.stringify({ error: 'jobId is required' }),
+        { status: 400, headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' } }
+      )
+    }
+
     console.log('Fetching Google Doc URL for:', { jobTitle, company, jobId })
     
     // Get the Google Drive webhook URL from environment
