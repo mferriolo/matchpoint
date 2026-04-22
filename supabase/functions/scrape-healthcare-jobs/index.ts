@@ -215,6 +215,25 @@ function parseJson(text: string): any { try { const m = text.match(/\{[\s\S]*\}/
 function parseArr(text: string): any[] { try { const m = text.match(/\[[\s\S]*\]/); if (m) return JSON.parse(m[0]); } catch {} return []; }
 function dateTag(): string { const d = new Date(); return `${String(d.getMonth()+1).padStart(2,'0')}.${String(d.getDate()).padStart(2,'0')}.${String(d.getFullYear()).slice(-2)}`; }
 
+// Outer timeout for any async operation. In v148 the AbortController-based
+// timeout inside searchSerpApi* covered only fetch() setup — if the body
+// read (resp.json()) stalled after headers arrived, the promise would
+// hang forever and freeze the Promise.all batch that waited on it. This
+// helper races the inner promise against a timer so the *total* call
+// time is bounded regardless of where the hang happens.
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race<T>([
+    p.finally(() => { if (timer) clearTimeout(timer); }),
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`${label} timed out after ${ms}ms`)),
+        ms
+      );
+    }),
+  ]);
+}
+
 // ============================================================
 // PROGRESS TRACKING
 // ============================================================
@@ -275,13 +294,23 @@ async function scrapeCareerPage(careersUrl: string, _company: string): Promise<C
   const url = (careersUrl || '').trim();
   if (!url || !url.startsWith('http')) return { jobs: [], ats: 'invalid', error: 'invalid url' };
   const lower = url.toLowerCase();
+  const inner = async (): Promise<CareerPageScrapeResult> => {
+    try {
+      if (lower.includes('greenhouse.io') || lower.includes('boards.greenhouse')) return await scrapeGreenhouseBoard(url);
+      if (lower.includes('lever.co')) return await scrapeLeverBoard(url);
+      if (lower.includes('myworkdayjobs.com') || lower.includes('workday.com')) return await scrapeWorkdayBoard(url);
+      return await scrapeGenericCareersPage(url);
+    } catch (e) {
+      return { jobs: [], ats: 'error', error: (e as Error).message };
+    }
+  };
+  // Bound the total wall-clock for any career-page fetch (including body
+  // reads inside the sub-helpers, which weren't covered by their inner
+  // AbortControllers) so one hang can't block Phase A's entire batch.
   try {
-    if (lower.includes('greenhouse.io') || lower.includes('boards.greenhouse')) return await scrapeGreenhouseBoard(url);
-    if (lower.includes('lever.co')) return await scrapeLeverBoard(url);
-    if (lower.includes('myworkdayjobs.com') || lower.includes('workday.com')) return await scrapeWorkdayBoard(url);
-    return await scrapeGenericCareersPage(url);
-  } catch (e) {
-    return { jobs: [], ats: 'error', error: (e as Error).message };
+    return await withTimeout(inner(), 20000, `scrape[${url.substring(0, 60)}]`);
+  } catch (e: any) {
+    return { jobs: [], ats: 'timeout', error: e?.message || String(e) };
   }
 }
 
@@ -508,21 +537,36 @@ async function scrapeGenericCareersPage(url: string): Promise<CareerPageScrapeRe
 async function searchSerpApiForCompany(company: string, roleHints: string[]): Promise<CompanySearchResult> {
   const serpKey = Deno.env.get("SERP_API_KEY");
   if (!serpKey) return { company, searchSuccess: false, jobsFound: [], error: 'no key' };
-  try {
+  const inner = async (): Promise<CompanySearchResult> => {
     const roleStr = roleHints.slice(0, 3).join(' OR ');
     const q = `"${company}" ${roleStr}`;
     const params = new URLSearchParams({ engine: 'google_jobs', q, api_key: serpKey, hl: 'en', gl: 'us' });
-    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 10000);
-    const resp = await fetch(`https://serpapi.com/search.json?${params}`, { signal: controller.signal, headers: { 'Accept': 'application/json' } });
-    clearTimeout(timeout);
-    if (!resp.ok) { const errText = await resp.text().catch(() => ''); return { company, searchSuccess: false, jobsFound: [], error: `HTTP ${resp.status}: ${errText.substring(0, 100)}` }; }
-    const data = await resp.json();
-    const jobs: SerpJobResult[] = (data.jobs_results || []).map((j: any) => ({
-      title: j.title || '', company_name: j.company_name || '', location: j.location || '', via: j.via || '',
-      extensions: j.extensions || [], apply_urls: (j.apply_options || []).map((ao: any) => ao.link).filter((u: string) => u?.startsWith('http')),
-    }));
-    return { company, searchSuccess: true, jobsFound: jobs };
-  } catch (e: any) { return { company, searchSuccess: false, jobsFound: [], error: e.message }; }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const resp = await fetch(`https://serpapi.com/search.json?${params}`, { signal: controller.signal, headers: { 'Accept': 'application/json' } });
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => '');
+        return { company, searchSuccess: false, jobsFound: [], error: `HTTP ${resp.status}: ${errText.substring(0, 100)}` };
+      }
+      const data = await resp.json();
+      const jobs: SerpJobResult[] = (data.jobs_results || []).map((j: any) => ({
+        title: j.title || '', company_name: j.company_name || '', location: j.location || '', via: j.via || '',
+        extensions: j.extensions || [], apply_urls: (j.apply_options || []).map((ao: any) => ao.link).filter((u: string) => u?.startsWith('http')),
+      }));
+      return { company, searchSuccess: true, jobsFound: jobs };
+    } finally {
+      // Keep the abort signal live until after resp.json() so a hang
+      // during body read gets aborted too. clearTimeout is here so the
+      // timer is cleared once we're fully done.
+      clearTimeout(timeout);
+    }
+  };
+  try {
+    return await withTimeout(inner(), 18000, `serp[${company}]`);
+  } catch (e: any) {
+    return { company, searchSuccess: false, jobsFound: [], error: e?.message || String(e) };
+  }
 }
 
 // Broad Google Jobs query — used for "vacuum" mode to catch jobs at
@@ -531,19 +575,31 @@ async function searchSerpApiForCompany(company: string, roleHints: string[]): Pr
 async function searchSerpApiBroad(query: string): Promise<CompanySearchResult> {
   const serpKey = Deno.env.get("SERP_API_KEY");
   if (!serpKey) return { company: '(broad)', searchSuccess: false, jobsFound: [], error: 'no key' };
-  try {
+  const inner = async (): Promise<CompanySearchResult> => {
     const params = new URLSearchParams({ engine: 'google_jobs', q: query, api_key: serpKey, hl: 'en', gl: 'us' });
-    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 10000);
-    const resp = await fetch(`https://serpapi.com/search.json?${params}`, { signal: controller.signal, headers: { 'Accept': 'application/json' } });
-    clearTimeout(timeout);
-    if (!resp.ok) { const errText = await resp.text().catch(() => ''); return { company: '(broad)', searchSuccess: false, jobsFound: [], error: `HTTP ${resp.status}: ${errText.substring(0, 100)}` }; }
-    const data = await resp.json();
-    const jobs: SerpJobResult[] = (data.jobs_results || []).map((j: any) => ({
-      title: j.title || '', company_name: j.company_name || '', location: j.location || '', via: j.via || '',
-      extensions: j.extensions || [], apply_urls: (j.apply_options || []).map((ao: any) => ao.link).filter((u: string) => u?.startsWith('http')),
-    }));
-    return { company: '(broad)', searchSuccess: true, jobsFound: jobs };
-  } catch (e: any) { return { company: '(broad)', searchSuccess: false, jobsFound: [], error: e.message }; }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const resp = await fetch(`https://serpapi.com/search.json?${params}`, { signal: controller.signal, headers: { 'Accept': 'application/json' } });
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => '');
+        return { company: '(broad)', searchSuccess: false, jobsFound: [], error: `HTTP ${resp.status}: ${errText.substring(0, 100)}` };
+      }
+      const data = await resp.json();
+      const jobs: SerpJobResult[] = (data.jobs_results || []).map((j: any) => ({
+        title: j.title || '', company_name: j.company_name || '', location: j.location || '', via: j.via || '',
+        extensions: j.extensions || [], apply_urls: (j.apply_options || []).map((ao: any) => ao.link).filter((u: string) => u?.startsWith('http')),
+      }));
+      return { company: '(broad)', searchSuccess: true, jobsFound: jobs };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+  try {
+    return await withTimeout(inner(), 18000, `serp-broad[${query.substring(0, 40)}]`);
+  } catch (e: any) {
+    return { company: '(broad)', searchSuccess: false, jobsFound: [], error: e?.message || String(e) };
+  }
 }
 
 function fuzzyCompanyMatch(serpCompany: string, targetCompany: string): boolean {
@@ -921,14 +977,27 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             break;
           }
           const batch = targets.slice(i, i + PHASE_B_CONCURRENCY);
-          const settled = await Promise.all(batch.map(t => searchSerpApiForCompany(t.name, effectiveRoles).then(r => ({ t, r }))));
-          for (const { t, r } of settled) {
+          // allSettled so one hung / rejected helper can't freeze the
+          // batch. searchSerpApiForCompany catches internally, but the
+          // withTimeout wrapper can reject if a body read stalls past
+          // its hard deadline — we want those to count as errors, not
+          // hang Phase B.
+          const settled = await Promise.allSettled(
+            batch.map(t => searchSerpApiForCompany(t.name, effectiveRoles).then(r => ({ t, r })))
+          );
+          for (const s of settled) {
             serpCalls++;
-            if (!r.searchSuccess) {
-              serpErrors++;
-              log('searching_sources', `SerpAPI error for ${t.name}: ${r.error}`);
+            if (s.status === 'fulfilled') {
+              const { t, r } = s.value;
+              if (!r.searchSuccess) {
+                serpErrors++;
+                log('searching_sources', `SerpAPI error for ${t.name}: ${r.error}`);
+              } else {
+                for (const sj of r.jobsFound) ingestSerpResult(sj, t.name, t.source);
+              }
             } else {
-              for (const sj of r.jobsFound) ingestSerpResult(sj, t.name, t.source);
+              serpErrors++;
+              log('searching_sources', `SerpAPI call rejected: ${String(s.reason?.message || s.reason)}`);
             }
             processed++;
           }
@@ -1041,28 +1110,39 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
               break;
             }
             const batch = careerTargets.slice(i, i + PHASE_A_CONCURRENCY);
-            const scraped = await Promise.all(
+            // allSettled — one stuck or rejecting scrape can't block the
+            // rest of the batch. scrapeCareerPage wraps itself in
+            // withTimeout, so rejections shouldn't happen in practice,
+            // but we handle them defensively anyway.
+            const scraped = await Promise.allSettled(
               batch.map(({ t, co }) =>
                 scrapeCareerPage(co!.careers_url, t.name).then(cp => ({ t, cp }))
               )
             );
-            for (const { t, cp } of scraped) {
+            for (const s of scraped) {
               cpFetched++;
-              atsCounts[cp.ats] = (atsCounts[cp.ats] || 0) + 1;
-              if (cp.error) {
-                cpErrors++;
-                log('searching_sources', `Career page failed for ${t.name} (${cp.ats}): ${cp.error}`);
-              } else if (cp.jobs.length > 0) {
-                for (const cj of cp.jobs) {
-                  ingestSerpResult({
-                    title: cj.title,
-                    company_name: t.name,
-                    location: cj.location,
-                    via: `${cp.ats} career page`,
-                    extensions: [],
-                    apply_urls: cj.url ? [cj.url] : [],
-                  }, t.name, `career-page:${cp.ats}`, { upgradeUrl: true });
+              if (s.status === 'fulfilled') {
+                const { t, cp } = s.value;
+                atsCounts[cp.ats] = (atsCounts[cp.ats] || 0) + 1;
+                if (cp.error) {
+                  cpErrors++;
+                  log('searching_sources', `Career page failed for ${t.name} (${cp.ats}): ${cp.error}`);
+                } else if (cp.jobs.length > 0) {
+                  for (const cj of cp.jobs) {
+                    ingestSerpResult({
+                      title: cj.title,
+                      company_name: t.name,
+                      location: cj.location,
+                      via: `${cp.ats} career page`,
+                      extensions: [],
+                      apply_urls: cj.url ? [cj.url] : [],
+                    }, t.name, `career-page:${cp.ats}`, { upgradeUrl: true });
+                  }
                 }
+              } else {
+                cpErrors++;
+                atsCounts['rejected'] = (atsCounts['rejected'] || 0) + 1;
+                log('searching_sources', `Career page scrape rejected: ${String(s.reason?.message || s.reason)}`);
               }
             }
             await progress.updateStep('searching_sources', {
