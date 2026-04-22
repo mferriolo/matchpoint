@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
   Loader2, Play, CheckCircle, XCircle, Shield, Globe, Users,
-  Database, RefreshCw, Clock, AlertTriangle, ChevronDown, ChevronUp,
+  Database, RefreshCw, Clock, AlertTriangle, ChevronDown, ChevronUp, ChevronRight,
   Download, Building2, Briefcase, Star, Search, ExternalLink, Unlink,
   FileText, Terminal, Zap, ArrowRight, BarChart3, TrendingUp, Timer,
   SkipForward, Activity, StopCircle, ShieldCheck, Ban
@@ -280,6 +280,7 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
   const [newCompanyInput, setNewCompanyInput] = useState('');
   const [addingCompany, setAddingCompany] = useState(false);
   const [companySearch, setCompanySearch] = useState('');
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -394,6 +395,32 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
       setAllCompanies(prevRows);
       toast({ title: 'Failed to update companies', description: error.message, variant: 'destructive' });
     }
+  };
+
+  // Per-category select/clear. Hybrid companies live in multiple
+  // categories but are one row, so this also flips the company's state
+  // in every other bucket it belongs to — by design.
+  const setCategoryCompaniesSelected = async (cat: string, value: boolean) => {
+    const prevRows = allCompanies;
+    setAllCompanies(prev => prev.map(c =>
+      (c.categories || []).includes(cat) ? { ...c, is_selected: value } : c
+    ));
+    const { error } = await supabase
+      .from('tracker_priority_companies')
+      .update({ is_selected: value })
+      .contains('categories', [cat]);
+    if (error) {
+      setAllCompanies(prevRows);
+      toast({ title: `Failed to update ${cat}`, description: error.message, variant: 'destructive' });
+    }
+  };
+
+  const toggleCategoryCollapsed = (cat: string) => {
+    setCollapsedCategories(prev => {
+      const next = new Set(prev);
+      if (next.has(cat)) next.delete(cat); else next.add(cat);
+      return next;
+    });
   };
 
   const addCompany = async () => {
@@ -1121,43 +1148,70 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
                 return orderedCategories.map(cat => {
                   const rows = byCategory.get(cat) || [];
                   const selectedInCat = rows.filter(r => r.is_selected).length;
+                  const collapsed = collapsedCategories.has(cat);
                   return (
                     <div key={cat}>
-                      <div className="flex items-baseline gap-2 border-b border-gray-200 pb-1 mb-2">
-                        <h4 className="text-xs font-bold uppercase tracking-wider text-gray-700">{cat}</h4>
-                        <span className="text-[10px] text-gray-400 font-mono">
-                          {selectedInCat}/{rows.length}
-                        </span>
+                      <div className="flex items-center gap-2 border-b border-gray-200 pb-1 mb-2">
+                        <button
+                          type="button"
+                          onClick={() => toggleCategoryCollapsed(cat)}
+                          className="flex items-center gap-1.5 flex-1 text-left hover:text-gray-900"
+                          title={collapsed ? 'Expand' : 'Collapse'}
+                        >
+                          {collapsed
+                            ? <ChevronRight className="w-3.5 h-3.5 text-gray-500" />
+                            : <ChevronDown className="w-3.5 h-3.5 text-gray-500" />}
+                          <h4 className="text-xs font-bold uppercase tracking-wider text-gray-700">{cat}</h4>
+                          <span className="text-[10px] text-gray-400 font-mono">
+                            {selectedInCat}/{rows.length}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCategoryCompaniesSelected(cat, true)}
+                          className="text-[10px] px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50 text-gray-600"
+                        >
+                          Select all
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCategoryCompaniesSelected(cat, false)}
+                          className="text-[10px] px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50 text-gray-600"
+                        >
+                          Clear
+                        </button>
                       </div>
-                      <div className="columns-1 sm:columns-2 md:columns-3 gap-x-4">
-                        {rows.map(c => {
-                          const checked = c.is_selected;
-                          return (
-                            <div
-                              key={c.id}
-                              className="break-inside-avoid flex items-center gap-2 text-xs text-gray-700 hover:bg-gray-50 rounded px-1 py-0.5 mb-1 group"
-                            >
-                              <label className="flex items-center gap-2 flex-1 cursor-pointer">
-                                <input
-                                  type="checkbox"
-                                  checked={checked}
-                                  onChange={() => toggleCompany(c)}
-                                  className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]"
-                                />
-                                <span className={checked ? 'font-medium text-gray-900' : ''}>{c.name}</span>
-                              </label>
-                              <button
-                                type="button"
-                                onClick={() => removeCompany(c)}
-                                className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-600 transition-opacity"
-                                title={`Remove ${c.name}`}
+                      {!collapsed && (
+                        <div className="columns-1 sm:columns-2 md:columns-3 gap-x-4">
+                          {rows.map(c => {
+                            const checked = c.is_selected;
+                            return (
+                              <div
+                                key={c.id}
+                                className="break-inside-avoid flex items-center gap-2 text-xs text-gray-700 hover:bg-gray-50 rounded px-1 py-0.5 mb-1 group"
                               >
-                                <XCircle className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          );
-                        })}
-                      </div>
+                                <label className="flex items-center gap-2 flex-1 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() => toggleCompany(c)}
+                                    className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]"
+                                  />
+                                  <span className={checked ? 'font-medium text-gray-900' : ''}>{c.name}</span>
+                                </label>
+                                <button
+                                  type="button"
+                                  onClick={() => removeCompany(c)}
+                                  className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-600 transition-opacity"
+                                  title={`Remove ${c.name}`}
+                                >
+                                  <XCircle className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   );
                 });
