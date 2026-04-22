@@ -274,7 +274,7 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
   // tracker_priority_companies (seeded with the list previously hardcoded
   // in the scrape-healthcare-jobs edge function). Toggling a row updates
   // is_selected in the DB so the selection persists across devices.
-  interface PriorityCompanyRow { id: string; name: string; is_selected: boolean }
+  interface PriorityCompanyRow { id: string; name: string; is_selected: boolean; category: string }
   const [allCompanies, setAllCompanies] = useState<PriorityCompanyRow[]>([]);
   const [companyPickerOpen, setCompanyPickerOpen] = useState(false);
   const [newCompanyInput, setNewCompanyInput] = useState('');
@@ -317,13 +317,27 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
     (async () => {
       const { data, error } = await supabase
         .from('tracker_priority_companies')
-        .select('id,name,is_selected')
+        .select('id,name,is_selected,category')
         .order('name');
       if (cancelled || error || !data) return;
       setAllCompanies(data);
     })();
     return () => { cancelled = true; };
   }, []);
+
+  // Category order shown in the picker — most-used buckets first.
+  const COMPANY_CATEGORY_ORDER = [
+    'VBC Primary Care Groups',
+    'VBC Specialty Care',
+    'VBC Enablement / Tech',
+    'Medicare Advantage / PACE',
+    'Home & Community Care',
+    'Payors',
+    'Health Systems & Hospitals',
+    "Women's & Family Health",
+    'Digital Therapeutics / MSK',
+    'Other VBC',
+  ];
 
   const toggleJobTitle = (name: string) => {
     setSelectedJobTitles(prev => {
@@ -386,8 +400,8 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
     setAddingCompany(true);
     const { data, error } = await supabase
       .from('tracker_priority_companies')
-      .insert({ name, is_selected: true })
-      .select('id,name,is_selected')
+      .insert({ name, is_selected: true, category: 'Other VBC' })
+      .select('id,name,is_selected,category')
       .single();
     setAddingCompany(false);
     if (error || !data) {
@@ -1075,36 +1089,67 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
                 </Button>
               </div>
             </div>
-            <div className="columns-1 sm:columns-2 md:columns-3 gap-x-4 max-h-80 overflow-y-auto pr-1">
-              {allCompanies
-                .filter(c => !companySearch || c.name.toLowerCase().includes(companySearch.toLowerCase()))
-                .map(c => {
-                  const checked = c.is_selected;
+            <div className="max-h-[28rem] overflow-y-auto pr-1 space-y-4">
+              {(() => {
+                const filtered = allCompanies.filter(c =>
+                  !companySearch || c.name.toLowerCase().includes(companySearch.toLowerCase())
+                );
+                // Group by category, preserving the canonical order and
+                // tacking any unknown categories on at the end.
+                const byCategory = new Map<string, PriorityCompanyRow[]>();
+                for (const c of filtered) {
+                  const cat = c.category || 'Other VBC';
+                  if (!byCategory.has(cat)) byCategory.set(cat, []);
+                  byCategory.get(cat)!.push(c);
+                }
+                const orderedCategories = [
+                  ...COMPANY_CATEGORY_ORDER.filter(cat => byCategory.has(cat)),
+                  ...Array.from(byCategory.keys()).filter(cat => !COMPANY_CATEGORY_ORDER.includes(cat)),
+                ];
+                return orderedCategories.map(cat => {
+                  const rows = byCategory.get(cat) || [];
+                  const selectedInCat = rows.filter(r => r.is_selected).length;
                   return (
-                    <div
-                      key={c.id}
-                      className="break-inside-avoid flex items-center gap-2 text-xs text-gray-700 hover:bg-gray-50 rounded px-1 py-0.5 mb-1 group"
-                    >
-                      <label className="flex items-center gap-2 flex-1 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleCompany(c)}
-                          className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]"
-                        />
-                        <span className={checked ? 'font-medium text-gray-900' : ''}>{c.name}</span>
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => removeCompany(c)}
-                        className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-600 transition-opacity"
-                        title={`Remove ${c.name}`}
-                      >
-                        <XCircle className="w-3.5 h-3.5" />
-                      </button>
+                    <div key={cat}>
+                      <div className="flex items-baseline gap-2 border-b border-gray-200 pb-1 mb-2">
+                        <h4 className="text-xs font-bold uppercase tracking-wider text-gray-700">{cat}</h4>
+                        <span className="text-[10px] text-gray-400 font-mono">
+                          {selectedInCat}/{rows.length}
+                        </span>
+                      </div>
+                      <div className="columns-1 sm:columns-2 md:columns-3 gap-x-4">
+                        {rows.map(c => {
+                          const checked = c.is_selected;
+                          return (
+                            <div
+                              key={c.id}
+                              className="break-inside-avoid flex items-center gap-2 text-xs text-gray-700 hover:bg-gray-50 rounded px-1 py-0.5 mb-1 group"
+                            >
+                              <label className="flex items-center gap-2 flex-1 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => toggleCompany(c)}
+                                  className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]"
+                                />
+                                <span className={checked ? 'font-medium text-gray-900' : ''}>{c.name}</span>
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => removeCompany(c)}
+                                className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-600 transition-opacity"
+                                title={`Remove ${c.name}`}
+                              >
+                                <XCircle className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   );
-                })}
+                });
+              })()}
             </div>
             {allCompanies.length === 0 && (
               <div className="text-xs text-gray-500 py-4 text-center">
