@@ -723,11 +723,15 @@ function _cleanRoleLabel(s: string): string {
   return s.toLowerCase().replace(/\s*\([^)]*\)\s*/g, ' ').trim();
 }
 
-async function runTrackerProcess(rid: string, action: string, oa: string, jobTitles: string[] = []) {
+async function runTrackerProcess(rid: string, action: string, oa: string, jobTitles: string[] = [], priorityOrgs: string[] = []) {
   // Effective roles list: if the caller (TrackerControls picklist) passed
   // a non-empty jobTitles array, use it; otherwise fall back to the
   // hardcoded clinical ROLES (the historical default).
   const effectiveRoles: string[] = (jobTitles && jobTitles.length > 0) ? jobTitles : ROLES;
+  // Effective priority companies: if the caller passed a non-empty
+  // priorityOrgs array (selected rows from tracker_priority_companies),
+  // use it; otherwise fall back to the hardcoded PRIORITY_ORGS seed list.
+  const effectivePriorityOrgsList: string[] = (priorityOrgs && priorityOrgs.length > 0) ? priorityOrgs : PRIORITY_ORGS;
   // In default mode the strict normalizeRole + ROLES.includes filter is
   // used (preserves legacy behavior). In custom mode we keep the AI's
   // raw title and accept any job whose title contains a selected type
@@ -798,7 +802,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         // Build unified target list: priority orgs ∪ recurring sources,
         // deduped by lowercased name and blocked-filtered.
         type SearchTarget = { name: string; source: 'priority' | 'recurring' };
-        const effectivePriorityOrgs = PRIORITY_ORGS.filter(o => !blockedCompanyNames.has(o.toLowerCase().trim()));
+        const effectivePriorityOrgs = effectivePriorityOrgsList.filter(o => !blockedCompanyNames.has(o.toLowerCase().trim()));
         const targets: SearchTarget[] = [];
         const seenLower = new Set<string>();
         for (const name of effectivePriorityOrgs) {
@@ -1158,7 +1162,7 @@ Deno.serve(async (req) => {
   try {
     await cleanupStaleRuns();
     const body = await req.json().catch(() => ({}));
-    const { action = 'full', jobTitles = [] } = body;
+    const { action = 'full', jobTitles = [], priorityOrgs = [] } = body;
 
     // ------------------------------------------------------------------
     // ONE-SHOT BACKFILL ACTION (v81)
@@ -1417,6 +1421,9 @@ Deno.serve(async (req) => {
     const safeJobTitles: string[] = Array.isArray(jobTitles)
       ? jobTitles.filter((s: unknown): s is string => typeof s === 'string' && s.trim().length > 0)
       : [];
+    const safePriorityOrgs: string[] = Array.isArray(priorityOrgs)
+      ? priorityOrgs.filter((s: unknown): s is string => typeof s === 'string' && s.trim().length > 0)
+      : [];
     const oa = Deno.env.get("OPENAI_API_KEY");
     if (!oa) throw new Error("OPENAI_API_KEY missing");
 
@@ -1427,7 +1434,7 @@ Deno.serve(async (req) => {
     if (runErr || !run) throw new Error(`Failed to create tracker run: ${runErr?.message || 'unknown'}`);
 
     const rid = run.id;
-    runTrackerProcess(rid, action, oa, safeJobTitles).catch(err => {
+    runTrackerProcess(rid, action, oa, safeJobTitles, safePriorityOrgs).catch(err => {
       console.error('Background process crashed:', err);
       supabase.from('tracker_runs').update({ status: 'failed', current_step: 'error', completed_at: new Date().toISOString(), error_message: `Background crash: ${err.message}` }).eq('id', rid);
     });

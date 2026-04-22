@@ -1,0 +1,87 @@
+-- tracker_priority_companies: user-editable list of priority organizations
+-- the tracker queries in Phase B of scrape-healthcare-jobs. Seeds with the
+-- 69 companies previously hardcoded in the edge function's PRIORITY_ORGS
+-- constant. TrackerControls renders this list as a picker so the user can
+-- toggle, add, or remove companies without a code change.
+
+CREATE TABLE IF NOT EXISTS tracker_priority_companies (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL UNIQUE,
+  is_selected boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracker_priority_companies_selected
+  ON tracker_priority_companies (is_selected);
+
+INSERT INTO tracker_priority_companies (name, is_selected) VALUES
+  ('Agilon Health', true),
+  ('Oak Street Health', true),
+  ('ChenMed', true),
+  ('Iora Health', true),
+  ('Aledade', true),
+  ('Cityblock Health', true),
+  ('Cano Health', true),
+  ('Privia Health', true),
+  ('Signify Health', true),
+  ('Curana Health', true),
+  ('VillageMD', true),
+  ('Hopscotch Health', true),
+  ('Cohere Health', true),
+  ('CINQCARE', true),
+  ('CenterWell', true),
+  ('HarmonyCares', true),
+  ('CareMax', true),
+  ('P3 Health Partners', true),
+  ('Wellvana', true),
+  ('Bloom Healthcare', true),
+  ('Pair Team', true),
+  ('Firefly Health', true),
+  ('Vera Whole Health', true),
+  ('Everside Health', true),
+  ('Marathon Health', true),
+  ('Alignment Healthcare', true),
+  ('Devoted Health', true),
+  ('Clover Health', true),
+  ('Bright Health', true),
+  ('Carelon', true),
+  ('Optum', true),
+  ('UnitedHealth Group', true),
+  ('InnovAge', true),
+  ('Trinity Health PACE', true),
+  ('myPlace Health', true),
+  ('Element Care', true),
+  ('Humana', true),
+  ('CVS Health', true),
+  ('Aetna', true),
+  ('Elevance Health', true),
+  ('Cigna', true),
+  ('Molina Healthcare', true),
+  ('Centene', true),
+  ('SCAN Health Plan', true),
+  ('Oscar Health', true),
+  ('Point32Health', true),
+  ('CommonSpirit Health', true),
+  ('HCA Healthcare', true),
+  ('Ascension', true),
+  ('Providence', true),
+  ('Trinity Health', true),
+  ('Intermountain Health', true),
+  ('Kaiser Permanente', true),
+  ('Advocate Aurora Health', true),
+  ('Atrium Health', true),
+  ('Geisinger', true),
+  ('Tenet Healthcare', true),
+  ('Landmark Health', true),
+  ('DispatchHealth', true),
+  ('BrightSpring Health', true),
+  ('Enhabit Home Health', true),
+  ('Compassus', true),
+  ('Main Street Health', true),
+  ('Strive Health', true),
+  ('Crossover Health', true),
+  ('Pearl Health', true),
+  ('Rush University System for Health', true),
+  ('Evolent Health', true),
+  ('Lumeris', true)
+ON CONFLICT (name) DO NOTHING;

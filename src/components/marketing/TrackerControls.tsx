@@ -19,6 +19,18 @@ const MAX_POLL_DURATION_MS = 30 * 60 * 1000; // 30 minutes max polling (v85: bum
 const STALE_THRESHOLD_MS = 3 * 60 * 1000;
 const POLL_INTERVAL_MS = 2000;
 
+// Default role selection shown the first time a user opens the tracker.
+// Independent of the is_active flag on the job_types table — those toggles
+// belong to the Job Types Management admin screen and should not control
+// what the tracker scrapes by default.
+const DEFAULT_TRACKER_ROLES = [
+  'Medical Director',
+  'Chief Medical Officer',
+  'Primary Care Physician',
+  'Nurse Practitioner',
+  'Physician Assistant',
+];
+
 interface TrackerRun {
   id: string;
   run_type: string;
@@ -249,14 +261,25 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
   const [historicalStepDurations, setHistoricalStepDurations] = useState<Record<string, number>>({});
   const [nowMs, setNowMs] = useState(Date.now());
 
-  // Job-title picklist state. Sourced from the job_types Supabase table
-  // (the same table that backs Admin > Job Types). Default selection on
-  // first load is whatever rows have is_active=true; subsequent visits
-  // restore the user's last selection from localStorage.
+  // Job-title picklist state. Master list sourced from the job_types
+  // Supabase table (same table that backs Admin > Job Types). First-load
+  // selection is DEFAULT_TRACKER_ROLES; subsequent visits restore the
+  // user's last selection from localStorage.
   interface JobTypeRow { id: string; name: string; is_active: boolean }
   const [allJobTypes, setAllJobTypes] = useState<JobTypeRow[]>([]);
   const [selectedJobTitles, setSelectedJobTitles] = useState<string[]>([]);
   const [jobTypePickerOpen, setJobTypePickerOpen] = useState(false);
+
+  // Priority companies picklist state. Sourced from
+  // tracker_priority_companies (seeded with the list previously hardcoded
+  // in the scrape-healthcare-jobs edge function). Toggling a row updates
+  // is_selected in the DB so the selection persists across devices.
+  interface PriorityCompanyRow { id: string; name: string; is_selected: boolean }
+  const [allCompanies, setAllCompanies] = useState<PriorityCompanyRow[]>([]);
+  const [companyPickerOpen, setCompanyPickerOpen] = useState(false);
+  const [newCompanyInput, setNewCompanyInput] = useState('');
+  const [addingCompany, setAddingCompany] = useState(false);
+  const [companySearch, setCompanySearch] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -280,7 +303,24 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
           }
         } catch { /* fall through to defaults */ }
       }
-      setSelectedJobTitles(data.filter((jt: JobTypeRow) => jt.is_active).map((jt: JobTypeRow) => jt.name));
+      // First-load default: the five clinical roles in DEFAULT_TRACKER_ROLES,
+      // intersected with what's actually in job_types so we don't select
+      // names that wouldn't round-trip through the edge function's matcher.
+      const defaults = DEFAULT_TRACKER_ROLES.filter(n => data.some((jt: JobTypeRow) => jt.name === n));
+      setSelectedJobTitles(defaults);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from('tracker_priority_companies')
+        .select('id,name,is_selected')
+        .order('name');
+      if (cancelled || error || !data) return;
+      setAllCompanies(data);
     })();
     return () => { cancelled = true; };
   }, []);
@@ -304,10 +344,72 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
     localStorage.setItem('trackerSelectedJobTitles', JSON.stringify([]));
   };
 
-  const resetJobTitlesToActive = () => {
-    const next = allJobTypes.filter(jt => jt.is_active).map(jt => jt.name);
+  const resetJobTitlesToDefaults = () => {
+    const next = DEFAULT_TRACKER_ROLES.filter(n => allJobTypes.some(jt => jt.name === n));
     setSelectedJobTitles(next);
     localStorage.setItem('trackerSelectedJobTitles', JSON.stringify(next));
+  };
+
+  const toggleCompany = async (row: PriorityCompanyRow) => {
+    const nextSelected = !row.is_selected;
+    setAllCompanies(prev => prev.map(c => c.id === row.id ? { ...c, is_selected: nextSelected } : c));
+    const { error } = await supabase
+      .from('tracker_priority_companies')
+      .update({ is_selected: nextSelected })
+      .eq('id', row.id);
+    if (error) {
+      setAllCompanies(prev => prev.map(c => c.id === row.id ? { ...c, is_selected: row.is_selected } : c));
+      toast({ title: 'Failed to update company', description: error.message, variant: 'destructive' });
+    }
+  };
+
+  const setAllCompaniesSelected = async (value: boolean) => {
+    const prevRows = allCompanies;
+    setAllCompanies(prev => prev.map(c => ({ ...c, is_selected: value })));
+    const { error } = await supabase
+      .from('tracker_priority_companies')
+      .update({ is_selected: value })
+      .neq('id', '00000000-0000-0000-0000-000000000000');
+    if (error) {
+      setAllCompanies(prevRows);
+      toast({ title: 'Failed to update companies', description: error.message, variant: 'destructive' });
+    }
+  };
+
+  const addCompany = async () => {
+    const name = newCompanyInput.trim();
+    if (!name) return;
+    if (allCompanies.some(c => c.name.toLowerCase() === name.toLowerCase())) {
+      toast({ title: 'Already in the list', description: `"${name}" is already a priority company.` });
+      return;
+    }
+    setAddingCompany(true);
+    const { data, error } = await supabase
+      .from('tracker_priority_companies')
+      .insert({ name, is_selected: true })
+      .select('id,name,is_selected')
+      .single();
+    setAddingCompany(false);
+    if (error || !data) {
+      toast({ title: 'Failed to add company', description: error?.message || 'Unknown error', variant: 'destructive' });
+      return;
+    }
+    setAllCompanies(prev => [...prev, data].sort((a, b) => a.name.localeCompare(b.name)));
+    setNewCompanyInput('');
+  };
+
+  const removeCompany = async (row: PriorityCompanyRow) => {
+    if (!window.confirm(`Remove "${row.name}" from the priority companies list?`)) return;
+    const prevRows = allCompanies;
+    setAllCompanies(prev => prev.filter(c => c.id !== row.id));
+    const { error } = await supabase
+      .from('tracker_priority_companies')
+      .delete()
+      .eq('id', row.id);
+    if (error) {
+      setAllCompanies(prevRows);
+      toast({ title: 'Failed to remove company', description: error.message, variant: 'destructive' });
+    }
   };
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -665,8 +767,9 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
       // The edge function now returns immediately with the run_id.
       // jobTitles is the user's selection from the picklist; the scraper
       // falls back to its hardcoded clinical roles if the array is empty.
+      const selectedCompanies = allCompanies.filter(c => c.is_selected).map(c => c.name);
       const { data, error } = await supabase.functions.invoke('scrape-healthcare-jobs', {
-        body: { action, jobTitles: selectedJobTitles }
+        body: { action, jobTitles: selectedJobTitles, priorityOrgs: selectedCompanies }
       });
 
       if (finishedRef.current) return;
@@ -868,10 +971,10 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
               </button>
               <button
                 type="button"
-                onClick={resetJobTitlesToActive}
+                onClick={resetJobTitlesToDefaults}
                 className="px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 text-gray-700"
               >
-                Reset to defaults (Admin → Active)
+                Reset to defaults ({DEFAULT_TRACKER_ROLES.length} roles)
               </button>
             </div>
             {/* CSS multi-column layout (not grid) so items flow top-to-bottom
@@ -902,6 +1005,110 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
             {allJobTypes.length === 0 && (
               <div className="text-xs text-gray-500 py-4 text-center">
                 Loading job types from Admin → Job Types…
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Priority Companies Picklist — controls which companies get per-company SerpAPI queries (Phase B) */}
+      <div className="bg-white rounded-xl border shadow-sm">
+        <button
+          type="button"
+          onClick={() => setCompanyPickerOpen(o => !o)}
+          className="w-full flex items-center justify-between px-5 py-3 text-left hover:bg-gray-50 rounded-t-xl"
+        >
+          <div className="flex items-center gap-2">
+            <Building2 className="w-4 h-4 text-[#911406]" />
+            <span className="text-sm font-semibold text-gray-800">Priority Companies to Search</span>
+            <span className="text-xs text-gray-500">
+              {allCompanies.filter(c => c.is_selected).length} of {allCompanies.length} selected
+            </span>
+          </div>
+          {companyPickerOpen ? <ChevronUp className="w-4 h-4 text-gray-500" /> : <ChevronDown className="w-4 h-4 text-gray-500" />}
+        </button>
+        {companyPickerOpen && (
+          <div className="px-5 pb-4 border-t border-gray-100">
+            <div className="flex items-center gap-2 pt-3 pb-3 text-xs flex-wrap">
+              <button
+                type="button"
+                onClick={() => setAllCompaniesSelected(true)}
+                className="px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 text-gray-700"
+              >
+                Select all
+              </button>
+              <button
+                type="button"
+                onClick={() => setAllCompaniesSelected(false)}
+                className="px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 text-gray-700"
+              >
+                Clear
+              </button>
+              <div className="flex-1 min-w-[200px] flex items-center gap-2">
+                <div className="relative flex-1">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+                  <Input
+                    placeholder="Filter companies..."
+                    value={companySearch}
+                    onChange={e => setCompanySearch(e.target.value)}
+                    className="pl-8 h-7 text-xs"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-1">
+                <Input
+                  placeholder="Add company..."
+                  value={newCompanyInput}
+                  onChange={e => setNewCompanyInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCompany(); } }}
+                  className="h-7 text-xs w-44"
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={addCompany}
+                  disabled={!newCompanyInput.trim() || addingCompany}
+                  className="h-7 px-2 text-xs"
+                >
+                  {addingCompany ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Add'}
+                </Button>
+              </div>
+            </div>
+            <div className="columns-1 sm:columns-2 md:columns-3 gap-x-4 max-h-80 overflow-y-auto pr-1">
+              {allCompanies
+                .filter(c => !companySearch || c.name.toLowerCase().includes(companySearch.toLowerCase()))
+                .map(c => {
+                  const checked = c.is_selected;
+                  return (
+                    <div
+                      key={c.id}
+                      className="break-inside-avoid flex items-center gap-2 text-xs text-gray-700 hover:bg-gray-50 rounded px-1 py-0.5 mb-1 group"
+                    >
+                      <label className="flex items-center gap-2 flex-1 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleCompany(c)}
+                          className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]"
+                        />
+                        <span className={checked ? 'font-medium text-gray-900' : ''}>{c.name}</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => removeCompany(c)}
+                        className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-600 transition-opacity"
+                        title={`Remove ${c.name}`}
+                      >
+                        <XCircle className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  );
+                })}
+            </div>
+            {allCompanies.length === 0 && (
+              <div className="text-xs text-gray-500 py-4 text-center">
+                Loading priority companies…
               </div>
             )}
           </div>
