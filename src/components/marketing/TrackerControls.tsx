@@ -274,7 +274,7 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
   // tracker_priority_companies (seeded with the list previously hardcoded
   // in the scrape-healthcare-jobs edge function). Toggling a row updates
   // is_selected in the DB so the selection persists across devices.
-  interface PriorityCompanyRow { id: string; name: string; is_selected: boolean; category: string }
+  interface PriorityCompanyRow { id: string; name: string; is_selected: boolean; categories: string[] }
   const [allCompanies, setAllCompanies] = useState<PriorityCompanyRow[]>([]);
   const [companyPickerOpen, setCompanyPickerOpen] = useState(false);
   const [newCompanyInput, setNewCompanyInput] = useState('');
@@ -317,7 +317,7 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
     (async () => {
       const { data, error } = await supabase
         .from('tracker_priority_companies')
-        .select('id,name,is_selected,category')
+        .select('id,name,is_selected,categories')
         .order('name');
       if (cancelled || error || !data) return;
       setAllCompanies(data);
@@ -325,19 +325,25 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
     return () => { cancelled = true; };
   }, []);
 
-  // Category order shown in the picker — most-used buckets first.
+  // Category order shown in the picker — aligned with the canonical
+  // 11-bucket healthcare landscape. A single company can live in
+  // multiple buckets (e.g. Kaiser Permanente is both Payor and Provider);
+  // the DB stores one row per company with a categories text[] so
+  // toggling any rendering mutates the one shared is_selected value.
   const COMPANY_CATEGORY_ORDER = [
-    'VBC Primary Care Groups',
-    'VBC Specialty Care',
-    'VBC Enablement / Tech',
-    'Medicare Advantage / PACE',
-    'Home & Community Care',
     'Payors',
-    'Health Systems & Hospitals',
-    "Women's & Family Health",
-    'Digital Therapeutics / MSK',
-    'Other VBC',
+    'Providers',
+    'Value-Based Care / Risk-Bearing Organizations',
+    'Post-Acute / Home-Based Care',
+    'PACE Centers',
+    'Behavioral Health',
+    'Pharmacy / PBM',
+    'Health IT / Digital Health',
+    'Diagnostics / Devices / Life Sciences',
+    'Healthcare Services / Outsourcing',
+    'Government / Safety Net / Community Health',
   ];
+  const DEFAULT_NEW_COMPANY_CATEGORY = 'Value-Based Care / Risk-Bearing Organizations';
 
   const toggleJobTitle = (name: string) => {
     setSelectedJobTitles(prev => {
@@ -400,8 +406,8 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
     setAddingCompany(true);
     const { data, error } = await supabase
       .from('tracker_priority_companies')
-      .insert({ name, is_selected: true, category: 'Other VBC' })
-      .select('id,name,is_selected,category')
+      .insert({ name, is_selected: true, categories: [DEFAULT_NEW_COMPANY_CATEGORY] })
+      .select('id,name,is_selected,categories')
       .single();
     setAddingCompany(false);
     if (error || !data) {
@@ -1094,13 +1100,19 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
                 const filtered = allCompanies.filter(c =>
                   !companySearch || c.name.toLowerCase().includes(companySearch.toLowerCase())
                 );
-                // Group by category, preserving the canonical order and
-                // tacking any unknown categories on at the end.
+                // Group by category — a hybrid company with multiple
+                // categories intentionally appears in each bucket. The
+                // underlying row is the same, so toggling in one bucket
+                // flips the checkbox everywhere.
                 const byCategory = new Map<string, PriorityCompanyRow[]>();
                 for (const c of filtered) {
-                  const cat = c.category || 'Other VBC';
-                  if (!byCategory.has(cat)) byCategory.set(cat, []);
-                  byCategory.get(cat)!.push(c);
+                  const cats = c.categories && c.categories.length > 0
+                    ? c.categories
+                    : [DEFAULT_NEW_COMPANY_CATEGORY];
+                  for (const cat of cats) {
+                    if (!byCategory.has(cat)) byCategory.set(cat, []);
+                    byCategory.get(cat)!.push(c);
+                  }
                 }
                 const orderedCategories = [
                   ...COMPANY_CATEGORY_ORDER.filter(cat => byCategory.has(cat)),
