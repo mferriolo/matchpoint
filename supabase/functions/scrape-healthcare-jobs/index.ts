@@ -723,7 +723,7 @@ function _cleanRoleLabel(s: string): string {
   return s.toLowerCase().replace(/\s*\([^)]*\)\s*/g, ' ').trim();
 }
 
-async function runTrackerProcess(rid: string, action: string, oa: string, jobTitles: string[] = [], priorityOrgs: string[] = []) {
+async function runTrackerProcess(rid: string, action: string, oa: string, jobTitles: string[] = [], priorityOrgs: string[] = [], deepScan: boolean = false) {
   // Effective roles list: if the caller (TrackerControls picklist) passed
   // a non-empty jobTitles array, use it; otherwise fall back to the
   // hardcoded clinical ROLES (the historical default).
@@ -826,6 +826,10 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
 
         const foundJobs: any[] = [];
         const foundJobKeys = new Set<string>();
+        // Parallel map of dedup-key → foundJobs entry so career-page
+        // ingests in the reversed flow can upgrade an existing SerpAPI
+        // entry's URL in O(1) instead of scanning foundJobs.
+        const foundByKey = new Map<string, any>();
         let serpCalls = 0, serpErrors = 0, processed = 0;
 
         // Reusable role-match check. Same dual-mode logic as the legacy
@@ -844,7 +848,17 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           return { passes: !!hit, normalized: title };
         };
 
-        const ingestSerpResult = (sj: SerpJobResult, defaultCompanyName: string, sourceLabel: string) => {
+        // When called from the reversed-flow Phase A (career-page scrape
+        // after SerpAPI has already populated foundJobs), pass
+        // { upgradeUrl: true } so that a dedup collision upgrades the
+        // existing entry's URL to the direct career-page link instead of
+        // silently dropping the career-page result.
+        const ingestSerpResult = (
+          sj: SerpJobResult,
+          defaultCompanyName: string,
+          sourceLabel: string,
+          opts?: { upgradeUrl?: boolean }
+        ) => {
           const title = (sj.title || '').trim();
           const company = (sj.company_name || defaultCompanyName || '').trim();
           if (!title || !company) return;
@@ -856,10 +870,23 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           const city = locParts[0] || '';
           const state = locParts[1] || '';
           const dk = `${company.toLowerCase().trim()}|${m.normalized.toLowerCase().trim()}|${city.toLowerCase()}|${state.toLowerCase()}`;
-          if (jKeys.has(dk) || foundJobKeys.has(dk)) { dupes++; return; }
+          if (jKeys.has(dk)) { dupes++; return; }
+          if (foundJobKeys.has(dk)) {
+            if (opts?.upgradeUrl) {
+              const url = sj.apply_urls?.[0] || '';
+              const existing = foundByKey.get(dk);
+              if (existing && url) {
+                existing._verifiedUrl = url;
+                existing.source_found = sj.via || `Google Jobs (${sourceLabel})`;
+                existing._verifyReason = `Direct from career page (${sj.via || sourceLabel})`;
+              }
+            }
+            dupes++;
+            return;
+          }
           foundJobKeys.add(dk);
           const url = sj.apply_urls?.[0] || '';
-          foundJobs.push({
+          const entry = {
             company,
             job_title: title,
             _normalizedTitle: m.normalized,
@@ -868,61 +895,18 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             source_found: sj.via || `Google Jobs (${sourceLabel})`,
             _verifiedUrl: url,
             _verifyReason: `Direct from Google Jobs (via ${sj.via || sourceLabel})`,
-          });
+          };
+          foundJobs.push(entry);
+          foundByKey.set(dk, entry);
         };
 
-        // ---------- Phase A: Direct career-page scraping (v80) ----------
-        // For each target with a careers_url, fetch the page (or its ATS
-        // JSON API) BEFORE running SerpAPI. Career-page jobs land in the
-        // found-job set first, so when SerpAPI later returns the same
-        // posting it gets deduped — keeping the canonical career-page URL
-        // as the stored job_url instead of an aggregator URL.
-        const targetsWithCareerUrl = targets
-          .map(t => ({ t, co: coMap.get(t.name.toLowerCase().trim()) }))
-          .filter(x => x.co?.careers_url && String(x.co.careers_url).startsWith('http'));
-        if (targetsWithCareerUrl.length > 0) {
-          telem.startStep('scrape_career_pages', targetsWithCareerUrl.length);
-          log('searching_sources', `Phase A: scraping ${targetsWithCareerUrl.length} career pages directly`);
-          let cpFetched = 0, cpErrors = 0, cpJobsBefore = foundJobs.length;
-          const atsCounts: Record<string, number> = {};
-          for (let i = 0; i < targetsWithCareerUrl.length; i++) {
-            if (Date.now() - runStartMs > 25 * 60 * 1000) {
-              log('searching_sources', `Career-page time budget exhausted after ${cpFetched} fetches`);
-              break;
-            }
-            const { t, co } = targetsWithCareerUrl[i];
-            const cp = await scrapeCareerPage(co!.careers_url, t.name);
-            cpFetched++;
-            atsCounts[cp.ats] = (atsCounts[cp.ats] || 0) + 1;
-            if (cp.error) {
-              cpErrors++;
-              log('searching_sources', `Career page failed for ${t.name} (${cp.ats}): ${cp.error}`);
-            } else if (cp.jobs.length > 0) {
-              for (const cj of cp.jobs) {
-                // Funnel through the same ingest pipeline using a synthetic
-                // SerpJobResult so role-match + dedup + blocked checks all
-                // apply uniformly.
-                ingestSerpResult({
-                  title: cj.title,
-                  company_name: t.name,
-                  location: cj.location,
-                  via: `${cp.ats} career page`,
-                  extensions: [],
-                  apply_urls: cj.url ? [cj.url] : [],
-                }, t.name, `career-page:${cp.ats}`);
-              }
-            }
-            if ((i + 1) % 5 === 0 || i + 1 === targetsWithCareerUrl.length) {
-              await progress.updateStep('searching_sources', { sub_step: `Phase A: ${cpFetched}/${targetsWithCareerUrl.length} career pages, ${foundJobs.length} found jobs so far` });
-            }
-            await new Promise(r2 => setTimeout(r2, 200));
-          }
-          const cpJobsAdded = foundJobs.length - cpJobsBefore;
-          const atsBreakdown = Object.entries(atsCounts).map(([k, v]) => `${k}:${v}`).join(' ');
-          log('searching_sources', `Phase A complete: ${cpFetched} pages fetched, ${cpJobsAdded} matching jobs added [${atsBreakdown}], ${cpErrors} errors`);
-          telem.endStep(cpJobsAdded, `${cpFetched} career pages fetched [${atsBreakdown}], ${cpJobsAdded} matching jobs added (${cpErrors} errors)`);
-        }
-        // discover_via_serpapi telemetry covers Phase B + Phase C below.
+        // Phase A moved (v148): career-page scraping now runs AFTER Phase
+        // B/C/D so that in fast mode it can be gated on companies that
+        // actually turned up SerpAPI hits — turning "scrape 120 pages
+        // serially" into "scrape the ~30 pages worth scraping, in
+        // parallel." Deep-scan runs still scrape every priority company
+        // with a careers_url regardless of SerpAPI results (weekly safety
+        // net for career-only postings).
         telem.startStep('discover_via_serpapi', totalUnits);
 
         // ---------- Phase B: Per-company SerpAPI queries ----------
@@ -1017,6 +1001,92 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           const breakdown = Object.entries(perBoardCounts).filter(([,n]) => n > 0).map(([b,n]) => `${b.split('.')[0]}:${n}`).join(' ') || '(no matches)';
           log('searching_sources', `Phase D complete: ${dAdded} found jobs added from ${dCalls} board queries [${breakdown}], ${dErrors} errors`);
           telem.endStep(dAdded, `${HEALTHCARE_BOARDS.length} boards × OR'd roles, ${dAdded} found jobs added [${breakdown}], ${dErrors} errors`);
+        }
+
+        // ---------- Phase A: Direct career-page scraping (v148 reorder) ----------
+        // In fast mode (deepScan=false, default), only scrape the career
+        // pages of companies that already turned up at least one job in
+        // Phase B/C/D — a quiet company is almost certainly one whose
+        // careers page has nothing worth verifying, and scraping it is
+        // the slowest serial step in the pipeline. In deep mode
+        // (deepScan=true, weekly safety net), scrape every priority
+        // company with a careers_url regardless — catches career-only
+        // postings that never get syndicated to Google Jobs.
+        // ingestSerpResult is called with { upgradeUrl: true } so that
+        // when Phase A sees a job already found by SerpAPI, the career
+        // page URL overwrites the aggregator URL on the existing entry.
+        const companiesWithHits = new Set(
+          foundJobs.map(j => (j.company || '').toLowerCase().trim())
+        );
+        const allCareerTargets = targets
+          .map(t => ({ t, co: coMap.get(t.name.toLowerCase().trim()) }))
+          .filter(x => x.co?.careers_url && String(x.co.careers_url).startsWith('http'));
+        const careerTargets = deepScan
+          ? allCareerTargets
+          : allCareerTargets.filter(x => companiesWithHits.has(x.t.name.toLowerCase().trim()));
+        const skippedQuiet = allCareerTargets.length - careerTargets.length;
+        if (careerTargets.length > 0) {
+          telem.startStep('scrape_career_pages', careerTargets.length);
+          log('searching_sources',
+            `Phase A: scraping ${careerTargets.length} career pages ` +
+            `(${deepScan ? 'deep scan — every priority company' : `fast scan — skipped ${skippedQuiet} quiet companies`})`
+          );
+          let cpFetched = 0, cpErrors = 0;
+          const cpJobsBefore = foundJobs.length;
+          const atsCounts: Record<string, number> = {};
+          const PHASE_A_CONCURRENCY = 5;
+          for (let i = 0; i < careerTargets.length; i += PHASE_A_CONCURRENCY) {
+            if (Date.now() - runStartMs > 25 * 60 * 1000) {
+              log('searching_sources', `Career-page time budget exhausted after ${cpFetched} fetches`);
+              break;
+            }
+            const batch = careerTargets.slice(i, i + PHASE_A_CONCURRENCY);
+            const scraped = await Promise.all(
+              batch.map(({ t, co }) =>
+                scrapeCareerPage(co!.careers_url, t.name).then(cp => ({ t, cp }))
+              )
+            );
+            for (const { t, cp } of scraped) {
+              cpFetched++;
+              atsCounts[cp.ats] = (atsCounts[cp.ats] || 0) + 1;
+              if (cp.error) {
+                cpErrors++;
+                log('searching_sources', `Career page failed for ${t.name} (${cp.ats}): ${cp.error}`);
+              } else if (cp.jobs.length > 0) {
+                for (const cj of cp.jobs) {
+                  ingestSerpResult({
+                    title: cj.title,
+                    company_name: t.name,
+                    location: cj.location,
+                    via: `${cp.ats} career page`,
+                    extensions: [],
+                    apply_urls: cj.url ? [cj.url] : [],
+                  }, t.name, `career-page:${cp.ats}`, { upgradeUrl: true });
+                }
+              }
+            }
+            await progress.updateStep('searching_sources', {
+              sub_step: `Phase A: ${cpFetched}/${careerTargets.length} career pages, ${foundJobs.length} found jobs so far`
+            });
+            // Brief courtesy pause between batches.
+            if (i + PHASE_A_CONCURRENCY < careerTargets.length) {
+              await new Promise(r2 => setTimeout(r2, 100));
+            }
+          }
+          const cpJobsAdded = foundJobs.length - cpJobsBefore;
+          const atsBreakdown = Object.entries(atsCounts).map(([k, v]) => `${k}:${v}`).join(' ') || '(none)';
+          log('searching_sources',
+            `Phase A complete: ${cpFetched} pages fetched, ${cpJobsAdded} new matching jobs ` +
+            `[${atsBreakdown}], ${cpErrors} errors`
+          );
+          telem.endStep(cpJobsAdded,
+            `${cpFetched} career pages fetched [${atsBreakdown}], ${cpJobsAdded} new matching jobs ` +
+            `(${cpErrors} errors, ${deepScan ? 'deep' : 'fast'} mode${deepScan ? '' : `, ${skippedQuiet} quiet companies skipped`})`
+          );
+        } else if (!deepScan && allCareerTargets.length > 0) {
+          log('searching_sources',
+            `Phase A skipped: 0/${allCareerTargets.length} priority companies had SerpAPI hits (fast mode)`
+          );
         }
 
         log('searching_sources', `Discovery complete: ${foundJobs.length} found jobs from ${serpCalls} SerpAPI calls (${serpErrors} errors)`);
@@ -1162,7 +1232,7 @@ Deno.serve(async (req) => {
   try {
     await cleanupStaleRuns();
     const body = await req.json().catch(() => ({}));
-    const { action = 'full', jobTitles = [], priorityOrgs = [] } = body;
+    const { action = 'full', jobTitles = [], priorityOrgs = [], deepScan = false } = body;
 
     // ------------------------------------------------------------------
     // ONE-SHOT BACKFILL ACTION (v81)
@@ -1434,7 +1504,7 @@ Deno.serve(async (req) => {
     if (runErr || !run) throw new Error(`Failed to create tracker run: ${runErr?.message || 'unknown'}`);
 
     const rid = run.id;
-    runTrackerProcess(rid, action, oa, safeJobTitles, safePriorityOrgs).catch(err => {
+    runTrackerProcess(rid, action, oa, safeJobTitles, safePriorityOrgs, !!deepScan).catch(err => {
       console.error('Background process crashed:', err);
       supabase.from('tracker_runs').update({ status: 'failed', current_step: 'error', completed_at: new Date().toISOString(), error_message: `Background crash: ${err.message}` }).eq('id', rid);
     });

@@ -282,6 +282,18 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
   const [companySearch, setCompanySearch] = useState('');
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
 
+  // Fast vs deep scan. Fast (default) gates Phase A career-page scraping
+  // on companies that already turned up SerpAPI hits in Phase B/C/D,
+  // cutting run time by several minutes. Deep does the old behavior of
+  // scraping every priority company's careers page unconditionally.
+  const [scanMode, setScanMode] = useState<'fast' | 'deep'>(() => {
+    const stored = typeof window !== 'undefined' ? localStorage.getItem('trackerScanMode') : null;
+    return stored === 'deep' ? 'deep' : 'fast';
+  });
+  useEffect(() => {
+    if (typeof window !== 'undefined') localStorage.setItem('trackerScanMode', scanMode);
+  }, [scanMode]);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -816,7 +828,12 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
       // falls back to its hardcoded clinical roles if the array is empty.
       const selectedCompanies = allCompanies.filter(c => c.is_selected).map(c => c.name);
       const { data, error } = await supabase.functions.invoke('scrape-healthcare-jobs', {
-        body: { action, jobTitles: selectedJobTitles, priorityOrgs: selectedCompanies }
+        body: {
+          action,
+          jobTitles: selectedJobTitles,
+          priorityOrgs: selectedCompanies,
+          deepScan: scanMode === 'deep',
+        }
       });
 
       if (finishedRef.current) return;
@@ -1242,6 +1259,35 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
                 <><Play className="w-4 h-4" /> Run the Tracker</>
               )}
             </Button>
+            <div
+              className="inline-flex rounded-md border border-gray-200 overflow-hidden text-xs"
+              title="Fast: scrape career pages only for companies that turned up on job boards. Deep: scrape every priority company's career page (slower, weekly safety net)."
+            >
+              <button
+                type="button"
+                onClick={() => setScanMode('fast')}
+                disabled={running}
+                className={`px-3 py-2 font-semibold transition-colors ${
+                  scanMode === 'fast'
+                    ? 'bg-gray-900 text-white'
+                    : 'bg-white text-gray-600 hover:bg-gray-50'
+                } disabled:opacity-60`}
+              >
+                Fast scan
+              </button>
+              <button
+                type="button"
+                onClick={() => setScanMode('deep')}
+                disabled={running}
+                className={`px-3 py-2 font-semibold transition-colors border-l border-gray-200 ${
+                  scanMode === 'deep'
+                    ? 'bg-gray-900 text-white'
+                    : 'bg-white text-gray-600 hover:bg-gray-50'
+                } disabled:opacity-60`}
+              >
+                Deep scan
+              </button>
+            </div>
             {running && (
               <div className="flex items-center gap-3">
                 <span className="text-sm text-blue-600 font-mono flex items-center gap-1.5">
