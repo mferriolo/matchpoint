@@ -11,6 +11,7 @@ import {
 
 import { supabase } from '@/lib/supabase';
 import { useToast } from '@/hooks/use-toast';
+import { TrackerJobsTable, TrackerJobsTableRow } from './TrackerJobsTable';
 
 // ============================================================
 // CONSTANTS
@@ -953,38 +954,6 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
     return (b.open_roles_count || 0) - (a.open_roles_count || 0) || (a.company_name || '').localeCompare(b.company_name || '');
   });
 
-  const categoryBadge = (cat: string) => {
-    const colors: Record<string, string> = {
-      'Value Based Care (VBC)': 'bg-blue-100 text-blue-800', 'PACE Medical Groups': 'bg-purple-100 text-purple-800',
-      'Health Plans': 'bg-green-100 text-green-800', 'Health Systems': 'bg-orange-100 text-orange-800',
-      'Hospitals': 'bg-red-100 text-red-800', 'FQHC': 'bg-teal-100 text-teal-800', 'All Others': 'bg-gray-100 text-gray-800'
-    };
-    return colors[cat] || 'bg-gray-100 text-gray-800';
-  };
-
-  const buildCompanyJobsSearch = (name: string) => `https://www.google.com/search?q=${encodeURIComponent(`${name} healthcare jobs`)}&ibp=htl;jobs`;
-  const buildGoogleJobsSearch = (j: any) => {
-    if (j.google_jobs_url) return j.google_jobs_url;
-    const loc = j.city && j.state ? ` ${j.city} ${j.state}` : '';
-    return `https://www.google.com/search?q=${encodeURIComponent(`${j.job_title} ${j.company_name}${loc}`)}&ibp=htl;jobs`;
-  };
-
-  const getCardHighlight = (r: any): string => {
-    if (activeFilter === 'new_roles' && r.newJobs.length > 0) return 'border-blue-400 bg-blue-50/60 ring-1 ring-blue-200';
-    if (activeFilter === 'new_companies' && r.isNewCompany) return 'border-purple-400 bg-purple-50/60 ring-1 ring-purple-200';
-    if (activeFilter === 'contacts_added' && r.recentContacts.length > 0) return 'border-green-400 bg-green-50/60 ring-1 ring-green-200';
-    if (r.is_high_priority) return 'border-amber-300 bg-amber-50/40';
-    return 'border-gray-200 bg-white';
-  };
-
-  const getCardAccents = (r: any): string[] => {
-    const a: string[] = [];
-    if (r.newJobs.length > 0) a.push('new_roles');
-    if (r.isNewCompany) a.push('new_company');
-    if (r.recentContacts.length > 0) a.push('new_contacts');
-    return a;
-  };
-
   const filterTiles: { key: FilterType; label: string; count: number; color: string; activeColor: string; icon: React.ReactNode }[] = [
     { key: 'all_roles', label: 'All Open Roles', count: jobs.filter(j => !j.is_closed && j.status !== 'Closed').length, color: 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100', activeColor: 'bg-gray-900 border-gray-900 text-white shadow-lg', icon: <Briefcase className="w-5 h-5" /> },
     { key: 'new_roles', label: 'New Roles Added', count: newRoles.length, color: 'bg-blue-50 border-blue-200 text-blue-700 hover:bg-blue-100', activeColor: 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-200', icon: <TrendingUp className="w-5 h-5" /> },
@@ -1757,12 +1726,13 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
       <div className="bg-white rounded-xl border shadow-sm">
         <div className="p-4 border-b flex items-center justify-between flex-wrap gap-3">
           <div>
-            <h3 className="font-bold text-gray-900 text-lg">Companies and Roles</h3>
+            <h3 className="font-bold text-gray-900 text-lg">Jobs</h3>
             <p className="text-xs text-gray-500 mt-0.5">
-              {activeFilter === 'all_roles' && 'All tracked companies and their open roles'}
-              {activeFilter === 'new_roles' && 'Companies with newly discovered roles (highlighted in blue)'}
-              {activeFilter === 'new_companies' && 'Recently added companies (highlighted in purple)'}
-              {activeFilter === 'contacts_added' && 'Companies with recently added contacts (highlighted in green)'}
+              {activeFilter === 'all_roles' && 'All open jobs across tracked companies'}
+              {activeFilter === 'new_roles' && 'Jobs discovered in the most recent tracker run'}
+              {activeFilter === 'new_companies' && 'Jobs at companies added during the most recent run'}
+              {activeFilter === 'contacts_added' && 'Jobs at companies with recently added contacts'}
+              <span className="ml-1 text-gray-400">· priority jobs highlighted, click a title for details</span>
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -1770,7 +1740,7 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
               <Input placeholder="Search companies or roles..." value={searchText} onChange={e => setSearchText(e.target.value)} className="pl-9 w-64" />
             </div>
-            <span className="text-sm text-gray-500 whitespace-nowrap">{sortedRecords.length} of {companies.length}</span>
+            <span className="text-sm text-gray-500 whitespace-nowrap">{sortedRecords.length} {sortedRecords.length === 1 ? 'company' : 'companies'}</span>
           </div>
         </div>
 
@@ -1778,113 +1748,41 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
           <div className="flex items-center justify-center py-16">
             <Loader2 className="w-6 h-6 animate-spin text-gray-400" />
           </div>
-        ) : sortedRecords.length === 0 ? (
-          <div className="text-center py-16 text-gray-500">
-            <Building2 className="w-8 h-8 mx-auto mb-2 text-gray-300" />
-            <p className="font-medium">No records match this filter</p>
-            <p className="text-sm mt-1">
-              {activeFilter === 'new_roles' && 'No new roles were added in the most recent tracker run.'}
-              {activeFilter === 'new_companies' && 'No new companies were added in the most recent tracker run.'}
-              {activeFilter === 'contacts_added' && 'No new contacts were added in the most recent tracker run.'}
-              {activeFilter === 'all_roles' && 'No companies found. Import data or run the tracker.'}
-            </p>
-          </div>
-        ) : (
-          <div className="p-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              {sortedRecords.map((record) => {
-                const accents = getCardAccents(record);
-                const openCount = record.openJobs?.length || record.open_roles_count || 0;
-                const contactCount = record.companyContacts?.length || record.contact_count || 0;
-
-                return (
-                  <div key={record.id} className={`rounded-lg border-2 p-4 transition-all ${getCardHighlight(record)}`}>
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <h4 className="font-semibold text-gray-900 text-sm truncate">{record.company_name}</h4>
-                          {record.is_high_priority && <Star className="w-4 h-4 text-amber-500 flex-shrink-0" />}
-                        </div>
-                        <span className={`inline-block text-[10px] px-2 py-0.5 rounded-full mt-1 ${categoryBadge(record.company_type)}`}>
-                          {record.company_type || 'Uncategorized'}
-                        </span>
-                      </div>
-                      {record.has_md_cmo && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold flex-shrink-0">MD/CMO</span>
-                      )}
-                    </div>
-
-                    {activeFilter === 'all_roles' && accents.length > 0 && (
-                      <div className="flex flex-wrap gap-1 mb-2">
-                        {accents.includes('new_roles') && <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-semibold">{record.newJobs.length} New Role{record.newJobs.length !== 1 ? 's' : ''}</span>}
-                        {accents.includes('new_company') && <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 font-semibold">New Company</span>}
-                        {accents.includes('new_contacts') && <span className="text-[10px] px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-semibold">{record.recentContacts.length} New Contact{record.recentContacts.length !== 1 ? 's' : ''}</span>}
-                      </div>
-                    )}
-
-                    <div className="flex items-center gap-4 text-xs text-gray-600 mb-3">
-                      <span className="flex items-center gap-1"><Briefcase className="w-3.5 h-3.5 text-blue-500" /><span className="font-semibold text-gray-900">{openCount}</span> open</span>
-                      <span className="flex items-center gap-1"><Users className="w-3.5 h-3.5 text-green-500" /><span className="font-semibold text-gray-900">{contactCount}</span> contacts</span>
-                    </div>
-
-                    {record.openJobs && record.openJobs.length > 0 && (
-                      <div className="space-y-1 mb-3">
-                        {record.openJobs.slice(0, 4).map((j: any) => {
-                          const isNew = j.is_net_new;
-                          return (
-                            <div key={j.id} className={`flex items-center justify-between text-xs rounded px-2 py-1.5 ${isNew ? 'bg-blue-50 border border-blue-200' : 'bg-gray-50 border border-gray-100'}`}>
-                              <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                                {isNew && <span className="w-1.5 h-1.5 rounded-full bg-blue-500 flex-shrink-0" />}
-                                <span className="truncate text-gray-800 font-medium">{j.job_title}</span>
-                                {j.city && j.state && <span className="text-gray-400 flex-shrink-0 hidden lg:inline">· {j.city}, {j.state}</span>}
-                                {j.url_status === 'live' && <ShieldCheck className="w-3 h-3 text-emerald-500 flex-shrink-0" title="Verified live" />}
-                              </div>
-                              <a href={buildGoogleJobsSearch(j)} target="_blank" rel="noopener noreferrer" className="flex-shrink-0 ml-2 text-emerald-600 hover:text-emerald-800">
-                                <ExternalLink className="w-3.5 h-3.5" />
-                              </a>
-                            </div>
-                          );
-                        })}
-                        {record.openJobs.length > 4 && <div className="text-[10px] text-gray-400 pl-2">+ {record.openJobs.length - 4} more</div>}
-                      </div>
-                    )}
-
-                    {activeFilter === 'contacts_added' && record.recentContacts.length > 0 && (
-                      <div className="space-y-1 mb-3">
-                        <div className="text-[10px] font-semibold text-green-700 uppercase tracking-wider mb-1">Recently Added Contacts</div>
-                        {record.recentContacts.slice(0, 3).map((ct: any) => (
-                          <div key={ct.id} className="flex items-center justify-between text-xs bg-green-50 border border-green-100 rounded px-2 py-1.5">
-                            <div className="min-w-0 flex-1">
-                              <span className="font-medium text-gray-800">{ct.first_name} {ct.last_name}</span>
-                              {ct.title && <span className="text-gray-400 ml-1">· {ct.title}</span>}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    <div className="flex items-center gap-2 pt-2 border-t border-gray-100">
-                      {openCount > 0 ? (
-                        <a href={buildCompanyJobsSearch(record.company_name)} target="_blank" rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 transition-colors font-medium">
-                          <Globe className="w-3 h-3" /> Search All Jobs
-                        </a>
-                      ) : (
-                        <span className="text-[11px] text-gray-400 flex items-center gap-1"><Unlink className="w-3 h-3" /> No open roles</span>
-                      )}
-                      {record.careers_url && record.careers_url.startsWith('http') && !record.careers_url.includes('google.com/search') && !record.careers_url.includes('indeed.com') && !record.careers_url.includes('linkedin.com') && !record.careers_url.includes('?q=') && (
-                        <a href={record.careers_url} target="_blank" rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-md bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 transition-colors font-medium">
-                          <ExternalLink className="w-3 h-3" /> Careers Page
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
+        ) : (() => {
+          // Flatten openJobs from every visible (sortedRecords) company
+          // into one list. Decorate each row with the company-level
+          // priority flag so the table can highlight priority rows
+          // whether the flag lives on the job or on the company.
+          const flatJobs: TrackerJobsTableRow[] = [];
+          for (const rec of sortedRecords) {
+            const src: any[] = (rec as any).openJobs || [];
+            for (const j of src) {
+              flatJobs.push({
+                ...j,
+                _companyIsHighPriority: (rec as any).is_high_priority,
+                _companyType: (rec as any).company_type,
+              });
+            }
+          }
+          const jobs = activeFilter === 'new_roles'
+            ? flatJobs.filter(j => j.is_net_new)
+            : flatJobs;
+          if (jobs.length === 0) {
+            return (
+              <div className="text-center py-16 text-gray-500">
+                <Briefcase className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+                <p className="font-medium">No jobs match this filter</p>
+                <p className="text-sm mt-1">
+                  {activeFilter === 'new_roles' && 'No new roles were added in the most recent tracker run.'}
+                  {activeFilter === 'new_companies' && 'No new companies were added in the most recent tracker run.'}
+                  {activeFilter === 'contacts_added' && 'No new contacts were added in the most recent tracker run.'}
+                  {activeFilter === 'all_roles' && 'No jobs found. Run the tracker to discover new roles.'}
+                </p>
+              </div>
+            );
+          }
+          return <TrackerJobsTable jobs={jobs} />;
+        })()}
       </div>
 
       {/* Run History */}
