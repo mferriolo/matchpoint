@@ -254,6 +254,7 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
   const [lastRun, setLastRun] = useState<TrackerRun | null>(null);
   const [activeFilter, setActiveFilter] = useState<FilterType>('all_roles');
   const [searchText, setSearchText] = useState('');
+  const [showBlocked, setShowBlocked] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showLog, setShowLog] = useState(false);
   const [showStepDetails, setShowStepDetails] = useState(true);
@@ -1735,11 +1736,29 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
               <span className="ml-1 text-gray-400">· priority jobs highlighted, click a title for details</span>
             </p>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
               <Input placeholder="Search companies or roles..." value={searchText} onChange={e => setSearchText(e.target.value)} className="pl-9 w-64" />
             </div>
+            {(() => {
+              const blockedCount = sortedRecords.filter(r => (r as any).is_blocked).length;
+              if (blockedCount === 0) return null;
+              return (
+                <button
+                  type="button"
+                  onClick={() => setShowBlocked(v => !v)}
+                  className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors font-medium ${
+                    showBlocked
+                      ? 'bg-gray-900 text-white border-gray-900 hover:bg-gray-800'
+                      : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+                  }`}
+                >
+                  <Ban className="w-3.5 h-3.5" />
+                  {showBlocked ? 'Hide blocked' : `Show blocked (${blockedCount})`}
+                </button>
+              );
+            })()}
             <span className="text-sm text-gray-500 whitespace-nowrap">{sortedRecords.length} {sortedRecords.length === 1 ? 'company' : 'companies'}</span>
           </div>
         </div>
@@ -1755,15 +1774,18 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
           // whether the flag lives on the job or on the company.
           const flatJobs: TrackerJobsTableRow[] = [];
           for (const rec of sortedRecords) {
+            const isBlocked = !!(rec as any).is_blocked;
+            // Blocked companies are hidden from the table by default; the
+            // "Show blocked" toggle in the header flips them back in with
+            // a muted/strikethrough row style.
+            if (isBlocked && !showBlocked) continue;
             const src: any[] = (rec as any).openJobs || [];
             for (const j of src) {
               flatJobs.push({
                 ...j,
                 _companyIsHighPriority: (rec as any).is_high_priority,
+                _companyIsBlocked: isBlocked,
                 _companyType: (rec as any).company_type,
-                // Full enriched record so the company-summary dialog has
-                // openJobs / companyContacts / newJobs / recentContacts
-                // / isNewCompany / careers_url / has_md_cmo etc.
                 _company: rec,
               });
             }
@@ -1790,6 +1812,7 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
               jobs={jobs}
               jobTypeOptions={allJobTypes.map(jt => jt.name)}
               trackerRuns={runHistory}
+              onDataRefresh={onComplete}
             />
           );
         })()}

@@ -4,8 +4,10 @@ import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ExternalLink, Star,
-  Briefcase, Users, Globe, ShieldCheck,
+  Briefcase, Users, Globe, ShieldCheck, Ban, Undo2, Loader2,
 } from 'lucide-react';
+import { supabase } from '@/lib/supabase';
+import { useToast } from '@/hooks/use-toast';
 
 // Each row is a marketing_jobs row. The parent decorates each job with a
 // few extra fields the table/dialog needs but can't derive on its own:
@@ -37,6 +39,7 @@ export interface TrackerJobsTableRow {
   notes?: string;
   tracker_run_id?: string | null;
   _companyIsHighPriority?: boolean;
+  _companyIsBlocked?: boolean;
   _companyType?: string;
   _company?: CompanyRecord;
   [k: string]: unknown;
@@ -54,6 +57,7 @@ export interface CompanyRecord {
   company_name?: string;
   company_type?: string;
   is_high_priority?: boolean;
+  is_blocked?: boolean;
   has_md_cmo?: boolean;
   careers_url?: string;
   open_roles_count?: number;
@@ -179,10 +183,12 @@ export function TrackerJobsTable({
   jobs,
   jobTypeOptions = [],
   trackerRuns = [],
+  onDataRefresh,
 }: {
   jobs: TrackerJobsTableRow[];
   jobTypeOptions?: string[];
   trackerRuns?: TrackerRunOption[];
+  onDataRefresh?: () => void;
 }) {
   // Text columns store a single string (substring match); select columns
   // store a string[] (exact-match any-of; empty = show all).
@@ -405,12 +411,16 @@ export function TrackerJobsTable({
           <tbody>
             {sorted.map(j => {
               const priority = isPriority(j);
+              const blocked = !!j._companyIsBlocked;
+              const rowBg = blocked
+                ? 'bg-gray-100/80 hover:bg-gray-200/80 opacity-70'
+                : priority
+                  ? 'bg-amber-50/70 hover:bg-amber-100/70'
+                  : '';
               return (
                 <tr
                   key={j.id}
-                  className={`border-b border-gray-100 hover:bg-gray-50 transition-colors ${
-                    priority ? 'bg-amber-50/70 hover:bg-amber-100/70' : ''
-                  }`}
+                  className={`border-b border-gray-100 hover:bg-gray-50 transition-colors ${rowBg}`}
                 >
                   <td className="px-3 py-2 align-top">
                     <div className="flex items-start gap-1.5">
@@ -429,17 +439,26 @@ export function TrackerJobsTable({
                   </td>
                   <td className="px-3 py-2 align-top">
                     {j.company_name ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          // Prefer the full enriched record; fall back to a
-                          // stub so the dialog still opens with name only.
-                          setSelectedCompany(j._company || { company_name: j.company_name, company_type: j._companyType, is_high_priority: j._companyIsHighPriority });
-                        }}
-                        className="text-left text-gray-800 hover:text-blue-800 hover:underline cursor-pointer"
-                      >
-                        {j.company_name}
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            // Prefer the full enriched record; fall back to a
+                            // stub so the dialog still opens with name only.
+                            setSelectedCompany(j._company || { company_name: j.company_name, company_type: j._companyType, is_high_priority: j._companyIsHighPriority, is_blocked: j._companyIsBlocked });
+                          }}
+                          className={`text-left hover:underline cursor-pointer truncate ${
+                            blocked ? 'text-gray-500 line-through' : 'text-gray-800 hover:text-blue-800'
+                          }`}
+                        >
+                          {j.company_name}
+                        </button>
+                        {blocked && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold flex-shrink-0">
+                            BLOCKED
+                          </span>
+                        )}
+                      </div>
                     ) : (
                       <span className="text-gray-400">—</span>
                     )}
@@ -490,6 +509,7 @@ export function TrackerJobsTable({
         company={selectedCompany}
         onClose={() => setSelectedCompany(null)}
         onJobClick={j => { setSelectedCompany(null); setSelectedJob(j as TrackerJobsTableRow); }}
+        onDataRefresh={onDataRefresh}
       />
     </div>
   );
@@ -562,11 +582,42 @@ function CompanyDetailDialog({
   company,
   onClose,
   onJobClick,
+  onDataRefresh,
 }: {
   company: CompanyRecord | null;
   onClose: () => void;
   onJobClick: (job: unknown) => void;
+  onDataRefresh?: () => void;
 }) {
+  const { toast } = useToast();
+  const [blockBusy, setBlockBusy] = useState(false);
+  const isBlocked = !!company?.is_blocked;
+
+  const toggleBlocked = async () => {
+    if (!company?.id) {
+      toast({ title: 'Cannot update company', description: 'Missing company id', variant: 'destructive' });
+      return;
+    }
+    const next = !isBlocked;
+    setBlockBusy(true);
+    const { error } = await supabase
+      .from('marketing_companies')
+      .update({ is_blocked: next })
+      .eq('id', company.id);
+    setBlockBusy(false);
+    if (error) {
+      toast({ title: `Failed to ${next ? 'block' : 'unblock'} company`, description: error.message, variant: 'destructive' });
+      return;
+    }
+    toast({
+      title: next ? 'Company blocked' : 'Company unblocked',
+      description: next
+        ? `${company.company_name} will be hidden from the jobs table and skipped on future scrapes.`
+        : `${company.company_name} will be scraped again and shown in the jobs table.`,
+    });
+    onClose();
+    onDataRefresh?.();
+  };
   const openJobs = company?.openJobs || [];
   const contacts = company?.companyContacts || [];
   const newJobs = company?.newJobs || [];
@@ -683,6 +734,15 @@ function CompanyDetailDialog({
                 </div>
               )}
 
+              {isBlocked && (
+                <div className="rounded-md border border-red-200 bg-red-50 p-2.5 text-xs text-red-700 flex items-start gap-2">
+                  <Ban className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                  <span>
+                    This company is <strong>blocked</strong>. It's hidden from the jobs table by default and will be skipped on future scrapes.
+                  </span>
+                </div>
+              )}
+
               <div className="flex items-center gap-2 pt-2 border-t border-gray-100 flex-wrap">
                 {openCount > 0 && company.company_name && (
                   <a
@@ -704,6 +764,26 @@ function CompanyDetailDialog({
                     <ExternalLink className="w-3 h-3" /> Careers Page
                   </a>
                 )}
+
+                <div className="ml-auto">
+                  <button
+                    type="button"
+                    disabled={blockBusy}
+                    onClick={toggleBlocked}
+                    className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-md border font-medium transition-colors disabled:opacity-60 disabled:cursor-wait ${
+                      isBlocked
+                        ? 'bg-gray-50 text-gray-700 hover:bg-gray-100 border-gray-200'
+                        : 'bg-red-50 text-red-700 hover:bg-red-100 border-red-200'
+                    }`}
+                  >
+                    {blockBusy
+                      ? <Loader2 className="w-3 h-3 animate-spin" />
+                      : isBlocked
+                        ? <Undo2 className="w-3 h-3" />
+                        : <Ban className="w-3 h-3" />}
+                    {isBlocked ? 'Unblock company' : 'Block company'}
+                  </button>
+                </div>
               </div>
             </div>
           </>
