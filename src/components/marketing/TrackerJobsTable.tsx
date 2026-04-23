@@ -34,10 +34,18 @@ export interface TrackerJobsTableRow {
   job_type?: string;
   opportunity_type?: string;
   notes?: string;
+  tracker_run_id?: string | null;
   _companyIsHighPriority?: boolean;
   _companyType?: string;
   _company?: CompanyRecord;
   [k: string]: unknown;
+}
+
+export interface TrackerRunOption {
+  id: string;
+  completed_at?: string | null;
+  started_at?: string | null;
+  status?: string;
 }
 
 export interface CompanyRecord {
@@ -68,15 +76,16 @@ type SortKey =
   | 'created_at';
 type SortDir = 'asc' | 'desc';
 
-const COLUMNS: Array<{ key: SortKey; label: string; className?: string }> = [
-  { key: 'job_title',    label: 'Job Title',    className: 'w-[21%]' },
-  { key: 'job_type',     label: 'Job Type',     className: 'w-[12%]' },
-  { key: 'company_name', label: 'Company',      className: 'w-[17%]' },
-  { key: 'company_type', label: 'Company Type', className: 'w-[12%]' },
-  { key: 'city',         label: 'City',         className: 'w-[10%]' },
-  { key: 'state',        label: 'State',        className: 'w-[6%]' },
-  { key: 'source',       label: 'Source',       className: 'w-[10%]' },
-  { key: 'created_at',   label: 'Date Found',   className: 'w-[12%]' },
+type FilterKind = 'text' | 'select-job-type' | 'select-company-type' | 'select-run';
+const COLUMNS: Array<{ key: SortKey; label: string; className?: string; filter: FilterKind }> = [
+  { key: 'job_title',    label: 'Job Title',    className: 'w-[20%]', filter: 'text' },
+  { key: 'job_type',     label: 'Job Type',     className: 'w-[12%]', filter: 'select-job-type' },
+  { key: 'company_name', label: 'Company',      className: 'w-[15%]', filter: 'text' },
+  { key: 'company_type', label: 'Company Type', className: 'w-[12%]', filter: 'select-company-type' },
+  { key: 'city',         label: 'City',         className: 'w-[9%]',  filter: 'text' },
+  { key: 'state',        label: 'State',        className: 'w-[6%]',  filter: 'text' },
+  { key: 'source',       label: 'Source',       className: 'w-[10%]', filter: 'text' },
+  { key: 'created_at',   label: 'Date Found',   className: 'w-[16%]', filter: 'select-run' },
 ];
 
 // Cleaner label from the tracker's internal source tags.
@@ -102,6 +111,16 @@ function fmtDate(iso?: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '—';
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function fmtDateTime(iso?: string): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleString(undefined, {
+    month: 'short', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+  });
 }
 
 // Normalized form of a role name for substring matching — lowercase,
@@ -130,7 +149,7 @@ function matchJobType(title: string | undefined, options: string[]): string {
 function rowFieldForKey(j: TrackerJobsTableRow, key: SortKey, matchedType: string): string {
   switch (key) {
     case 'source':       return sourceLabel(j);
-    case 'created_at':   return fmtDate(j.created_at);
+    case 'created_at':   return fmtDateTime(j.created_at);
     case 'company_type': return String(j._companyType ?? '');
     case 'job_type':     return matchedType;
     default:             return String((j as Record<string, unknown>)[key] ?? '');
@@ -158,9 +177,11 @@ function googleJobsSearchForCompany(name: string): string {
 export function TrackerJobsTable({
   jobs,
   jobTypeOptions = [],
+  trackerRuns = [],
 }: {
   jobs: TrackerJobsTableRow[];
   jobTypeOptions?: string[];
+  trackerRuns?: TrackerRunOption[];
 }) {
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [sortKey, setSortKey] = useState<SortKey>('created_at');
@@ -181,12 +202,52 @@ export function TrackerJobsTable({
   const fieldFor = (j: TrackerJobsTableRow, key: SortKey) =>
     rowFieldForKey(j, key, matchedTypes.get(j.id) || '');
 
+  // Options for the three select-filter columns. Company-Type options
+  // come from whatever types actually appear in the current jobs
+  // (sorted, deduped) rather than a fixed enum — new categories added
+  // in the DB show up automatically.
+  const companyTypeOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const j of jobs) {
+      if (j._companyType) set.add(j._companyType);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [jobs]);
+
+  // Date-Found options: tracker runs that have produced any of the
+  // currently-visible jobs, sorted most-recent completion first. We
+  // intersect so the select doesn't list runs that would produce zero
+  // rows.
+  const runOptions = useMemo(() => {
+    const runIdsInJobs = new Set<string>();
+    for (const j of jobs) {
+      if (j.tracker_run_id) runIdsInJobs.add(String(j.tracker_run_id));
+    }
+    return trackerRuns
+      .filter(r => runIdsInJobs.has(r.id))
+      .sort((a, b) => {
+        const at = a.completed_at ? new Date(a.completed_at).getTime() : 0;
+        const bt = b.completed_at ? new Date(b.completed_at).getTime() : 0;
+        return bt - at;
+      });
+  }, [jobs, trackerRuns]);
+
   const filtered = useMemo(() => {
     return jobs.filter(j => {
       for (const [key, val] of Object.entries(filters)) {
         if (!val) continue;
-        const needle = val.toLowerCase();
-        if (!fieldFor(j, key as SortKey).toLowerCase().includes(needle)) return false;
+        const col = COLUMNS.find(c => c.key === (key as SortKey));
+        if (!col) continue;
+        if (col.filter === 'select-job-type') {
+          if ((matchedTypes.get(j.id) || '') !== val) return false;
+        } else if (col.filter === 'select-company-type') {
+          if ((j._companyType || '') !== val) return false;
+        } else if (col.filter === 'select-run') {
+          if (String(j.tracker_run_id || '') !== val) return false;
+        } else {
+          const needle = val.toLowerCase();
+          if (!fieldFor(j, key as SortKey).toLowerCase().includes(needle)) return false;
+        }
       }
       return true;
     });
@@ -280,12 +341,36 @@ export function TrackerJobsTable({
             <tr className="bg-white border-b border-gray-200">
               {COLUMNS.map(col => (
                 <th key={col.key} className="px-2 py-1.5 font-normal">
-                  <Input
-                    placeholder={`Filter ${col.label.toLowerCase()}…`}
-                    value={filters[col.key] || ''}
-                    onChange={e => setFilters(prev => ({ ...prev, [col.key]: e.target.value }))}
-                    className="h-7 text-xs"
-                  />
+                  {col.filter === 'text' ? (
+                    <Input
+                      placeholder={`Filter ${col.label.toLowerCase()}…`}
+                      value={filters[col.key] || ''}
+                      onChange={e => setFilters(prev => ({ ...prev, [col.key]: e.target.value }))}
+                      className="h-7 text-xs"
+                    />
+                  ) : (
+                    <select
+                      value={filters[col.key] || ''}
+                      onChange={e => setFilters(prev => ({ ...prev, [col.key]: e.target.value }))}
+                      className="h-7 w-full text-xs rounded-md border border-input bg-background px-2 focus:outline-none focus:ring-1 focus:ring-ring"
+                    >
+                      <option value="">All</option>
+                      {col.filter === 'select-job-type' &&
+                        jobTypeOptions.map(opt => (
+                          <option key={opt} value={opt}>{opt}</option>
+                        ))}
+                      {col.filter === 'select-company-type' &&
+                        companyTypeOptions.map(opt => (
+                          <option key={opt} value={opt}>{opt}</option>
+                        ))}
+                      {col.filter === 'select-run' &&
+                        runOptions.map(r => (
+                          <option key={r.id} value={r.id}>
+                            {fmtDateTime(r.completed_at || r.started_at || '')}
+                          </option>
+                        ))}
+                    </select>
+                  )}
                 </th>
               ))}
             </tr>
@@ -354,7 +439,7 @@ export function TrackerJobsTable({
                       <span className="text-gray-500">{sourceLabel(j)}</span>
                     )}
                   </td>
-                  <td className="px-3 py-2 align-top text-gray-600 whitespace-nowrap">{fmtDate(j.created_at)}</td>
+                  <td className="px-3 py-2 align-top text-gray-600 whitespace-nowrap">{fmtDateTime(j.created_at)}</td>
                 </tr>
               );
             })}
@@ -404,7 +489,7 @@ function JobDetailDialog({ job, onClose }: { job: TrackerJobsTableRow | null; on
                 <Field label="Company" value={job.company_name} />
                 <Field label="Location" value={[job.city, job.state].filter(Boolean).join(', ')} />
                 <Field label="Source" value={sourceLabel(job)} />
-                <Field label="Date Found" value={fmtDate(job.created_at)} />
+                <Field label="Date Found" value={fmtDateTime(job.created_at)} />
                 {job.date_posted && <Field label="Date Posted" value={fmtDate(job.date_posted)} />}
                 {job.job_type && <Field label="Job Type" value={job.job_type} />}
                 {job.opportunity_type && <Field label="Opportunity" value={job.opportunity_type} />}

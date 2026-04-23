@@ -1785,7 +1785,13 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
               </div>
             );
           }
-          return <TrackerJobsTable jobs={jobs} jobTypeOptions={allJobTypes.map(jt => jt.name)} />;
+          return (
+            <TrackerJobsTable
+              jobs={jobs}
+              jobTypeOptions={allJobTypes.map(jt => jt.name)}
+              trackerRuns={runHistory}
+            />
+          );
         })()}
       </div>
 
