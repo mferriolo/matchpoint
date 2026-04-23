@@ -104,12 +104,35 @@ function fmtDate(iso?: string): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+// Normalized form of a role name for substring matching — lowercase,
+// parentheticals stripped (e.g. "Registered Nurses (RNs)" → "registered nurses").
+function cleanRoleLabel(s: string): string {
+  return s.toLowerCase().replace(/\s*\([^)]*\)\s*/g, ' ').trim();
+}
+
+// Determine which of the user's tracked job_types this job's title maps
+// to. Iterates longest-first so more specific matches win (e.g. "Primary
+// Care Physician" is preferred over the generic "Physician"). The DB's
+// job_type column is often a copy of the raw title rather than a
+// normalized role name, so we redo the matching client-side.
+function matchJobType(title: string | undefined, options: string[]): string {
+  if (!title || options.length === 0) return '';
+  const lowerTitle = title.toLowerCase();
+  const sorted = [...options].sort((a, b) => b.length - a.length);
+  for (const t of sorted) {
+    const c = cleanRoleLabel(t);
+    if (c && lowerTitle.includes(c)) return t;
+  }
+  return '';
+}
+
 // Extract the filterable/sortable string for a given column from a row.
-function rowFieldForKey(j: TrackerJobsTableRow, key: SortKey): string {
+function rowFieldForKey(j: TrackerJobsTableRow, key: SortKey, matchedType: string): string {
   switch (key) {
     case 'source':       return sourceLabel(j);
     case 'created_at':   return fmtDate(j.created_at);
     case 'company_type': return String(j._companyType ?? '');
+    case 'job_type':     return matchedType;
     default:             return String((j as Record<string, unknown>)[key] ?? '');
   }
 }
@@ -132,23 +155,43 @@ function googleJobsSearchForCompany(name: string): string {
   return `https://www.google.com/search?q=${encodeURIComponent(`${name} healthcare jobs`)}&ibp=htl;jobs`;
 }
 
-export function TrackerJobsTable({ jobs }: { jobs: TrackerJobsTableRow[] }) {
+export function TrackerJobsTable({
+  jobs,
+  jobTypeOptions = [],
+}: {
+  jobs: TrackerJobsTableRow[];
+  jobTypeOptions?: string[];
+}) {
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [sortKey, setSortKey] = useState<SortKey>('created_at');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [selectedJob, setSelectedJob] = useState<TrackerJobsTableRow | null>(null);
   const [selectedCompany, setSelectedCompany] = useState<CompanyRecord | null>(null);
 
+  // Pre-compute the matched job type per row so filter/sort/render all
+  // agree on what Job Type means for a given job.
+  const matchedTypes = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const j of jobs) {
+      m.set(j.id, matchJobType(j.job_title, jobTypeOptions));
+    }
+    return m;
+  }, [jobs, jobTypeOptions]);
+
+  const fieldFor = (j: TrackerJobsTableRow, key: SortKey) =>
+    rowFieldForKey(j, key, matchedTypes.get(j.id) || '');
+
   const filtered = useMemo(() => {
     return jobs.filter(j => {
       for (const [key, val] of Object.entries(filters)) {
         if (!val) continue;
         const needle = val.toLowerCase();
-        if (!rowFieldForKey(j, key as SortKey).toLowerCase().includes(needle)) return false;
+        if (!fieldFor(j, key as SortKey).toLowerCase().includes(needle)) return false;
       }
       return true;
     });
-  }, [jobs, filters]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobs, filters, matchedTypes]);
 
   const sorted = useMemo(() => {
     const arr = [...filtered];
@@ -159,14 +202,17 @@ export function TrackerJobsTable({ jobs }: { jobs: TrackerJobsTableRow[] }) {
         const bd = b.created_at ? new Date(b.created_at).getTime() : 0;
         cmp = ad - bd;
       } else {
-        const av = rowFieldForKey(a, sortKey);
-        const bv = rowFieldForKey(b, sortKey);
+        const av = fieldFor(a, sortKey);
+        const bv = fieldFor(b, sortKey);
         cmp = av.localeCompare(bv, undefined, { sensitivity: 'base' });
       }
       return sortDir === 'asc' ? cmp : -cmp;
     });
     return arr;
-  }, [filtered, sortKey, sortDir]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered, sortKey, sortDir, matchedTypes]);
+
+  const hasActiveFilter = Object.values(filters).some(v => v.trim().length > 0);
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -188,6 +234,29 @@ export function TrackerJobsTable({ jobs }: { jobs: TrackerJobsTableRow[] }) {
 
   return (
     <div>
+      <div className="flex items-center justify-between flex-wrap gap-2 px-4 py-2 border-b border-gray-100 bg-white">
+        <div className="text-xs text-gray-600">
+          <span className="font-semibold text-gray-900">{sorted.length}</span>
+          <span className="text-gray-500"> of </span>
+          <span className="font-semibold text-gray-900">{jobs.length}</span>
+          <span className="text-gray-500"> {jobs.length === 1 ? 'job' : 'jobs'}</span>
+          {hasActiveFilter && (
+            <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-semibold uppercase tracking-wider">
+              Filtered
+            </span>
+          )}
+        </div>
+        {hasActiveFilter && (
+          <button
+            type="button"
+            onClick={() => setFilters({})}
+            className="text-[11px] text-gray-500 hover:text-gray-800 hover:underline"
+          >
+            Clear filters
+          </button>
+        )}
+      </div>
+
       <div className="overflow-x-auto">
         <table className="w-full text-xs border-collapse">
           <thead>
@@ -243,7 +312,9 @@ export function TrackerJobsTable({ jobs }: { jobs: TrackerJobsTableRow[] }) {
                       </button>
                     </div>
                   </td>
-                  <td className="px-3 py-2 align-top text-gray-700">{j.job_type || '—'}</td>
+                  <td className="px-3 py-2 align-top text-gray-700">
+                    {matchedTypes.get(j.id) || <span className="text-gray-400">—</span>}
+                  </td>
                   <td className="px-3 py-2 align-top">
                     {j.company_name ? (
                       <button
