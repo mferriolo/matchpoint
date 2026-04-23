@@ -855,27 +855,61 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         await progress.skipStep('searching_sources');
         await progress.skipStep('deduplicating');
       } else {
-        // Build unified target list: priority orgs ∪ recurring sources,
-        // deduped by lowercased name and blocked-filtered.
+        // Build unified target list. v150 changes:
+        //   - Fast mode (deepScan=false): priority-selected only. Previously
+        //     this silently unioned in every marketing_companies row with a
+        //     careers_url (~207 rows), turning a "18 companies" run into
+        //     230 SerpAPI calls and blowing past the edge-function wall
+        //     clock. If you want the recurring-sources sweep, flip Deep.
+        //   - Deep mode (deepScan=true): priority-selected ∪ recurring
+        //     sources, same as before.
+        //   - Both modes: hard-cap combined targets at MAX_TARGETS_PER_RUN.
+        //     Priority-selected rows are always pushed first, so truncation
+        //     only ever drops recurring-source rows.
+        const MAX_TARGETS_PER_RUN = 80;
         type SearchTarget = { name: string; source: 'priority' | 'recurring' };
         const effectivePriorityOrgs = effectivePriorityOrgsList.filter(o => !blockedCompanyNames.has(o.toLowerCase().trim()));
-        const targets: SearchTarget[] = [];
+        const targetsRaw: SearchTarget[] = [];
         const seenLower = new Set<string>();
         for (const name of effectivePriorityOrgs) {
           const lower = name.toLowerCase().trim();
           if (seenLower.has(lower)) continue;
           seenLower.add(lower);
-          targets.push({ name, source: 'priority' });
+          targetsRaw.push({ name, source: 'priority' });
         }
-        for (const c of recSrc) {
-          const lower = (c.company_name || '').toLowerCase().trim();
-          if (!lower || seenLower.has(lower)) continue;
-          seenLower.add(lower);
-          targets.push({ name: c.company_name, source: 'recurring' });
+        const priorityTargetCount = targetsRaw.length;
+        let recurringIncluded = 0, recurringSkippedFastMode = 0;
+        if (deepScan) {
+          for (const c of recSrc) {
+            const lower = (c.company_name || '').toLowerCase().trim();
+            if (!lower || seenLower.has(lower)) continue;
+            seenLower.add(lower);
+            targetsRaw.push({ name: c.company_name, source: 'recurring' });
+            recurringIncluded++;
+          }
+        } else {
+          for (const c of recSrc) {
+            const lower = (c.company_name || '').toLowerCase().trim();
+            if (!lower || seenLower.has(lower)) continue;
+            recurringSkippedFastMode++;
+          }
         }
+        const truncatedBy = Math.max(0, targetsRaw.length - MAX_TARGETS_PER_RUN);
+        const targets: SearchTarget[] = targetsRaw.slice(0, MAX_TARGETS_PER_RUN);
+
+        const modeLabel = deepScan ? 'DEEP' : 'FAST';
+        const scopeDetail = deepScan
+          ? `${priorityTargetCount} priority + ${recurringIncluded} recurring`
+          : `${priorityTargetCount} priority (skipped ${recurringSkippedFastMode} recurring sources — flip Deep to include)`;
+        const capDetail = truncatedBy > 0
+          ? ` [CAPPED at ${MAX_TARGETS_PER_RUN}: dropped ${truncatedBy} recurring sources from this run]`
+          : '';
 
         const totalUnits = targets.length + effectiveRoles.length;
-        log('searching_sources', `DIRECT DISCOVERY: ${targets.length} companies + ${effectiveRoles.length} broad role searches = ${totalUnits} SerpAPI calls (preceded by direct career-page scraping)`);
+        log('searching_sources',
+          `DIRECT DISCOVERY (${modeLabel}): ${targets.length} companies (${scopeDetail}) + ` +
+          `${effectiveRoles.length} broad role searches = ${totalUnits} SerpAPI calls${capDetail}`
+        );
         await progress.startStep('searching_sources', `Scraping career pages, then querying Google Jobs...`);
         await progress.updateStep('searching_sources', { items_total: totalUnits, items_processed: 0 });
         // discover_via_serpapi telemetry step is started below, after Phase A.
