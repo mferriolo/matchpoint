@@ -1761,6 +1761,10 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
                 ...j,
                 _companyIsHighPriority: (rec as any).is_high_priority,
                 _companyType: (rec as any).company_type,
+                // Full enriched record so the company-summary dialog has
+                // openJobs / companyContacts / newJobs / recentContacts
+                // / isNewCompany / careers_url / has_md_cmo etc.
+                _company: rec,
               });
             }
           }
