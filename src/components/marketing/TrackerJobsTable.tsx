@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
-  ArrowDown, ArrowUp, ArrowUpDown, ExternalLink, Star,
+  ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ExternalLink, Star,
   Briefcase, Users, Globe, ShieldCheck,
 } from 'lucide-react';
 
@@ -183,7 +184,9 @@ export function TrackerJobsTable({
   jobTypeOptions?: string[];
   trackerRuns?: TrackerRunOption[];
 }) {
-  const [filters, setFilters] = useState<Record<string, string>>({});
+  // Text columns store a single string (substring match); select columns
+  // store a string[] (exact-match any-of; empty = show all).
+  const [filters, setFilters] = useState<Record<string, string | string[]>>({});
   const [sortKey, setSortKey] = useState<SortKey>('created_at');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [selectedJob, setSelectedJob] = useState<TrackerJobsTableRow | null>(null);
@@ -202,10 +205,18 @@ export function TrackerJobsTable({
   const fieldFor = (j: TrackerJobsTableRow, key: SortKey) =>
     rowFieldForKey(j, key, matchedTypes.get(j.id) || '');
 
-  // Options for the three select-filter columns. Company-Type options
-  // come from whatever types actually appear in the current jobs
-  // (sorted, deduped) rather than a fixed enum — new categories added
-  // in the DB show up automatically.
+  // Select-filter options — derived from whatever is actually in the
+  // current jobs dataset so pickers never show empty rows. Each sorted,
+  // deduped.
+  const jobTypeSelectOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const j of jobs) {
+      const t = matchedTypes.get(j.id);
+      if (t) set.add(t);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [jobs, matchedTypes]);
+
   const companyTypeOptions = useMemo(() => {
     const set = new Set<string>();
     for (const j of jobs) {
@@ -214,10 +225,6 @@ export function TrackerJobsTable({
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [jobs]);
 
-  // Date-Found options: tracker runs that have produced any of the
-  // currently-visible jobs, sorted most-recent completion first. We
-  // intersect so the select doesn't list runs that would produce zero
-  // rows.
   const runOptions = useMemo(() => {
     const runIdsInJobs = new Set<string>();
     for (const j of jobs) {
@@ -232,21 +239,34 @@ export function TrackerJobsTable({
       });
   }, [jobs, trackerRuns]);
 
+  const setTextFilter = (key: string, v: string) =>
+    setFilters(prev => ({ ...prev, [key]: v }));
+  const setMultiFilter = (key: string, v: string[]) =>
+    setFilters(prev => ({ ...prev, [key]: v }));
+  const getMulti = (key: string): string[] => {
+    const v = filters[key];
+    return Array.isArray(v) ? v : [];
+  };
+  const getText = (key: string): string => {
+    const v = filters[key];
+    return typeof v === 'string' ? v : '';
+  };
+
   const filtered = useMemo(() => {
     return jobs.filter(j => {
-      for (const [key, val] of Object.entries(filters)) {
-        if (!val) continue;
-        const col = COLUMNS.find(c => c.key === (key as SortKey));
-        if (!col) continue;
-        if (col.filter === 'select-job-type') {
-          if ((matchedTypes.get(j.id) || '') !== val) return false;
-        } else if (col.filter === 'select-company-type') {
-          if ((j._companyType || '') !== val) return false;
-        } else if (col.filter === 'select-run') {
-          if (String(j.tracker_run_id || '') !== val) return false;
+      for (const col of COLUMNS) {
+        const v = filters[col.key];
+        if (col.filter === 'text') {
+          if (typeof v !== 'string' || !v) continue;
+          if (!fieldFor(j, col.key).toLowerCase().includes(v.toLowerCase())) return false;
         } else {
-          const needle = val.toLowerCase();
-          if (!fieldFor(j, key as SortKey).toLowerCase().includes(needle)) return false;
+          const selected = Array.isArray(v) ? v : [];
+          if (selected.length === 0) continue;
+          let rowVal = '';
+          if (col.filter === 'select-job-type') rowVal = matchedTypes.get(j.id) || '';
+          else if (col.filter === 'select-company-type') rowVal = j._companyType || '';
+          else if (col.filter === 'select-run') rowVal = String(j.tracker_run_id || '');
+          if (!selected.includes(rowVal)) return false;
         }
       }
       return true;
@@ -273,7 +293,9 @@ export function TrackerJobsTable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filtered, sortKey, sortDir, matchedTypes]);
 
-  const hasActiveFilter = Object.values(filters).some(v => v.trim().length > 0);
+  const hasActiveFilter = Object.values(filters).some(v =>
+    Array.isArray(v) ? v.length > 0 : typeof v === 'string' && v.trim().length > 0
+  );
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -341,35 +363,40 @@ export function TrackerJobsTable({
             <tr className="bg-white border-b border-gray-200">
               {COLUMNS.map(col => (
                 <th key={col.key} className="px-2 py-1.5 font-normal">
-                  {col.filter === 'text' ? (
+                  {col.filter === 'text' && (
                     <Input
                       placeholder={`Filter ${col.label.toLowerCase()}…`}
-                      value={filters[col.key] || ''}
-                      onChange={e => setFilters(prev => ({ ...prev, [col.key]: e.target.value }))}
+                      value={getText(col.key)}
+                      onChange={e => setTextFilter(col.key, e.target.value)}
                       className="h-7 text-xs"
                     />
-                  ) : (
-                    <select
-                      value={filters[col.key] || ''}
-                      onChange={e => setFilters(prev => ({ ...prev, [col.key]: e.target.value }))}
-                      className="h-7 w-full text-xs rounded-md border border-input bg-background px-2 focus:outline-none focus:ring-1 focus:ring-ring"
-                    >
-                      <option value="">All</option>
-                      {col.filter === 'select-job-type' &&
-                        jobTypeOptions.map(opt => (
-                          <option key={opt} value={opt}>{opt}</option>
-                        ))}
-                      {col.filter === 'select-company-type' &&
-                        companyTypeOptions.map(opt => (
-                          <option key={opt} value={opt}>{opt}</option>
-                        ))}
-                      {col.filter === 'select-run' &&
-                        runOptions.map(r => (
-                          <option key={r.id} value={r.id}>
-                            {fmtDateTime(r.completed_at || r.started_at || '')}
-                          </option>
-                        ))}
-                    </select>
+                  )}
+                  {col.filter === 'select-job-type' && (
+                    <MultiSelectFilter
+                      label={col.label}
+                      options={jobTypeSelectOptions.map(o => ({ value: o, label: o }))}
+                      values={getMulti(col.key)}
+                      onChange={next => setMultiFilter(col.key, next)}
+                    />
+                  )}
+                  {col.filter === 'select-company-type' && (
+                    <MultiSelectFilter
+                      label={col.label}
+                      options={companyTypeOptions.map(o => ({ value: o, label: o }))}
+                      values={getMulti(col.key)}
+                      onChange={next => setMultiFilter(col.key, next)}
+                    />
+                  )}
+                  {col.filter === 'select-run' && (
+                    <MultiSelectFilter
+                      label={col.label}
+                      options={runOptions.map(r => ({
+                        value: r.id,
+                        label: fmtDateTime(r.completed_at || r.started_at || ''),
+                      }))}
+                      values={getMulti(col.key)}
+                      onChange={next => setMultiFilter(col.key, next)}
+                    />
                   )}
                 </th>
               ))}
@@ -695,6 +722,75 @@ function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string
       </div>
       <div className="text-2xl font-bold text-gray-900">{value}</div>
     </div>
+  );
+}
+
+function MultiSelectFilter({
+  label,
+  options,
+  values,
+  onChange,
+}: {
+  label: string;
+  options: Array<{ value: string; label: string }>;
+  values: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const summary =
+    values.length === 0
+      ? `All ${label.toLowerCase()}`
+      : values.length === 1
+        ? (options.find(o => o.value === values[0])?.label || '1 selected')
+        : `${values.length} of ${options.length} selected`;
+
+  const toggle = (v: string) => {
+    onChange(values.includes(v) ? values.filter(x => x !== v) : [...values, v]);
+  };
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="h-7 w-full text-xs text-left rounded-md border border-input bg-background px-2 focus:outline-none focus:ring-1 focus:ring-ring flex items-center justify-between gap-1"
+        >
+          <span className={`truncate ${values.length === 0 ? 'text-gray-500' : 'text-gray-900 font-medium'}`}>
+            {summary}
+          </span>
+          <ChevronDown className="w-3 h-3 flex-shrink-0 text-gray-500" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="p-0 w-64" align="start">
+        <div className="p-2 border-b text-[11px] text-gray-500 flex items-center justify-between">
+          <span>{values.length} selected</span>
+          {values.length > 0 && (
+            <button type="button" onClick={() => onChange([])} className="text-blue-600 hover:underline">
+              Clear
+            </button>
+          )}
+        </div>
+        <div className="max-h-[40vh] overflow-y-auto py-1">
+          {options.length === 0 && (
+            <div className="px-3 py-2 text-xs text-gray-400">No options</div>
+          )}
+          {options.map(opt => (
+            <label
+              key={opt.value}
+              className="flex items-center gap-2 px-2 py-1.5 hover:bg-gray-50 cursor-pointer text-xs"
+            >
+              <input
+                type="checkbox"
+                checked={values.includes(opt.value)}
+                onChange={() => toggle(opt.value)}
+                className="w-3.5 h-3.5 rounded border-gray-300"
+              />
+              <span className="truncate flex-1">{opt.label}</span>
+            </label>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
