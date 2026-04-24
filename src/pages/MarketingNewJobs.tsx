@@ -1026,19 +1026,15 @@ const MarketingNewJobs: React.FC = () => {
       .sort((a, b) => b.items.length - a.items.length);
   }, [companies, contacts]);
 
-  // Seed mergeSelection for a group on first view: pick the top-sorted
-  // member as canonical, include every other member. Keeps whatever the
-  // user has already toggled if they re-open the dialog mid-review.
-  const ensureMergeSelection = (groupKey: string, items: any[]) => {
-    if (mergeSelection[groupKey]) return;
-    setMergeSelection(prev => ({
-      ...prev,
-      [groupKey]: {
-        canonicalId: items[0].id,
-        includeIds: new Set(items.map(i => i.id)),
-      },
-    }));
-  };
+  // Compute defaults for a group: top-sorted member is canonical, all
+  // members are included. Used both to seed state when the dialog opens
+  // and as a fallback inside the confirm handler when state hasn't been
+  // populated yet (prevents silent no-ops when the user clicks Confirm
+  // before React commits the seeding render).
+  const defaultMergeSelection = (items: any[]) => ({
+    canonicalId: items[0].id,
+    includeIds: new Set(items.map(i => i.id)),
+  });
 
   // Confirm the queued merges: for each group where the user left ≥ 2
   // rows checked (canonical + at least one merge), call the
@@ -1047,12 +1043,34 @@ const MarketingNewJobs: React.FC = () => {
   // from the bulk-selection bar, or the auto-detected candidates.
   const activeMergeGroups = manualMergeGroup ? [manualMergeGroup] : companyMergeCandidates;
 
+  // Seed mergeSelection for any group that doesn't have an entry yet
+  // when the dialog opens (or when the set of active groups changes).
+  // Uses useEffect rather than setState-during-render so the state is
+  // reliably committed by the time the user clicks Confirm.
+  useEffect(() => {
+    if (!showMergeCandidates) return;
+    setMergeSelection(prev => {
+      let next = prev;
+      let changed = false;
+      for (const g of activeMergeGroups) {
+        if (!next[g.key]) {
+          if (!changed) { next = { ...prev }; changed = true; }
+          next[g.key] = defaultMergeSelection(g.items);
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [showMergeCandidates, activeMergeGroups]);
+
   const handleConfirmCompanyMerges = async () => {
     setMergingInFlight(true);
     const results: Array<{ group: string; ok: boolean; canonical_name?: string; jobs_moved?: number; contacts_moved?: number; companies_deleted?: number; fields_filled?: string[]; error?: string }> = [];
     for (const g of activeMergeGroups) {
-      const sel = mergeSelection[g.key];
-      if (!sel) continue;
+      // Fall back to default selection if state wasn't populated yet
+      // (React may not have committed the seed effect by the time the
+      // user clicks Confirm). Keeps the bulk-select path from silently
+      // no-op-ing when the user clicks fast.
+      const sel = mergeSelection[g.key] || defaultMergeSelection(g.items);
       const mergeIds = Array.from(sel.includeIds).filter(id => id !== sel.canonicalId);
       if (mergeIds.length === 0) continue;
       try {
@@ -2652,10 +2670,9 @@ const MarketingNewJobs: React.FC = () => {
 
             <div className="overflow-y-auto flex-1 p-5 space-y-5 bg-gray-50">
               {activeMergeGroups.map(g => {
-                ensureMergeSelection(g.key, g.items);
-                const sel = mergeSelection[g.key];
-                const canonicalId = sel?.canonicalId || g.items[0].id;
-                const includeIds = sel?.includeIds || new Set(g.items.map(i => i.id));
+                const sel = mergeSelection[g.key] || defaultMergeSelection(g.items);
+                const canonicalId = sel.canonicalId;
+                const includeIds = sel.includeIds;
                 const mergeCount = Array.from(includeIds).filter(id => id !== canonicalId).length;
                 return (
                   <div key={g.key} className="bg-white rounded-lg border border-gray-200 overflow-hidden">
@@ -2744,8 +2761,9 @@ const MarketingNewJobs: React.FC = () => {
             <div className="p-4 border-t bg-white flex items-center justify-between">
               <p className="text-sm text-gray-600">
                 {(() => {
-                  const totalMerges = Object.entries(mergeSelection).reduce((n, [, s]) => {
-                    return n + Array.from(s.includeIds).filter(id => id !== s.canonicalId).length;
+                  const totalMerges = activeMergeGroups.reduce((n, g) => {
+                    const sel = mergeSelection[g.key] || defaultMergeSelection(g.items);
+                    return n + Array.from(sel.includeIds).filter(id => id !== sel.canonicalId).length;
                   }, 0);
                   return totalMerges > 0
                     ? `${totalMerges} compan${totalMerges === 1 ? 'y' : 'ies'} will be merged into their canonical.`
@@ -2758,7 +2776,10 @@ const MarketingNewJobs: React.FC = () => {
                 </Button>
                 <Button
                   onClick={handleConfirmCompanyMerges}
-                  disabled={mergingInFlight || Object.entries(mergeSelection).every(([, s]) => Array.from(s.includeIds).filter(id => id !== s.canonicalId).length === 0)}
+                  disabled={mergingInFlight || activeMergeGroups.every(g => {
+                    const sel = mergeSelection[g.key] || defaultMergeSelection(g.items);
+                    return Array.from(sel.includeIds).filter(id => id !== sel.canonicalId).length === 0;
+                  })}
                   className="bg-purple-700 hover:bg-purple-800 text-white"
                 >
                   {mergingInFlight ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Merging…</>) : (<><GitMerge className="w-4 h-4 mr-2" /> Confirm merges</>)}
