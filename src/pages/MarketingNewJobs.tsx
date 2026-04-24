@@ -459,6 +459,110 @@ const MarketingNewJobs: React.FC = () => {
   const [mergeSelection, setMergeSelection] = useState<Record<string, { canonicalId: string; includeIds: Set<string> }>>({});
   const [mergingInFlight, setMergingInFlight] = useState(false);
   const [mergeResultSummary, setMergeResultSummary] = useState<Array<{ group: string; ok: boolean; canonical_name?: string; jobs_moved?: number; contacts_moved?: number; companies_deleted?: number; fields_filled?: string[]; error?: string }> | null>(null);
+  // When non-null, the merge dialog renders a single group containing
+  // these specific companies (manual pick from the bulk selection bar)
+  // instead of the auto-detected candidates. Cleared when the dialog
+  // closes or the merge completes.
+  const [manualMergeGroup, setManualMergeGroup] = useState<{ key: string; items: any[] } | null>(null);
+
+  // Row-level edit modal state for companies + contacts. editingX holds
+  // the row being edited (null = closed); editingXDraft holds in-flight
+  // form values; savingX disables Save while the update is in flight.
+  // One modal at a time per entity type; opening a new row replaces the
+  // draft.
+  const [editingCompany, setEditingCompany] = useState<any | null>(null);
+  const [editingCompanyDraft, setEditingCompanyDraft] = useState<Record<string, any>>({});
+  const [savingCompanyEdit, setSavingCompanyEdit] = useState(false);
+  const [editingContact, setEditingContact] = useState<any | null>(null);
+  const [editingContactDraft, setEditingContactDraft] = useState<Record<string, any>>({});
+  const [savingContactEdit, setSavingContactEdit] = useState(false);
+
+  const openEditCompany = (c: any) => {
+    setEditingCompany(c);
+    setEditingCompanyDraft({
+      company_name: c.company_name ?? '',
+      website: c.website ?? '',
+      careers_url: c.careers_url ?? '',
+      company_type: c.company_type ?? '',
+      industry: c.industry ?? '',
+      location: c.location ?? '',
+      homepage_url: c.homepage_url ?? '',
+      role_types_hired: c.role_types_hired ?? '',
+      source: c.source ?? '',
+      notes: c.notes ?? '',
+      is_high_priority: !!c.is_high_priority,
+      is_blocked: !!c.is_blocked,
+      has_md_cmo: !!c.has_md_cmo,
+    });
+  };
+
+  const handleSaveCompanyEdit = async () => {
+    if (!editingCompany) return;
+    setSavingCompanyEdit(true);
+    try {
+      const updates: Record<string, any> = { ...editingCompanyDraft, updated_at: new Date().toISOString() };
+      // Coerce empty strings to null for text fields so filters /
+      // searches don't see phantom zero-length values.
+      for (const k of ['website', 'careers_url', 'industry', 'location', 'homepage_url', 'role_types_hired', 'source', 'notes', 'company_type']) {
+        if (updates[k] === '') updates[k] = null;
+      }
+      const { error } = await supabase.from('marketing_companies').update(updates).eq('id', editingCompany.id);
+      if (error) throw error;
+      // If company_name changed, cascade the text label onto jobs +
+      // contacts that reference this company so the denormalized field
+      // stays in sync with the relational id.
+      if (editingCompanyDraft.company_name && editingCompanyDraft.company_name !== editingCompany.company_name) {
+        await supabase.from('marketing_jobs').update({ company_name: editingCompanyDraft.company_name }).eq('company_id', editingCompany.id);
+        await supabase.from('marketing_contacts').update({ company_name: editingCompanyDraft.company_name }).eq('company_id', editingCompany.id);
+      }
+      toast({ title: 'Company updated' });
+      setEditingCompany(null);
+      setEditingCompanyDraft({});
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Save failed', description: err.message || String(err), variant: 'destructive' });
+    } finally {
+      setSavingCompanyEdit(false);
+    }
+  };
+
+  const openEditContact = (c: any) => {
+    setEditingContact(c);
+    setEditingContactDraft({
+      first_name: c.first_name ?? '',
+      last_name: c.last_name ?? '',
+      title: c.title ?? '',
+      email: c.email ?? '',
+      phone_work: c.phone_work ?? '',
+      phone_home: c.phone_home ?? '',
+      phone_cell: c.phone_cell ?? '',
+      linkedin_url: c.linkedin_url ?? '',
+      company_name: c.company_name ?? '',
+      source: c.source ?? '',
+      notes: c.notes ?? '',
+    });
+  };
+
+  const handleSaveContactEdit = async () => {
+    if (!editingContact) return;
+    setSavingContactEdit(true);
+    try {
+      const updates: Record<string, any> = { ...editingContactDraft, updated_at: new Date().toISOString() };
+      for (const k of ['title', 'email', 'phone_work', 'phone_home', 'phone_cell', 'linkedin_url', 'source', 'notes']) {
+        if (updates[k] === '') updates[k] = null;
+      }
+      const { error } = await supabase.from('marketing_contacts').update(updates).eq('id', editingContact.id);
+      if (error) throw error;
+      toast({ title: 'Contact updated' });
+      setEditingContact(null);
+      setEditingContactDraft({});
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Save failed', description: err.message || String(err), variant: 'destructive' });
+    } finally {
+      setSavingContactEdit(false);
+    }
+  };
 
   // Kick off a find-contacts run. The edge function returns a run_id
   // immediately and continues processing in the background. We then
@@ -939,10 +1043,14 @@ const MarketingNewJobs: React.FC = () => {
   // Confirm the queued merges: for each group where the user left ≥ 2
   // rows checked (canonical + at least one merge), call the
   // merge_companies RPC. Results are accumulated for the summary.
+  // The dialog renders whichever source is active: a manual group built
+  // from the bulk-selection bar, or the auto-detected candidates.
+  const activeMergeGroups = manualMergeGroup ? [manualMergeGroup] : companyMergeCandidates;
+
   const handleConfirmCompanyMerges = async () => {
     setMergingInFlight(true);
     const results: Array<{ group: string; ok: boolean; canonical_name?: string; jobs_moved?: number; contacts_moved?: number; companies_deleted?: number; fields_filled?: string[]; error?: string }> = [];
-    for (const g of companyMergeCandidates) {
+    for (const g of activeMergeGroups) {
       const sel = mergeSelection[g.key];
       if (!sel) continue;
       const mergeIds = Array.from(sel.includeIds).filter(id => id !== sel.canonicalId);
@@ -977,6 +1085,10 @@ const MarketingNewJobs: React.FC = () => {
     });
     setShowMergeCandidates(false);
     setMergeSelection({});
+    // Clear any manual selection that fed into this merge so the
+    // bulk bar disappears and the auto-detected list is shown next time.
+    setManualMergeGroup(null);
+    clearCompanySelection();
     loadData();
   };
 
@@ -1478,7 +1590,7 @@ const MarketingNewJobs: React.FC = () => {
                     : `${companyMergeCandidates.length} group${companyMergeCandidates.length === 1 ? '' : 's'} of similar company names detected`}
                 >
                   <GitMerge className="w-4 h-4" />
-                  Merge Candidates{companyMergeCandidates.length > 0 ? ` (${companyMergeCandidates.length})` : ''}
+                  Search and Merge Companies{companyMergeCandidates.length > 0 ? ` (${companyMergeCandidates.length})` : ''}
                 </Button>
               </div>
 
@@ -1489,6 +1601,38 @@ const MarketingNewJobs: React.FC = () => {
                     {selectedCompanyIds.size} selected
                   </span>
                   <div className="ml-auto flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // Build a manual merge group from the selection
+                        // and open the merge dialog. Dialog reuses the
+                        // canonical-picker + RPC path already used for
+                        // auto-detected candidates.
+                        const selected = companies.filter(c => selectedCompanyIds.has(c.id));
+                        if (selected.length < 2) return;
+                        const contactCountByCoId = new Map<string, number>();
+                        for (const ct of contacts) {
+                          if (!ct.company_id) continue;
+                          contactCountByCoId.set(ct.company_id, (contactCountByCoId.get(ct.company_id) || 0) + 1);
+                        }
+                        const items = selected
+                          .map(c => ({ ...c, _contact_count: c.contact_count ?? contactCountByCoId.get(c.id) ?? 0 }))
+                          .sort((a, b) => {
+                            const scoreA = (a.open_roles_count || 0) * 10 + (a._contact_count || 0);
+                            const scoreB = (b.open_roles_count || 0) * 10 + (b._contact_count || 0);
+                            if (scoreA !== scoreB) return scoreB - scoreA;
+                            return (a.company_name || '').length - (b.company_name || '').length;
+                          });
+                        setManualMergeGroup({ key: 'manual-selection', items });
+                        setMergeSelection({});
+                        setShowMergeCandidates(true);
+                      }}
+                      disabled={selectedCompanyIds.size < 2}
+                      className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-purple-300 bg-white hover:bg-purple-50 text-purple-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={selectedCompanyIds.size < 2 ? 'Select at least two companies to merge' : 'Merge the selected companies — pick a canonical; others are merged into it'}
+                    >
+                      <GitMerge className="w-3.5 h-3.5" /> Merge
+                    </button>
                     <button
                       type="button"
                       onClick={() => handleBulkCompanyBlock(true)}
@@ -1722,7 +1866,14 @@ const MarketingNewJobs: React.FC = () => {
                                 ))}
                               </select>
                             ) : (
-                              <span className={`text-xs px-2 py-0.5 rounded-full ${categoryBadge(c.company_type)}`}>{c.company_type || '-'}</span>
+                              <button
+                                type="button"
+                                onClick={() => setEditingCompanyTypeId(c.id)}
+                                className={`text-xs px-2 py-0.5 rounded-full cursor-pointer hover:ring-1 hover:ring-[#911406]/30 ${categoryBadge(c.company_type)}`}
+                                title="Click to change category"
+                              >
+                                {c.company_type || '-'}
+                              </button>
                             )}
                           </td>
                           <td className="px-4 py-3">
@@ -1803,9 +1954,9 @@ const MarketingNewJobs: React.FC = () => {
                                   : <Users className="w-4 h-4" />}
                               </button>
                               <button
-                                onClick={() => setEditingCompanyTypeId(prev => prev === c.id ? null : c.id)}
+                                onClick={() => openEditCompany(c)}
                                 className="inline-flex items-center justify-center p-1.5 rounded text-blue-600 hover:bg-blue-50"
-                                title="Edit category"
+                                title="Edit company record (all fields)"
                               >
                                 <Pencil className="w-4 h-4" />
                               </button>
@@ -2157,7 +2308,7 @@ const MarketingNewJobs: React.FC = () => {
                       <MultiSelectColumnHeader<ContactSortField> field="created_at" label="Date / Time Added" filterValues={filterDateAdded} filterOptions={uniqueContactDates} onFilterChange={setFilterDateAdded} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by date added" />
                       <MultiSelectColumnHeader<ContactSortField> field="linkedin_url" label="LinkedIn URL" filterValues={filterLinkedInPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterLinkedInPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by LinkedIn presence" />
                       <MultiSelectColumnHeader<ContactSortField> field="confidence_score" label="Confidence" filterValues={filterConfidence} filterOptions={CONFIDENCE_OPTIONS} onFilterChange={setFilterConfidence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by confidence score" />
-                      <th className="text-center px-3 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider w-[90px]">
+                      <th className="text-center px-3 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider w-[120px]">
                         <input
                           type="checkbox"
                           className="w-4 h-4 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
@@ -2328,12 +2479,20 @@ const MarketingNewJobs: React.FC = () => {
                               );
                             })()}
                           </td>
-                          {/* Per-row Enrich button + selection checkbox.
-                              stopPropagation so interacting with either
-                              doesn't toggle the detail panel via the row's
-                              onClick. */}
+                          {/* Per-row Edit + Enrich buttons + selection
+                              checkbox. stopPropagation so interacting
+                              with any of them doesn't toggle the detail
+                              panel via the row's onClick. */}
                           <td className="px-3 py-2.5 text-center" onClick={e => e.stopPropagation()}>
-                            <div className="flex items-center justify-center gap-2">
+                            <div className="flex items-center justify-center gap-1.5">
+                              <button
+                                onClick={() => openEditContact(c)}
+                                className="p-1 rounded hover:bg-blue-50 text-blue-600 transition-colors"
+                                title="Edit contact record (all fields)"
+                                aria-label="Edit this contact"
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                              </button>
                               <button
                                 onClick={() => enrichContactsById([c.id])}
                                 disabled={contactRunIsActive}
@@ -2462,7 +2621,7 @@ const MarketingNewJobs: React.FC = () => {
           canonical and their company rows deleted via the
           merge_companies RPC (one transaction per group). */}
       {showMergeCandidates && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => !mergingInFlight && setShowMergeCandidates(false)}>
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => !mergingInFlight && (setShowMergeCandidates(false), setManualMergeGroup(null))}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl overflow-hidden max-h-[88vh] flex flex-col" onClick={e => e.stopPropagation()}>
             <div className="p-5 border-b">
               <div className="flex items-center gap-3">
@@ -2470,10 +2629,12 @@ const MarketingNewJobs: React.FC = () => {
                   <GitMerge className="w-5 h-5 text-purple-700" />
                 </div>
                 <div className="flex-1">
-                  <h3 className="text-lg font-bold text-gray-900">Merge candidates</h3>
+                  <h3 className="text-lg font-bold text-gray-900">{manualMergeGroup ? 'Merge selected companies' : 'Merge candidates'}</h3>
                   <p className="text-sm text-gray-500">
-                    {companyMergeCandidates.length} group{companyMergeCandidates.length === 1 ? '' : 's'} of similar company names.
-                    Pick the canonical row in each group; jobs and contacts from the other rows are reassigned to it and the merged company records are deleted.
+                    {manualMergeGroup
+                      ? `${manualMergeGroup.items.length} compan${manualMergeGroup.items.length === 1 ? 'y' : 'ies'} selected for merge.`
+                      : `${activeMergeGroups.length} group${activeMergeGroups.length === 1 ? '' : 's'} of similar company names.`}
+                    {' '}Pick the canonical row{manualMergeGroup ? '' : ' in each group'}; jobs and contacts from the other rows are reassigned to it and the merged company records are deleted.
                   </p>
                   <p className="text-[11px] text-gray-400 mt-1 leading-snug">
                     Empty fields on canonical are filled from merged rows (website, industry, careers_url, location, company_type, source).
@@ -2481,7 +2642,7 @@ const MarketingNewJobs: React.FC = () => {
                   </p>
                 </div>
                 <button
-                  onClick={() => !mergingInFlight && setShowMergeCandidates(false)}
+                  onClick={() => !mergingInFlight && (setShowMergeCandidates(false), setManualMergeGroup(null))}
                   className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100"
                 >
                   <X className="w-5 h-5" />
@@ -2490,7 +2651,7 @@ const MarketingNewJobs: React.FC = () => {
             </div>
 
             <div className="overflow-y-auto flex-1 p-5 space-y-5 bg-gray-50">
-              {companyMergeCandidates.map(g => {
+              {activeMergeGroups.map(g => {
                 ensureMergeSelection(g.key, g.items);
                 const sel = mergeSelection[g.key];
                 const canonicalId = sel?.canonicalId || g.items[0].id;
@@ -2575,7 +2736,7 @@ const MarketingNewJobs: React.FC = () => {
                   </div>
                 );
               })}
-              {companyMergeCandidates.length === 0 && (
+              {activeMergeGroups.length === 0 && (
                 <p className="text-sm text-gray-500 italic text-center py-10">No merge candidates detected.</p>
               )}
             </div>
@@ -2592,7 +2753,7 @@ const MarketingNewJobs: React.FC = () => {
                 })()}
               </p>
               <div className="flex items-center gap-2">
-                <Button variant="outline" onClick={() => setShowMergeCandidates(false)} disabled={mergingInFlight}>
+                <Button variant="outline" onClick={() => { setShowMergeCandidates(false); setManualMergeGroup(null); }} disabled={mergingInFlight}>
                   Cancel
                 </Button>
                 <Button
@@ -2603,6 +2764,250 @@ const MarketingNewJobs: React.FC = () => {
                   {mergingInFlight ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Merging…</>) : (<><GitMerge className="w-4 h-4 mr-2" /> Confirm merges</>)}
                 </Button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Company Modal — writes directly to marketing_companies.
+          Auto-maintained fields (contact_count, open_roles_count) and
+          audit fields (id, created_at, crelate_id) are not editable
+          here. company_name changes cascade onto the denormalized
+          company_name column in marketing_jobs / marketing_contacts. */}
+      {editingCompany && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => !savingCompanyEdit && (setEditingCompany(null), setEditingCompanyDraft({}))}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[88vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="p-5 border-b flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                <Pencil className="w-5 h-5 text-blue-700" />
+              </div>
+              <div className="flex-1">
+                <h3 className="text-lg font-bold text-gray-900">Edit company</h3>
+                <p className="text-xs text-gray-500">{editingCompany.company_name}</p>
+              </div>
+              <button
+                onClick={() => { setEditingCompany(null); setEditingCompanyDraft({}); }}
+                disabled={savingCompanyEdit}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 p-5 space-y-4">
+              <div>
+                <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Company name</label>
+                <Input
+                  value={editingCompanyDraft.company_name || ''}
+                  onChange={e => setEditingCompanyDraft(d => ({ ...d, company_name: e.target.value }))}
+                  className="mt-1"
+                  placeholder="Company name"
+                />
+                <p className="text-[10px] text-gray-400 mt-1">Renaming cascades to jobs + contacts that reference this company.</p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Category</label>
+                  <select
+                    value={COMPANY_CATEGORY_OPTIONS.includes(editingCompanyDraft.company_type) ? editingCompanyDraft.company_type : ''}
+                    onChange={e => setEditingCompanyDraft(d => ({ ...d, company_type: e.target.value, industry: e.target.value }))}
+                    className="mt-1 w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-sm bg-white"
+                  >
+                    <option value="">—</option>
+                    {COMPANY_CATEGORY_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Location</label>
+                  <Input
+                    value={editingCompanyDraft.location || ''}
+                    onChange={e => setEditingCompanyDraft(d => ({ ...d, location: e.target.value }))}
+                    className="mt-1"
+                    placeholder="City, State"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Website</label>
+                  <Input
+                    value={editingCompanyDraft.website || ''}
+                    onChange={e => setEditingCompanyDraft(d => ({ ...d, website: e.target.value }))}
+                    className="mt-1"
+                    placeholder="https://example.com"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Careers URL</label>
+                  <Input
+                    value={editingCompanyDraft.careers_url || ''}
+                    onChange={e => setEditingCompanyDraft(d => ({ ...d, careers_url: e.target.value }))}
+                    className="mt-1"
+                    placeholder="https://example.com/careers"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Homepage URL</label>
+                  <Input
+                    value={editingCompanyDraft.homepage_url || ''}
+                    onChange={e => setEditingCompanyDraft(d => ({ ...d, homepage_url: e.target.value }))}
+                    className="mt-1"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Source</label>
+                  <Input
+                    value={editingCompanyDraft.source || ''}
+                    onChange={e => setEditingCompanyDraft(d => ({ ...d, source: e.target.value }))}
+                    className="mt-1"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Role types hired</label>
+                <Input
+                  value={editingCompanyDraft.role_types_hired || ''}
+                  onChange={e => setEditingCompanyDraft(d => ({ ...d, role_types_hired: e.target.value }))}
+                  className="mt-1"
+                  placeholder="e.g. Medical Director, CMO, Physician"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Notes</label>
+                <textarea
+                  value={editingCompanyDraft.notes || ''}
+                  onChange={e => setEditingCompanyDraft(d => ({ ...d, notes: e.target.value }))}
+                  rows={4}
+                  className="mt-1 w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-sm bg-white resize-y"
+                />
+              </div>
+              <div className="flex items-center gap-5 pt-2 border-t">
+                <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!editingCompanyDraft.is_high_priority}
+                    onChange={e => setEditingCompanyDraft(d => ({ ...d, is_high_priority: e.target.checked }))}
+                    className="w-4 h-4"
+                  />
+                  High priority
+                </label>
+                <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!editingCompanyDraft.has_md_cmo}
+                    onChange={e => setEditingCompanyDraft(d => ({ ...d, has_md_cmo: e.target.checked }))}
+                    className="w-4 h-4"
+                  />
+                  Has MD/CMO
+                </label>
+                <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!editingCompanyDraft.is_blocked}
+                    onChange={e => setEditingCompanyDraft(d => ({ ...d, is_blocked: e.target.checked }))}
+                    className="w-4 h-4"
+                  />
+                  Blocked
+                </label>
+              </div>
+            </div>
+            <div className="p-4 border-t bg-white flex items-center justify-end gap-2">
+              <Button variant="outline" onClick={() => { setEditingCompany(null); setEditingCompanyDraft({}); }} disabled={savingCompanyEdit}>Cancel</Button>
+              <Button onClick={handleSaveCompanyEdit} disabled={savingCompanyEdit} className="bg-[#911406] hover:bg-[#7a1005] text-white">
+                {savingCompanyEdit ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving…</>) : 'Save'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Contact Modal — writes directly to marketing_contacts.
+          company_name is editable as free text; company_id is not
+          rewired here (use Find Contacts or the company-merge flow for
+          that). confidence_score and audit fields are not editable. */}
+      {editingContact && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => !savingContactEdit && (setEditingContact(null), setEditingContactDraft({}))}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[88vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="p-5 border-b flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                <Pencil className="w-5 h-5 text-blue-700" />
+              </div>
+              <div className="flex-1">
+                <h3 className="text-lg font-bold text-gray-900">Edit contact</h3>
+                <p className="text-xs text-gray-500">{[editingContact.first_name, editingContact.last_name].filter(Boolean).join(' ') || '(unnamed)'}{editingContact.company_name ? ` · ${editingContact.company_name}` : ''}</p>
+              </div>
+              <button
+                onClick={() => { setEditingContact(null); setEditingContactDraft({}); }}
+                disabled={savingContactEdit}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 p-5 space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">First name</label>
+                  <Input value={editingContactDraft.first_name || ''} onChange={e => setEditingContactDraft(d => ({ ...d, first_name: e.target.value }))} className="mt-1" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Last name</label>
+                  <Input value={editingContactDraft.last_name || ''} onChange={e => setEditingContactDraft(d => ({ ...d, last_name: e.target.value }))} className="mt-1" />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Title</label>
+                <Input value={editingContactDraft.title || ''} onChange={e => setEditingContactDraft(d => ({ ...d, title: e.target.value }))} className="mt-1" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Company</label>
+                <Input value={editingContactDraft.company_name || ''} onChange={e => setEditingContactDraft(d => ({ ...d, company_name: e.target.value }))} className="mt-1" />
+                <p className="text-[10px] text-gray-400 mt-1">Free text. Use Find Contacts / Search and Merge Companies to relink this row's company_id.</p>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Email</label>
+                <Input type="email" value={editingContactDraft.email || ''} onChange={e => setEditingContactDraft(d => ({ ...d, email: e.target.value }))} className="mt-1" />
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Phone (Work)</label>
+                  <Input value={editingContactDraft.phone_work || ''} onChange={e => setEditingContactDraft(d => ({ ...d, phone_work: e.target.value }))} className="mt-1" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Phone (Home)</label>
+                  <Input value={editingContactDraft.phone_home || ''} onChange={e => setEditingContactDraft(d => ({ ...d, phone_home: e.target.value }))} className="mt-1" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Phone (Cell)</label>
+                  <Input value={editingContactDraft.phone_cell || ''} onChange={e => setEditingContactDraft(d => ({ ...d, phone_cell: e.target.value }))} className="mt-1" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">LinkedIn URL</label>
+                  <Input value={editingContactDraft.linkedin_url || ''} onChange={e => setEditingContactDraft(d => ({ ...d, linkedin_url: e.target.value }))} className="mt-1" placeholder="https://linkedin.com/in/..." />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Source</label>
+                  <Input value={editingContactDraft.source || ''} onChange={e => setEditingContactDraft(d => ({ ...d, source: e.target.value }))} className="mt-1" />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Notes</label>
+                <textarea
+                  value={editingContactDraft.notes || ''}
+                  onChange={e => setEditingContactDraft(d => ({ ...d, notes: e.target.value }))}
+                  rows={4}
+                  className="mt-1 w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-sm bg-white resize-y"
+                />
+              </div>
+            </div>
+            <div className="p-4 border-t bg-white flex items-center justify-end gap-2">
+              <Button variant="outline" onClick={() => { setEditingContact(null); setEditingContactDraft({}); }} disabled={savingContactEdit}>Cancel</Button>
+              <Button onClick={handleSaveContactEdit} disabled={savingContactEdit} className="bg-[#911406] hover:bg-[#7a1005] text-white">
+                {savingContactEdit ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving…</>) : 'Save'}
+              </Button>
             </div>
           </div>
         </div>
