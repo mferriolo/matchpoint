@@ -458,7 +458,7 @@ const MarketingNewJobs: React.FC = () => {
   const [showMergeCandidates, setShowMergeCandidates] = useState(false);
   const [mergeSelection, setMergeSelection] = useState<Record<string, { canonicalId: string; includeIds: Set<string> }>>({});
   const [mergingInFlight, setMergingInFlight] = useState(false);
-  const [mergeResultSummary, setMergeResultSummary] = useState<Array<{ group: string; ok: boolean; canonical_name?: string; jobs_moved?: number; contacts_moved?: number; companies_deleted?: number; error?: string }> | null>(null);
+  const [mergeResultSummary, setMergeResultSummary] = useState<Array<{ group: string; ok: boolean; canonical_name?: string; jobs_moved?: number; contacts_moved?: number; companies_deleted?: number; fields_filled?: string[]; error?: string }> | null>(null);
 
   // Kick off a find-contacts run. The edge function returns a run_id
   // immediately and continues processing in the background. We then
@@ -941,7 +941,7 @@ const MarketingNewJobs: React.FC = () => {
   // merge_companies RPC. Results are accumulated for the summary.
   const handleConfirmCompanyMerges = async () => {
     setMergingInFlight(true);
-    const results: Array<{ group: string; ok: boolean; canonical_name?: string; jobs_moved?: number; contacts_moved?: number; companies_deleted?: number; error?: string }> = [];
+    const results: Array<{ group: string; ok: boolean; canonical_name?: string; jobs_moved?: number; contacts_moved?: number; companies_deleted?: number; fields_filled?: string[]; error?: string }> = [];
     for (const g of companyMergeCandidates) {
       const sel = mergeSelection[g.key];
       if (!sel) continue;
@@ -960,12 +960,20 @@ const MarketingNewJobs: React.FC = () => {
     }
     setMergingInFlight(false);
     setMergeResultSummary(results);
-    const okCount = results.filter(r => r.ok).length;
-    const failCount = results.filter(r => !r.ok).length;
+    const okResults = results.filter(r => r.ok);
+    const failResults = results.filter(r => !r.ok);
+    const totalFieldsFilled = okResults.reduce((n, r) => n + (r.fields_filled?.length || 0), 0);
+    const totalJobsMoved = okResults.reduce((n, r) => n + (r.jobs_moved || 0), 0);
+    const totalContactsMoved = okResults.reduce((n, r) => n + (r.contacts_moved || 0), 0);
+    const totalDeleted = okResults.reduce((n, r) => n + (r.companies_deleted || 0), 0);
     toast({
-      title: failCount === 0 ? `Merged ${okCount} group${okCount === 1 ? '' : 's'}` : `Merged ${okCount}, ${failCount} failed`,
-      description: failCount > 0 ? results.filter(r => !r.ok).map(r => r.error).join(' · ') : undefined,
-      variant: failCount > 0 ? 'destructive' : undefined,
+      title: failResults.length === 0
+        ? `Merged ${okResults.length} group${okResults.length === 1 ? '' : 's'}`
+        : `Merged ${okResults.length}, ${failResults.length} failed`,
+      description: failResults.length > 0
+        ? failResults.map(r => r.error).join(' · ')
+        : `${totalDeleted} compan${totalDeleted === 1 ? 'y' : 'ies'} deleted · ${totalJobsMoved} job${totalJobsMoved === 1 ? '' : 's'} and ${totalContactsMoved} contact${totalContactsMoved === 1 ? '' : 's'} reassigned${totalFieldsFilled > 0 ? ` · filled ${totalFieldsFilled} empty field${totalFieldsFilled === 1 ? '' : 's'} on canonicals` : ''}`,
+      variant: failResults.length > 0 ? 'destructive' : undefined,
     });
     setShowMergeCandidates(false);
     setMergeSelection({});
@@ -2465,7 +2473,11 @@ const MarketingNewJobs: React.FC = () => {
                   <h3 className="text-lg font-bold text-gray-900">Merge candidates</h3>
                   <p className="text-sm text-gray-500">
                     {companyMergeCandidates.length} group{companyMergeCandidates.length === 1 ? '' : 's'} of similar company names.
-                    Pick the canonical row in each group; jobs and contacts from unchecked rows are reassigned to it and the merged company records are deleted.
+                    Pick the canonical row in each group; jobs and contacts from the other rows are reassigned to it and the merged company records are deleted.
+                  </p>
+                  <p className="text-[11px] text-gray-400 mt-1 leading-snug">
+                    Empty fields on canonical are filled from merged rows (website, industry, careers_url, location, company_type, source).
+                    is_high_priority / has_md_cmo OR across all rows. notes are concatenated. Aggregate counts recompute. is_blocked / crelate_id / status are left untouched.
                   </p>
                 </div>
                 <button
