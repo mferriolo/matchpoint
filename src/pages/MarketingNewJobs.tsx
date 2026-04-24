@@ -108,16 +108,16 @@ const MarketingNewJobs: React.FC = () => {
   };
   const clearContactSelection = () => setSelectedContactIds(new Set());
 
-  // Enrich selected contacts by invoking the enrich-contacts edge
+  // Enrich a set of contacts by invoking the enrich-contacts edge
   // function. It reuses the contact_runs table (mode='enrich') so the
   // existing progress panel + dialog picks it up without extra wiring.
-  const handleEnrichSelectedContacts = async () => {
-    if (selectedContactIds.size === 0) return;
+  // Used by both the bulk "Enrich N" button and the per-row enrich icon.
+  const enrichContactsById = async (ids: string[]) => {
+    if (ids.length === 0) return;
     if (contactRunIsActive) {
       toast({ title: 'Another run is active', description: 'Wait for the current run to finish before starting another.', variant: 'destructive' });
       return;
     }
-    const ids = Array.from(selectedContactIds);
     try {
       const { data, error } = await supabase.functions.invoke('enrich-contacts', { body: { contactIds: ids } });
       // supabase-js wraps 4xx/5xx responses in a FunctionsHttpError whose
@@ -155,8 +155,8 @@ const MarketingNewJobs: React.FC = () => {
         id: data.run_id,
         status: 'running',
         mode: 'enrich',
-        companies_total: data.companies_total || ids.length,
-        companies_processed: 0,
+        items_total: data.items_total || ids.length,
+        items_processed: 0,
         contacts_added: 0,
         ai_added: 0,
         crelate_added: 0,
@@ -164,17 +164,19 @@ const MarketingNewJobs: React.FC = () => {
         leadership_added: 0,
         emails_verified: 0,
         duplicates_skipped: 0,
-        current_company: null,
+        current_item: null,
         target_company_name: null,
-        per_company: [],
+        per_item: [],
       });
       // Clear selection so the bulk bar disappears; the progress panel
-      // takes over.
+      // takes over. Safe to call even for a single-row enrich.
       clearContactSelection();
     } catch (err: any) {
       toast({ title: 'Enrich failed', description: err.message || String(err), variant: 'destructive' });
     }
   };
+
+  const handleEnrichSelectedContacts = () => enrichContactsById(Array.from(selectedContactIds));
 
   const handleDeleteSelectedContacts = async () => {
     if (selectedContactIds.size === 0) return;
@@ -475,15 +477,15 @@ const MarketingNewJobs: React.FC = () => {
         id: data.run_id,
         status: 'running',
         mode: data.mode,
-        companies_total: data.companies_total || 0,
-        companies_processed: 0,
+        items_total: data.items_total || 0,
+        items_processed: 0,
         contacts_added: 0,
         ai_added: 0,
         crelate_added: 0,
         duplicates_skipped: 0,
-        current_company: null,
+        current_item: null,
         target_company_name: isAll ? null : (opts.companyName || null),
-        per_company: [],
+        per_item: [],
       });
       // Per-row spinner is cleared by the poller when status != 'running'.
     } catch (err: any) {
@@ -510,7 +512,7 @@ const MarketingNewJobs: React.FC = () => {
         if (data.status === 'completed') {
           const added = data.contacts_added ?? 0;
           const skipped = data.duplicates_skipped ?? 0;
-          const processed = data.companies_processed ?? 0;
+          const processed = data.items_processed ?? 0;
           const isAll = data.mode === 'all';
           const isEnrich = data.mode === 'enrich';
           toast({
@@ -1831,13 +1833,13 @@ const MarketingNewJobs: React.FC = () => {
                     <div className="flex items-center gap-2 text-emerald-900 font-medium">
                       <Loader2 className="w-4 h-4 animate-spin text-emerald-700" />
                       {contactRun.mode === 'enrich'
-                        ? `Enriching ${contactRun.companies_total} contact${contactRun.companies_total === 1 ? '' : 's'}…`
+                        ? `Enriching ${contactRun.items_total} contact${contactRun.items_total === 1 ? '' : 's'}…`
                         : contactRun.mode === 'all'
-                          ? `Finding contacts across ${contactRun.companies_total} companies…`
+                          ? `Finding contacts across ${contactRun.items_total} companies…`
                           : `Finding contacts for ${contactRun.target_company_name || 'company'}…`}
                     </div>
                     <div className="flex items-center gap-3 text-xs text-emerald-900/80 tabular-nums">
-                      <span><strong>{contactRun.companies_processed || 0}</strong>/{contactRun.companies_total || 0} {contactRun.mode === 'enrich' ? 'contacts' : 'companies'}</span>
+                      <span><strong>{contactRun.items_processed || 0}</strong>/{contactRun.items_total || 0} {contactRun.mode === 'enrich' ? 'contacts' : 'companies'}</span>
                       <span>·</span>
                       <span><strong className="text-emerald-800">{contactRun.contacts_added || 0}</strong> {contactRun.mode === 'enrich' ? 'enriched' : 'contacts added'}</span>
                       {(contactRun.duplicates_skipped || 0) > 0 && (
@@ -1865,8 +1867,8 @@ const MarketingNewJobs: React.FC = () => {
                     <div
                       className="h-full bg-emerald-600 transition-all duration-500 ease-out"
                       style={{
-                        width: `${contactRun.companies_total > 0
-                          ? Math.min(100, Math.round(((contactRun.companies_processed || 0) / contactRun.companies_total) * 100))
+                        width: `${contactRun.items_total > 0
+                          ? Math.min(100, Math.round(((contactRun.items_processed || 0) / contactRun.items_total) * 100))
                           : 0}%`
                       }}
                     />
@@ -1881,9 +1883,9 @@ const MarketingNewJobs: React.FC = () => {
                       {(contactRun.crelate_added || 0) > 0 && <span>· Crelate: <strong>{contactRun.crelate_added}</strong></span>}
                       {(contactRun.emails_verified || 0) > 0 && <span>· Hunter-verified: <strong>{contactRun.emails_verified}</strong></span>}
                     </div>
-                    {contactRun.current_company && (
+                    {contactRun.current_item && (
                       <p className="truncate max-w-[50%]">
-                        Processing: <span className="font-medium">{contactRun.current_company}</span>
+                        Processing: <span className="font-medium">{contactRun.current_item}</span>
                       </p>
                     )}
                   </div>
@@ -1988,7 +1990,7 @@ const MarketingNewJobs: React.FC = () => {
                       <MultiSelectColumnHeader<ContactSortField> field="created_at" label="Date / Time Added" filterValues={filterDateAdded} filterOptions={uniqueContactDates} onFilterChange={setFilterDateAdded} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by date added" />
                       <MultiSelectColumnHeader<ContactSortField> field="linkedin_url" label="LinkedIn URL" filterValues={filterLinkedInPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterLinkedInPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by LinkedIn presence" />
                       <MultiSelectColumnHeader<ContactSortField> field="confidence_score" label="Confidence" filterValues={filterConfidence} filterOptions={CONFIDENCE_OPTIONS} onFilterChange={setFilterConfidence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by confidence score" />
-                      <th className="text-center px-3 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider w-[50px]">
+                      <th className="text-center px-3 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider w-[90px]">
                         <input
                           type="checkbox"
                           className="w-4 h-4 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
@@ -2159,17 +2161,29 @@ const MarketingNewJobs: React.FC = () => {
                               );
                             })()}
                           </td>
-                          {/* Selection checkbox (far right). stopPropagation
-                              so clicking the box doesn't also toggle the
-                              detail panel via the row's onClick. */}
+                          {/* Per-row Enrich button + selection checkbox.
+                              stopPropagation so interacting with either
+                              doesn't toggle the detail panel via the row's
+                              onClick. */}
                           <td className="px-3 py-2.5 text-center" onClick={e => e.stopPropagation()}>
-                            <input
-                              type="checkbox"
-                              className="w-4 h-4 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
-                              checked={selectedContactIds.has(c.id)}
-                              onChange={() => toggleContactSelect(c.id)}
-                              title="Select contact"
-                            />
+                            <div className="flex items-center justify-center gap-2">
+                              <button
+                                onClick={() => enrichContactsById([c.id])}
+                                disabled={contactRunIsActive}
+                                className="p-1 rounded hover:bg-emerald-50 text-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                title={contactRunIsActive ? 'A run is already active' : 'Enrich this contact (SerpAPI+AI, Lusha, Apollo, Hunter)'}
+                                aria-label="Enrich this contact"
+                              >
+                                <Zap className="w-3.5 h-3.5" />
+                              </button>
+                              <input
+                                type="checkbox"
+                                className="w-4 h-4 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
+                                checked={selectedContactIds.has(c.id)}
+                                onChange={() => toggleContactSelect(c.id)}
+                                title="Select contact"
+                              />
+                            </div>
                           </td>
                         </tr>
                       );
@@ -2746,7 +2760,7 @@ const MarketingNewJobs: React.FC = () => {
         const isAll = r.mode === 'all';
         const isEnrich = r.mode === 'enrich';
         const succeeded = r.status === 'completed';
-        const per: any[] = Array.isArray(r.per_company) ? r.per_company : [];
+        const per: any[] = Array.isArray(r.per_item) ? r.per_item : [];
         const companiesWithAdds = per.filter(p => (p.ai_added + p.crelate_added + p.apollo_added + p.leadership_added) > 0);
         const companiesWithErrors = per.filter(p => Array.isArray(p.errors) && p.errors.length > 0);
         // Enrich-specific bookkeeping: a contact was enriched if at least
@@ -2772,9 +2786,9 @@ const MarketingNewJobs: React.FC = () => {
                     </h3>
                     <p className="text-sm text-gray-500">
                       {isEnrich
-                        ? `${r.companies_processed || 0} of ${r.companies_total || 0} contacts processed`
+                        ? `${r.items_processed || 0} of ${r.items_total || 0} contacts processed`
                         : isAll
-                          ? `${r.companies_processed || 0} of ${r.companies_total || 0} companies processed`
+                          ? `${r.items_processed || 0} of ${r.items_total || 0} companies processed`
                           : `Target: ${r.target_company_name || 'company'}`}
                     </p>
                   </div>
@@ -2795,10 +2809,10 @@ const MarketingNewJobs: React.FC = () => {
                   </p>
                   <p className="text-xs uppercase tracking-wider text-emerald-900/70 font-semibold mt-1">
                     {isEnrich
-                      ? `contact${enrichedCount === 1 ? '' : 's'} enriched${r.companies_total ? ` of ${r.companies_total}` : ''}`
+                      ? `contact${enrichedCount === 1 ? '' : 's'} enriched${r.items_total ? ` of ${r.items_total}` : ''}`
                       : `new contact${(r.contacts_added || 0) === 1 ? '' : 's'} added`}
                   </p>
-                  {isEnrich && enrichedCount === 0 && r.companies_total > 0 && (
+                  {isEnrich && enrichedCount === 0 && r.items_total > 0 && (
                     <p className="text-xs text-amber-700 mt-1 font-medium">
                       No fields were filled — see diagnostics + per-contact reasons below.
                     </p>
@@ -2846,7 +2860,7 @@ const MarketingNewJobs: React.FC = () => {
                     the edge function writes to error_message on
                     success/failure so we can see what sources were
                     configured, how many rows loaded, and totals even
-                    when per_company is empty. */}
+                    when per_item is empty. */}
                 {isEnrich && r.error_message && (
                   <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
                     <h4 className="text-xs uppercase tracking-wider text-slate-600 font-semibold mb-1.5">Diagnostics</h4>
@@ -2877,7 +2891,7 @@ const MarketingNewJobs: React.FC = () => {
                             const wasEnriched = filled.length > 0;
                             return (
                               <tr key={i} className={`border-t border-gray-100 align-top ${wasEnriched ? 'text-gray-800' : 'text-gray-500'}`}>
-                                <td className="px-3 py-2 font-medium truncate max-w-[200px]" title={p.company}>{p.company}</td>
+                                <td className="px-3 py-2 font-medium truncate max-w-[200px]" title={p.label}>{p.label}</td>
                                 <td className="px-3 py-2">
                                   {wasEnriched ? (
                                     <div className="flex items-center gap-1.5 flex-wrap">
@@ -2958,7 +2972,7 @@ const MarketingNewJobs: React.FC = () => {
                             const total = (p.ai_added || 0) + (p.crelate_added || 0) + (p.apollo_added || 0) + (p.leadership_added || 0);
                             return (
                               <tr key={i} className={`border-t border-gray-100 ${total === 0 ? 'text-gray-400' : 'text-gray-800'}`}>
-                                <td className="px-3 py-1.5 truncate max-w-[200px]" title={p.company}>{p.company}</td>
+                                <td className="px-3 py-1.5 truncate max-w-[200px]" title={p.label}>{p.label}</td>
                                 <td className="px-2 py-1.5 text-right tabular-nums">{p.leadership_added || '—'}</td>
                                 <td className="px-2 py-1.5 text-right tabular-nums">{p.apollo_added || '—'}</td>
                                 <td className="px-2 py-1.5 text-right tabular-nums">{p.ai_added || '—'}</td>
@@ -2990,7 +3004,7 @@ const MarketingNewJobs: React.FC = () => {
                       <ul className="text-xs text-amber-900 space-y-1 max-h-[120px] overflow-y-auto">
                         {companiesWithErrors.slice(0, 15).map((p, i) => (
                           <li key={i}>
-                            <span className="font-medium">{p.company}:</span> {(p.errors as string[]).join(' · ')}
+                            <span className="font-medium">{p.label}:</span> {(p.errors as string[]).join(' · ')}
                           </li>
                         ))}
                         {companiesWithErrors.length > 15 && (

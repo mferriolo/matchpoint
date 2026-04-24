@@ -21,12 +21,12 @@ function getCorsHeaders(req: Request) {
 // Reuses the contact_runs table for progress tracking (mode='enrich')
 // so the existing Contacts-tab polling + progress panel work unchanged.
 // Counters:
-//   companies_total / companies_processed  → total / processed CONTACTS
-//   current_company                        → "Enriching {name}..."
-//   contacts_added                         → contacts that got ≥1 field
-//   apollo_added                           → contacts enriched by Apollo
-//   emails_verified                        → Hunter email fills
-//   duplicates_skipped                     → contacts with nothing to fix
+//   items_total / items_processed  → total / processed CONTACTS
+//   current_item                   → "Enriching {name}..."
+//   contacts_added                 → contacts that got ≥1 field
+//   apollo_added                   → contacts enriched by Apollo
+//   emails_verified                → Hunter email fills
+//   duplicates_skipped             → contacts with nothing to fix
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -356,7 +356,7 @@ type EnrichResult = {
   serpResultsCount: number;
   lushaAttempted: boolean;      // we spent credits looking up this contact
   lushaMatched: boolean;        // Lusha returned a person
-  lushaSkippedForCredits: boolean; // skipped the call because contact had email+phone
+  lushaOverwrotePhone: boolean; // Lusha upgraded a SerpAPI-extracted phone_work this run
   apolloAttempted: boolean;
   apolloMatched: boolean;
   apolloHadDomain: boolean;
@@ -387,7 +387,7 @@ async function enrichContact(
     serpResultsCount: 0,
     lushaAttempted: false,
     lushaMatched: false,
-    lushaSkippedForCredits: false,
+    lushaOverwrotePhone: false,
     apolloAttempted: false,
     apolloMatched: false,
     apolloHadDomain: !!companyDomain,
@@ -404,10 +404,19 @@ async function enrichContact(
 
   const updates: Record<string, any> = {};
   const notes: string[] = [];
+  // Track where within THIS run each field came from so a higher-quality
+  // later source can overwrite a lower-quality earlier fill (e.g. Lusha's
+  // direct-dial supersedes SerpAPI's AI-snippet-extracted phone_work).
+  // Does not affect fields that were already on the contact row — those
+  // are treated as trusted and never overwritten.
+  const fieldSource: Record<string, 'serp' | 'lusha' | 'apollo' | 'hunter'> = {};
 
   // 1. SerpAPI + AI — primary source. Runs Google queries and asks
   //    gpt-4o-mini to extract verifiable fields from the result
   //    snippets. Reliable on any plan; costs pennies per contact.
+  //    Always runs the general search + AI extract if keys are present —
+  //    quality-first: we want the best candidate per field regardless of
+  //    what's already on the record.
   if (serpKey && openaiKey) {
     res.serpAttempted = true;
     try {
@@ -423,6 +432,7 @@ async function enrichContact(
           const first = liResults.find((r2: any) => typeof r2.link === 'string' && r2.link.includes('linkedin.com/in/'));
           if (first?.link) {
             updates.linkedin_url = first.link;
+            fieldSource.linkedin_url = 'serp';
             res.fieldsUpdated.push('linkedin_url');
             res.serpHit = true;
             notes.push('SerpAPI found LinkedIn');
@@ -431,9 +441,9 @@ async function enrichContact(
       }
 
       // Then: broader search + AI extract for title / email / phone.
-      // Only if any of those fields are missing on the contact.
-      const needsExtra = !c.title || !c.email || !c.phone_work;
-      if (needsExtra) {
+      // Always runs (no cost-gate) so Lusha/Apollo later have a chance to
+      // upgrade weak AI-extracted values.
+      {
         const general = await withTimeout(
           serpSearch(`"${fn} ${ln}" "${c.company_name}"`, serpKey, 10),
           10_000,
@@ -453,21 +463,25 @@ async function enrichContact(
           if (extracted) {
             if (!c.title && extracted.title && typeof extracted.title === 'string') {
               updates.title = extracted.title;
+              fieldSource.title = 'serp';
               if (!res.fieldsUpdated.includes('title')) res.fieldsUpdated.push('title');
               res.serpHit = true;
             }
             if (!c.email && extracted.email && typeof extracted.email === 'string' && extracted.email.includes('@')) {
               updates.email = extracted.email;
+              fieldSource.email = 'serp';
               if (!res.fieldsUpdated.includes('email')) res.fieldsUpdated.push('email');
               res.serpHit = true;
             }
             if (!c.phone_work && extracted.phone && typeof extracted.phone === 'string') {
               updates.phone_work = extracted.phone;
+              fieldSource.phone_work = 'serp';
               if (!res.fieldsUpdated.includes('phone_work')) res.fieldsUpdated.push('phone_work');
               res.serpHit = true;
             }
             if (!updates.linkedin_url && !existingLinkedin && extracted.linkedin_url && isLinkedInUrl(extracted.linkedin_url)) {
               updates.linkedin_url = extracted.linkedin_url;
+              fieldSource.linkedin_url = 'serp';
               if (!res.fieldsUpdated.includes('linkedin_url')) res.fieldsUpdated.push('linkedin_url');
               res.serpHit = true;
             }
@@ -481,54 +495,60 @@ async function enrichContact(
   }
 
   // 2. Lusha — primary paid phone source. 1 credit per successful
-  //    lookup. Skip if the contact already has an email AND at least
-  //    one phone — in that case spending a credit would be mostly
-  //    wasted since Lusha's biggest value-add is phone + email pairs.
-  //    Also skip if SerpAPI already filled both email AND a phone.
+  //    lookup. No cost-gate: Lusha is the highest-quality phone source
+  //    and its direct-dial numbers supersede SerpAPI's AI-extracted
+  //    phone_work within this same run (never overwrites phones already
+  //    on the contact row — those are trusted).
   if (lushaKey) {
-    // No credit-conservation skip — Lusha charges per lookup (isCreditCharged:true)
-    // regardless of whether the person is found, so skipping saves nothing.
-    {
-      res.lushaAttempted = true;
-      // Use the LinkedIn URL when available — it's the strongest
-      // match signal and dramatically improves Lusha's hit rate vs
-      // name + company alone.
-      const liUrl = updates.linkedin_url || c.linkedin_url || (isLinkedInUrl(c.source_url) ? c.source_url : undefined);
-      const l = await withTimeout(
-        lushaEnrich(fn, ln, c.company_name!, companyDomain, lushaKey, liUrl),
-        15_000,
-        `Lusha(${fn} ${ln})`
-      );
-      if (l) {
-        // Lusha returned *something* (HTTP 200 or an error we parsed).
-        // The debug string tells us whether the response had
-        // extractable contact data.
-        const hasAnyData = !!(l.email || l.mobile || l.direct || l.office);
-        if (hasAnyData) {
-          res.lushaMatched = true;
-          if (!updates.email && !c.email && l.email) {
-            updates.email = l.email;
-            if (!res.fieldsUpdated.includes('email')) res.fieldsUpdated.push('email');
-            res.lushaHit = true;
-          }
-          if (!updates.phone_cell && !c.phone_cell && l.mobile) {
-            updates.phone_cell = l.mobile;
-            if (!res.fieldsUpdated.includes('phone_cell')) res.fieldsUpdated.push('phone_cell');
-            res.lushaHit = true;
-          }
-          // Direct dial beats office line; both land in phone_work.
-          const workPhone = l.direct || l.office;
-          if (!updates.phone_work && !c.phone_work && workPhone) {
+    res.lushaAttempted = true;
+    // Use the LinkedIn URL when available — it's the strongest
+    // match signal and dramatically improves Lusha's hit rate vs
+    // name + company alone.
+    const liUrl = updates.linkedin_url || c.linkedin_url || (isLinkedInUrl(c.source_url) ? c.source_url : undefined);
+    const l = await withTimeout(
+      lushaEnrich(fn, ln, c.company_name!, companyDomain, lushaKey, liUrl),
+      15_000,
+      `Lusha(${fn} ${ln})`
+    );
+    if (l) {
+      // Lusha returned *something* (HTTP 200 or an error we parsed).
+      // The debug string tells us whether the response had
+      // extractable contact data.
+      const hasAnyData = !!(l.email || l.mobile || l.direct || l.office);
+      if (hasAnyData) {
+        res.lushaMatched = true;
+        if (!updates.email && !c.email && l.email) {
+          updates.email = l.email;
+          fieldSource.email = 'lusha';
+          if (!res.fieldsUpdated.includes('email')) res.fieldsUpdated.push('email');
+          res.lushaHit = true;
+        }
+        if (!updates.phone_cell && !c.phone_cell && l.mobile) {
+          updates.phone_cell = l.mobile;
+          fieldSource.phone_cell = 'lusha';
+          if (!res.fieldsUpdated.includes('phone_cell')) res.fieldsUpdated.push('phone_cell');
+          res.lushaHit = true;
+        }
+        // Direct dial beats office line; both land in phone_work.
+        // Quality-first: if SerpAPI filled phone_work this run via AI
+        // snippet extraction (noisy), let Lusha upgrade it. Still
+        // never overwrites a phone that was already on the contact.
+        const workPhone = l.direct || l.office;
+        if (workPhone && !c.phone_work) {
+          const serpFilledIt = fieldSource.phone_work === 'serp';
+          if (!updates.phone_work || serpFilledIt) {
+            if (serpFilledIt) res.lushaOverwrotePhone = true;
             updates.phone_work = workPhone;
+            fieldSource.phone_work = 'lusha';
             if (!res.fieldsUpdated.includes('phone_work')) res.fieldsUpdated.push('phone_work');
             res.lushaHit = true;
           }
-          if (res.lushaHit) notes.push('Lusha filled: ' + res.fieldsUpdated.filter(f => f === 'email' || f === 'phone_cell' || f === 'phone_work').join(', '));
         }
-        // Capture the debug line on first no-match of the run so the
-        // user can see what Lusha is actually returning.
-        (res as any).lushaDebug = l.debug || null;
+        if (res.lushaHit) notes.push('Lusha filled: ' + res.fieldsUpdated.filter(f => f === 'email' || f === 'phone_cell' || f === 'phone_work').join(', '));
       }
+      // Capture the debug line on first no-match of the run so the
+      // user can see what Lusha is actually returning.
+      (res as any).lushaDebug = l.debug || null;
     }
   }
 
@@ -542,36 +562,47 @@ async function enrichContact(
     );
     if (p) {
       res.apolloMatched = true;
-      if (!c.email && p.email && typeof p.email === 'string') {
+      if (!updates.email && !c.email && p.email && typeof p.email === 'string') {
         updates.email = p.email;
-        res.fieldsUpdated.push('email');
+        fieldSource.email = 'apollo';
+        if (!res.fieldsUpdated.includes('email')) res.fieldsUpdated.push('email');
+        res.apolloHit = true;
       }
-      if (!c.title && p.title && typeof p.title === 'string') {
+      if (!updates.title && !c.title && p.title && typeof p.title === 'string') {
         updates.title = p.title;
-        res.fieldsUpdated.push('title');
+        fieldSource.title = 'apollo';
+        if (!res.fieldsUpdated.includes('title')) res.fieldsUpdated.push('title');
+        res.apolloHit = true;
       }
       const existingLinkedin = c.linkedin_url || (isLinkedInUrl(c.source_url) ? c.source_url : '');
-      if (!existingLinkedin && p.linkedin_url && isLinkedInUrl(p.linkedin_url)) {
+      if (!updates.linkedin_url && !existingLinkedin && p.linkedin_url && isLinkedInUrl(p.linkedin_url)) {
         updates.linkedin_url = p.linkedin_url;
-        res.fieldsUpdated.push('linkedin_url');
-      }
-      if (!c.phone_work && p.organization?.phone) {
-        updates.phone_work = p.organization.phone;
-        res.fieldsUpdated.push('phone_work');
-      }
-      if (!c.phone_cell && p.mobile_phone) {
-        updates.phone_cell = p.mobile_phone;
-        res.fieldsUpdated.push('phone_cell');
-      }
-      if (res.fieldsUpdated.length > 0) {
+        fieldSource.linkedin_url = 'apollo';
+        if (!res.fieldsUpdated.includes('linkedin_url')) res.fieldsUpdated.push('linkedin_url');
         res.apolloHit = true;
-        notes.push(`Apollo filled: ${res.fieldsUpdated.join(', ')}`);
       }
+      if (!updates.phone_work && !c.phone_work && p.organization?.phone) {
+        updates.phone_work = p.organization.phone;
+        fieldSource.phone_work = 'apollo';
+        if (!res.fieldsUpdated.includes('phone_work')) res.fieldsUpdated.push('phone_work');
+        res.apolloHit = true;
+      }
+      if (!updates.phone_cell && !c.phone_cell && p.mobile_phone) {
+        updates.phone_cell = p.mobile_phone;
+        fieldSource.phone_cell = 'apollo';
+        if (!res.fieldsUpdated.includes('phone_cell')) res.fieldsUpdated.push('phone_cell');
+        res.apolloHit = true;
+      }
+      if (res.apolloHit) notes.push(`Apollo filled: ${res.fieldsUpdated.join(', ')}`);
     }
   }
 
-  // 2. Hunter as fallback for email if still missing.
-  if (!updates.email && !c.email && hunterKey && companyDomain && fn && ln) {
+  // 4. Hunter email-finder. No cost-gate — called whenever domain + name
+  //    are available. The per-field write still only fills missing email
+  //    (never overwrites a higher-quality source), so this trades a
+  //    Hunter credit for more consistent coverage on contacts where
+  //    earlier sources whiffed.
+  if (hunterKey && companyDomain && fn && ln) {
     res.hunterAttempted = true;
     const h = await withTimeout(
       hunterFinder(fn, ln, companyDomain, hunterKey),
@@ -580,10 +611,13 @@ async function enrichContact(
     );
     if (h?.email) {
       res.hunterMatched = true;
-      updates.email = h.email;
-      res.fieldsUpdated.push('email');
-      res.hunterHit = true;
-      notes.push(`Hunter filled email (score=${h.score})`);
+      if (!updates.email && !c.email) {
+        updates.email = h.email;
+        fieldSource.email = 'hunter';
+        if (!res.fieldsUpdated.includes('email')) res.fieldsUpdated.push('email');
+        res.hunterHit = true;
+        notes.push(`Hunter filled email (score=${h.score})`);
+      }
     }
   }
 
@@ -594,9 +628,7 @@ async function enrichContact(
       if (res.serpResultsCount === 0) parts.push(`Google returned 0 results for "${fn} ${ln} ${c.company_name}"`);
       else parts.push(`Google returned ${res.serpResultsCount} results but nothing verifiable could be extracted`);
     }
-    if (res.lushaSkippedForCredits) {
-      parts.push('Lusha skipped (contact already had email + phone; saved a credit)');
-    } else if (res.lushaAttempted && !res.lushaMatched) {
+    if (res.lushaAttempted && !res.lushaMatched) {
       parts.push(`Lusha had no match${companyDomain ? ` @ ${companyDomain}` : ` at "${c.company_name}"`}`);
     } else if (res.lushaMatched && !res.lushaHit) {
       parts.push('Lusha matched but every field it returned was already on this contact');
@@ -631,7 +663,7 @@ async function enrichContact(
 async function processRun(runId: string, contactIds: string[], apolloKey: string|undefined, hunterKey: string|undefined, serpKey: string|undefined, openaiKey: string|undefined, lushaKey: string|undefined) {
   const startedAt = Date.now();
   // Diagnostic blob — written into error_message on completion so the
-  // user can see it in the results dialog even when per_company comes
+  // user can see it in the results dialog even when per_item comes
   // back empty. Lists what sources were configured, how many contacts
   // the function was able to load, and any warnings.
   const diag: string[] = [];
@@ -649,7 +681,7 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
       await supabase.from('contact_runs').update({
         status: 'completed',
         completed_at: new Date().toISOString(),
-        current_company: null,
+        current_item: null,
         error_message: `No contacts matched the requested IDs. Diagnostics: ${diag.join(' | ')}`,
       }).eq('id', runId);
       return;
@@ -668,8 +700,8 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
     for (let i = 0; i < rows.length; i++) {
       const c = rows[i];
       await supabase.from('contact_runs').update({
-        current_company: `Enriching ${c.first_name || ''} ${c.last_name || ''}`.trim(),
-        companies_processed: i,
+        current_item: `Enriching ${c.first_name || ''} ${c.last_name || ''}`.trim(),
+        items_processed: i,
       }).eq('id', runId);
 
       const domain = c.company_id ? (domainByCoId.get(c.company_id) || null) : null;
@@ -683,17 +715,16 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
       if (r.apolloHit) totals.apollo++;
       if (r.hunterHit) totals.hunter++;
 
-      // per_company here stores per-contact results (same column, overloaded).
       await supabase.from('contact_runs').update({
-        companies_processed: i + 1,
+        items_processed: i + 1,
         contacts_added: totals.enriched,
         ai_added: totals.serp,
         lusha_added: totals.lusha,
         apollo_added: totals.apollo,
         emails_verified: totals.hunter,
         duplicates_skipped: totals.skipped,
-        per_company: results.map(r => ({
-          company: r.contactName,
+        per_item: results.map(r => ({
+          label: r.contactName,
           ai_added: r.serpHit ? 1 : 0,
           crelate_added: 0,
           apollo_added: r.apolloHit ? 1 : 0,
@@ -708,7 +739,7 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
           serp_results: r.serpResultsCount,
           lusha_attempted: r.lushaAttempted,
           lusha_matched: r.lushaMatched,
-          lusha_skipped_for_credits: r.lushaSkippedForCredits,
+          lusha_overwrote_phone: r.lushaOverwrotePhone,
           lusha_debug: (r as any).lushaDebug || null,
           apollo_attempted: r.apolloAttempted,
           apollo_matched: r.apolloMatched,
@@ -738,16 +769,16 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
     await supabase.from('contact_runs').update({
       status: 'completed',
       completed_at: new Date().toISOString(),
-      current_company: null,
-      companies_processed: rows.length,
+      current_item: null,
+      items_processed: rows.length,
       contacts_added: totals.enriched,
       ai_added: totals.serp,
       lusha_added: totals.lusha,
       apollo_added: totals.apollo,
       emails_verified: totals.hunter,
       duplicates_skipped: totals.skipped,
-      per_company: results.map(r => ({
-        company: r.contactName,
+      per_item: results.map(r => ({
+        label: r.contactName,
         ai_added: r.serpHit ? 1 : 0,
         crelate_added: 0,
         apollo_added: r.apolloHit ? 1 : 0,
@@ -762,7 +793,7 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
         serp_results: r.serpResultsCount,
         lusha_attempted: r.lushaAttempted,
         lusha_matched: r.lushaMatched,
-        lusha_skipped_for_credits: r.lushaSkippedForCredits,
+        lusha_overwrote_phone: r.lushaOverwrotePhone,
         lusha_debug: (r as any).lushaDebug || null,
         apollo_attempted: r.apolloAttempted,
         apollo_matched: r.apolloMatched,
@@ -866,8 +897,8 @@ Deno.serve(async (req) => {
       mode: 'enrich',
       target_company_id: null,
       target_company_name: null,
-      companies_total: contactIds.length,
-      companies_processed: 0,
+      items_total: contactIds.length,
+      items_processed: 0,
     }).select('id').single();
     if (insertErr || !runRow) {
       return new Response(JSON.stringify({ success: false, error: `Failed to create run: ${insertErr?.message || 'unknown'}` }), {
@@ -881,7 +912,7 @@ Deno.serve(async (req) => {
       success: true,
       run_id: runRow.id,
       mode: 'enrich',
-      companies_total: contactIds.length,
+      items_total: contactIds.length,
       sources_active: {
         serpapi: !!serpKey,
         openai: !!openaiKey,

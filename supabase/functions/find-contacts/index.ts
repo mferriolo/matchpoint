@@ -354,8 +354,8 @@ function computeConfidenceLocal(row: { title?: string; company_name?: string; em
 
 type CompanyRow = { id: string; company_name: string; website?: string | null };
 type ContactRow = { id: string; company_id: string | null; company_name: string | null; first_name: string | null; last_name: string | null };
-type PerCompany = {
-  company: string;
+type PerItem = {
+  label: string; // company name in find mode, contact name in enrich mode — rendered by the UI as the row label
   leadership_added: number;
   linkedin_added: number;
   duplicates_skipped: number;
@@ -369,9 +369,9 @@ async function enrichCompany(
   nameKeysSeenThisRun: Set<string>,
   openaiKey: string | undefined,
   serpKey: string | undefined,
-): Promise<PerCompany> {
-  const result: PerCompany = {
-    company: co.company_name,
+): Promise<PerItem> {
+  const result: PerItem = {
+    label: co.company_name,
     leadership_added: 0,
     linkedin_added: 0,
     duplicates_skipped: 0,
@@ -475,14 +475,14 @@ async function processRun(runId: string, targets: CompanyRow[], openaiKey: strin
     ));
     const nameKeysSeenThisRun = new Set<string>();
 
-    const per: PerCompany[] = [];
+    const per: PerItem[] = [];
     const totals = { leadership: 0, linkedin: 0, skipped: 0, filtered: 0 };
 
     for (let i = 0; i < targets.length; i++) {
       const co = targets[i];
       await supabase.from('contact_runs').update({
-        current_company: co.company_name,
-        companies_processed: i,
+        current_item: co.company_name,
+        items_processed: i,
       }).eq('id', runId);
 
       const r = await enrichCompany(co, existingNameKeys, nameKeysSeenThisRun, openaiKey, serpKey);
@@ -493,13 +493,13 @@ async function processRun(runId: string, targets: CompanyRow[], openaiKey: strin
       totals.filtered += r.filtered_title;
 
       await supabase.from('contact_runs').update({
-        companies_processed: i + 1,
+        items_processed: i + 1,
         leadership_added: totals.leadership,
         // Reuse existing columns so the UI renders without a migration.
         ai_added: totals.linkedin,           // repurposed: LinkedIn count
         contacts_added: totals.leadership + totals.linkedin,
         duplicates_skipped: totals.skipped,
-        per_company: per,
+        per_item: per,
       }).eq('id', runId);
     }
 
@@ -510,13 +510,13 @@ async function processRun(runId: string, targets: CompanyRow[], openaiKey: strin
     await supabase.from('contact_runs').update({
       status: 'completed',
       completed_at: new Date().toISOString(),
-      current_company: null,
-      companies_processed: targets.length,
+      current_item: null,
+      items_processed: targets.length,
       leadership_added: totals.leadership,
       ai_added: totals.linkedin,
       contacts_added: totals.leadership + totals.linkedin,
       duplicates_skipped: totals.skipped,
-      per_company: per,
+      per_item: per,
     }).eq('id', runId);
     console.log(`find-contacts run ${runId} done in ${Math.round((Date.now() - startedAt) / 1000)}s — About:${totals.leadership} LinkedIn:${totals.linkedin} Skipped:${totals.skipped} FilteredTitle:${totals.filtered}`);
   } catch (e) {
@@ -605,8 +605,8 @@ Deno.serve(async (req) => {
       mode,
       target_company_id: mode === 'company' ? companyId : null,
       target_company_name: targetCompanyName,
-      companies_total: targets.length,
-      companies_processed: 0,
+      items_total: targets.length,
+      items_processed: 0,
     }).select('id').single();
     if (insertErr || !runRow) {
       return new Response(JSON.stringify({ success: false, error: `Failed to create run: ${insertErr?.message || 'unknown'}` }), {
@@ -620,7 +620,7 @@ Deno.serve(async (req) => {
       success: true,
       run_id: runRow.id,
       mode,
-      companies_total: targets.length,
+      items_total: targets.length,
       sources_active: {
         about_team: !!openaiKey,
         linkedin: !!serpKey,
