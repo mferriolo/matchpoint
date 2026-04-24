@@ -356,6 +356,7 @@ type CompanyRow = { id: string; company_name: string; website?: string | null };
 type ContactRow = { id: string; company_id: string | null; company_name: string | null; first_name: string | null; last_name: string | null };
 type PerItem = {
   label: string; // company name in find mode, contact name in enrich mode — rendered by the UI as the row label
+  company_id?: string; // set in find mode so resume-from-last-run can identify already-processed companies across runs
   leadership_added: number;
   linkedin_added: number;
   duplicates_skipped: number;
@@ -372,6 +373,7 @@ async function enrichCompany(
 ): Promise<PerItem> {
   const result: PerItem = {
     label: co.company_name,
+    company_id: co.id,
     leadership_added: 0,
     linkedin_added: 0,
     duplicates_skipped: 0,
@@ -462,11 +464,46 @@ async function enrichCompany(
   return result;
 }
 
-// ----------------- background task -----------------
+// ----------------- background task (chunked) -----------------
 
-async function processRun(runId: string, targets: CompanyRow[], openaiKey: string | undefined, serpKey: string | undefined) {
-  const startedAt = Date.now();
+// Wall-clock safety: process this many companies per edge-function
+// invocation, then self-invoke for the next batch. 25 × ~6s/company
+// ≈ 2.5 min, well under the edge runtime deadline. Tune down if any
+// single company's SerpAPI/OpenAI calls spike.
+const CHUNK_SIZE = 25;
+
+// Service-role URL we POST to from within a chunk to kick off the
+// next chunk. SUPABASE_URL is always set inside an edge function.
+const SELF_INVOKE_URL = `${supabaseUrl}/functions/v1/find-contacts`;
+
+async function processChunk(
+  runId: string,
+  chunkTargets: CompanyRow[],
+  startOffset: number,
+  totalTargets: number,
+  remainingIds: string[],
+  openaiKey: string | undefined,
+  serpKey: string | undefined,
+  loadExistingRun: boolean,
+) {
+  const chunkStartedAt = Date.now();
   try {
+    // Resume: pick up counters + per from the run row written by the
+    // previous chunk. Fresh start: begin from zero / empty.
+    let totals = { leadership: 0, linkedin: 0, skipped: 0, filtered: 0 };
+    let per: PerItem[] = [];
+    if (loadExistingRun) {
+      const { data: runRow } = await supabase.from('contact_runs').select('*').eq('id', runId).single();
+      if (runRow) {
+        totals.leadership = runRow.leadership_added || 0;
+        totals.linkedin = runRow.ai_added || 0;
+        totals.skipped = runRow.duplicates_skipped || 0;
+        per = Array.isArray(runRow.per_item) ? runRow.per_item : [];
+      }
+    }
+
+    // Refresh existingNameKeys each chunk so dedup reflects inserts
+    // from earlier chunks of the same run.
     const { data: existingContacts } = await supabase.from('marketing_contacts')
       .select('id, company_id, company_name, first_name, last_name');
     const existing: ContactRow[] = (existingContacts || []) as ContactRow[];
@@ -475,14 +512,12 @@ async function processRun(runId: string, targets: CompanyRow[], openaiKey: strin
     ));
     const nameKeysSeenThisRun = new Set<string>();
 
-    const per: PerItem[] = [];
-    const totals = { leadership: 0, linkedin: 0, skipped: 0, filtered: 0 };
-
-    for (let i = 0; i < targets.length; i++) {
-      const co = targets[i];
+    for (let i = 0; i < chunkTargets.length; i++) {
+      const co = chunkTargets[i];
+      const globalIndex = startOffset + i;
       await supabase.from('contact_runs').update({
         current_item: co.company_name,
-        items_processed: i,
+        items_processed: globalIndex,
       }).eq('id', runId);
 
       const r = await enrichCompany(co, existingNameKeys, nameKeysSeenThisRun, openaiKey, serpKey);
@@ -493,35 +528,72 @@ async function processRun(runId: string, targets: CompanyRow[], openaiKey: strin
       totals.filtered += r.filtered_title;
 
       await supabase.from('contact_runs').update({
-        items_processed: i + 1,
+        items_processed: globalIndex + 1,
         leadership_added: totals.leadership,
-        // Reuse existing columns so the UI renders without a migration.
-        ai_added: totals.linkedin,           // repurposed: LinkedIn count
+        ai_added: totals.linkedin,           // repurposed column: LinkedIn count
         contacts_added: totals.leadership + totals.linkedin,
         duplicates_skipped: totals.skipped,
         per_item: per,
       }).eq('id', runId);
     }
 
-    // Fix up cross-row confidence now that every insert has landed.
-    try { await supabase.rpc('recompute_contact_confidence'); }
-    catch (e) { console.warn('recompute_contact_confidence RPC failed:', (e as Error).message); }
+    const chunkSeconds = Math.round((Date.now() - chunkStartedAt) / 1000);
 
-    await supabase.from('contact_runs').update({
-      status: 'completed',
-      completed_at: new Date().toISOString(),
-      current_item: null,
-      items_processed: targets.length,
-      leadership_added: totals.leadership,
-      ai_added: totals.linkedin,
-      contacts_added: totals.leadership + totals.linkedin,
-      duplicates_skipped: totals.skipped,
-      per_item: per,
-    }).eq('id', runId);
-    console.log(`find-contacts run ${runId} done in ${Math.round((Date.now() - startedAt) / 1000)}s — About:${totals.leadership} LinkedIn:${totals.linkedin} Skipped:${totals.skipped} FilteredTitle:${totals.filtered}`);
+    if (remainingIds.length === 0) {
+      // Last chunk: recompute cross-row confidence, mark completed.
+      try { await supabase.rpc('recompute_contact_confidence'); }
+      catch (e) { console.warn('recompute_contact_confidence RPC failed:', (e as Error).message); }
+
+      await supabase.from('contact_runs').update({
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        current_item: null,
+        items_processed: totalTargets,
+        leadership_added: totals.leadership,
+        ai_added: totals.linkedin,
+        contacts_added: totals.leadership + totals.linkedin,
+        duplicates_skipped: totals.skipped,
+        per_item: per,
+      }).eq('id', runId);
+      console.log(`find-contacts run ${runId} FINAL chunk done in ${chunkSeconds}s — About:${totals.leadership} LinkedIn:${totals.linkedin} Skipped:${totals.skipped} FilteredTitle:${totals.filtered}`);
+      return;
+    }
+
+    // More chunks remain. Self-invoke: POST to ourselves with the
+    // remaining company IDs. The receiving invocation boots with a
+    // fresh wall-clock budget and processes the next CHUNK_SIZE.
+    console.log(`find-contacts run ${runId} chunk done in ${chunkSeconds}s, self-invoking for ${remainingIds.length} remaining`);
+    try {
+      const resp = await fetch(SELF_INVOKE_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${supabaseKey}`,
+        },
+        body: JSON.stringify({
+          resume: true,
+          runId,
+          remainingCompanyIds: remainingIds,
+          startOffset: startOffset + chunkTargets.length,
+          totalTargets,
+        }),
+      });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        throw new Error(`Self-invoke returned ${resp.status}: ${text.slice(0, 300)}`);
+      }
+    } catch (e) {
+      const msg = `Self-invoke for next chunk failed: ${(e as Error).message}`;
+      console.error(msg);
+      await supabase.from('contact_runs').update({
+        status: 'failed',
+        completed_at: new Date().toISOString(),
+        error_message: msg,
+      }).eq('id', runId);
+    }
   } catch (e) {
     const msg = (e as Error).message || String(e);
-    console.error(`find-contacts run ${runId} failed:`, msg);
+    console.error(`find-contacts run ${runId} chunk failed:`, msg);
     await supabase.from('contact_runs').update({
       status: 'failed',
       completed_at: new Date().toISOString(),
@@ -537,11 +609,9 @@ Deno.serve(async (req) => {
 
   try {
     const body = await req.json().catch(() => ({}));
-    const mode: 'all' | 'company' = body.mode === 'company' ? 'company' : 'all';
-    const companyId: string | undefined = body.companyId;
 
-    // OpenAI powers the About-page extraction; SerpAPI powers LinkedIn.
-    // Accept common aliases + case-insensitive fallback.
+    // Resolve API keys up front — both the fresh-start and resume
+    // paths need them to pass into processChunk.
     const allEnv = Deno.env.toObject();
     const pickEnv = (...names: string[]): string | undefined => {
       for (const n of names) { const v = Deno.env.get(n); if (v) return v; }
@@ -553,15 +623,58 @@ Deno.serve(async (req) => {
     };
     const openaiKey = pickEnv('OPENAI_API_KEY', 'OPENAI_KEY', 'OPENAI_TOKEN');
     const serpKey = pickEnv('SERP_API_KEY', 'SERPAPI_API_KEY', 'SERPAPI_KEY', 'SERP_KEY');
-
     if (!openaiKey && !serpKey) {
       return new Response(JSON.stringify({ success: false, error: 'No discovery secrets configured. Need OPENAI_API_KEY (for About/Team scrape) and/or SERP_API_KEY (for LinkedIn).' }), {
         status: 500, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
       });
     }
 
+    // ---------- Resume path ----------
+    // Called by a previous chunk via self-invoke. Load the next CHUNK_SIZE
+    // companies and kick off another processChunk. The run row already
+    // exists with cumulative counters we'll keep adding to.
+    if (body.resume && typeof body.runId === 'string' && Array.isArray(body.remainingCompanyIds)) {
+      const ids: string[] = body.remainingCompanyIds.filter((x: any) => typeof x === 'string');
+      if (ids.length === 0) {
+        return new Response(JSON.stringify({ success: false, error: 'resume invoked with empty remainingCompanyIds' }), {
+          status: 400, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) }
+        });
+      }
+      const { data: cos } = await supabase.from('marketing_companies')
+        .select('id, company_name, website')
+        .in('id', ids);
+      // Preserve the caller's ordering so items_processed stays consistent.
+      const byId = new Map((cos || []).map(c => [c.id, c as CompanyRow]));
+      const ordered = ids.map(id => byId.get(id)).filter(Boolean) as CompanyRow[];
+      const chunk = ordered.slice(0, CHUNK_SIZE);
+      const nextRemaining = ordered.slice(CHUNK_SIZE).map(c => c.id);
+      EdgeRuntime.waitUntil(processChunk(
+        body.runId,
+        chunk,
+        Number(body.startOffset) || 0,
+        Number(body.totalTargets) || ordered.length,
+        nextRemaining,
+        openaiKey,
+        serpKey,
+        /* loadExistingRun */ true,
+      ));
+      return new Response(JSON.stringify({
+        success: true,
+        resumed: true,
+        run_id: body.runId,
+        chunk_size: chunk.length,
+        remaining_after_this_chunk: nextRemaining.length,
+      }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
+    }
+
+    // ---------- Fresh-start path ----------
+    const mode: 'all' | 'company' = body.mode === 'company' ? 'company' : 'all';
+    const companyId: string | undefined = body.companyId;
+    const forceRestart: boolean = !!body.forceRestart;
+
     let targets: CompanyRow[] = [];
     let targetCompanyName: string | null = null;
+    let resumeDiag = '';
     if (mode === 'company') {
       if (!companyId) {
         return new Response(JSON.stringify({ success: false, error: 'companyId is required for mode=company' }), {
@@ -590,10 +703,40 @@ Deno.serve(async (req) => {
         .filter(c => !c.is_blocked)
         .filter(c => activeIds.has(c.id) || activeNames.has((c.company_name || '').toLowerCase().trim()))
         .map(c => ({ id: c.id, company_name: c.company_name, website: c.website }));
+
+      // Resume-from-last: skip companies that a previous run in the
+      // last 24h already processed. Lets the user re-click "Find All"
+      // after a timeout without redoing the work.
+      if (!forceRestart) {
+        const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const { data: priorRuns } = await supabase.from('contact_runs')
+          .select('per_item, started_at, status')
+          .eq('mode', 'all')
+          .in('status', ['completed', 'failed'])
+          .gte('started_at', cutoff)
+          .order('started_at', { ascending: false })
+          .limit(1);
+        const lastRun = priorRuns && priorRuns[0];
+        if (lastRun?.per_item) {
+          const per = Array.isArray(lastRun.per_item) ? lastRun.per_item : [];
+          const processedIds = new Set<string>();
+          const processedNames = new Set<string>();
+          for (const p of per) {
+            if (p?.company_id) processedIds.add(p.company_id);
+            if (p?.label) processedNames.add(String(p.label).toLowerCase().trim());
+          }
+          const before = targets.length;
+          targets = targets.filter(c => !processedIds.has(c.id) && !processedNames.has((c.company_name || '').toLowerCase().trim()));
+          const skipped = before - targets.length;
+          if (skipped > 0) {
+            resumeDiag = `skipped ${skipped} companies already processed in prior run (pass forceRestart:true to override)`;
+            console.log(`find-contacts fresh-run: ${resumeDiag}`);
+          }
+        }
+      }
     }
 
-    // Mark any orphaned "running" runs older than 15 min as failed so
-    // they don't block the UI indefinitely.
+    // Auto-clear stale running rows older than 15 min.
     const staleCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     await supabase.from('contact_runs')
       .update({ status: 'failed', completed_at: new Date().toISOString(), error_message: 'Timed out (>15 min without completion)' })
@@ -607,6 +750,7 @@ Deno.serve(async (req) => {
       target_company_name: targetCompanyName,
       items_total: targets.length,
       items_processed: 0,
+      error_message: resumeDiag || null,
     }).select('id').single();
     if (insertErr || !runRow) {
       return new Response(JSON.stringify({ success: false, error: `Failed to create run: ${insertErr?.message || 'unknown'}` }), {
@@ -614,13 +758,46 @@ Deno.serve(async (req) => {
       });
     }
 
-    EdgeRuntime.waitUntil(processRun(runRow.id, targets, openaiKey, serpKey));
+    // If nothing to do (everything was skipped by resume-from-last),
+    // mark completed immediately so the UI doesn't hang.
+    if (targets.length === 0) {
+      await supabase.from('contact_runs').update({
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        error_message: resumeDiag || 'No companies to process',
+      }).eq('id', runRow.id);
+      return new Response(JSON.stringify({
+        success: true,
+        run_id: runRow.id,
+        mode,
+        items_total: 0,
+        resume_diag: resumeDiag,
+      }), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
+    }
+
+    // Kick off the first chunk. Remaining company IDs ride along so
+    // the chunk can self-invoke with them at the end.
+    const firstChunk = targets.slice(0, CHUNK_SIZE);
+    const nextRemaining = targets.slice(CHUNK_SIZE).map(c => c.id);
+    EdgeRuntime.waitUntil(processChunk(
+      runRow.id,
+      firstChunk,
+      /* startOffset */ 0,
+      /* totalTargets */ targets.length,
+      nextRemaining,
+      openaiKey,
+      serpKey,
+      /* loadExistingRun */ false,
+    ));
 
     return new Response(JSON.stringify({
       success: true,
       run_id: runRow.id,
       mode,
       items_total: targets.length,
+      chunk_size: firstChunk.length,
+      remaining_after_first_chunk: nextRemaining.length,
+      resume_diag: resumeDiag,
       sources_active: {
         about_team: !!openaiKey,
         linkedin: !!serpKey,
