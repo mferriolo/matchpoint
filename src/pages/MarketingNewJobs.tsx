@@ -567,11 +567,15 @@ const MarketingNewJobs: React.FC = () => {
   // Kick off a find-contacts run. The edge function returns a run_id
   // immediately and continues processing in the background. We then
   // poll the contact_runs row every 2s until it hits completed/failed.
-  const handleFindContacts = async (opts: { mode: 'all' } | { mode: 'company'; companyId: string; companyName?: string }) => {
+  const handleFindContacts = async (opts: { mode: 'all'; forceRestart?: boolean } | { mode: 'company'; companyId: string; companyName?: string }) => {
     const isAll = opts.mode === 'all';
     if (!isAll) setFindingContactsForId(opts.companyId);
     try {
-      const body = isAll ? { mode: 'all' } : { mode: 'company', companyId: opts.companyId };
+      // forceRestart:true tells find-contacts to skip the 24h
+      // resume-from-last lookup and process EVERY eligible company.
+      const body = isAll
+        ? { mode: 'all', forceRestart: !!(opts as { forceRestart?: boolean }).forceRestart }
+        : { mode: 'company', companyId: opts.companyId };
       const { data, error } = await supabase.functions.invoke('find-contacts', { body });
       if (error) {
         let detail = error.message || 'Unknown error';
@@ -2084,13 +2088,30 @@ const MarketingNewJobs: React.FC = () => {
                   onClick={() => handleFindContacts({ mode: 'all' })}
                   disabled={contactRunIsActive}
                   className="bg-[#911406] hover:bg-[#7a1005] text-white"
-                  title="Find more contacts (AI + Crelate) for every company with open jobs"
+                  title="Find more contacts (AI + Crelate) for every company with open jobs. Skips companies processed in any run in the last 24h."
                 >
                   {findingContactsAll ? (
                     <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Finding contacts…</>
                   ) : (
                     <><Users className="w-4 h-4 mr-2" /> Find Contacts</>
                   )}
+                </Button>
+                {/* Escape hatch: bypass the 24h resume-from-last skip
+                    set and re-scan every eligible company. Confirm
+                    before firing since it burns a full sweep's worth
+                    of SerpAPI + OpenAI credits. */}
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    const ok = window.confirm('Force a full rescan of every company with open jobs? This ignores the 24h skip-already-processed filter and will re-hit every company — expect a full SerpAPI + OpenAI sweep.');
+                    if (ok) handleFindContacts({ mode: 'all', forceRestart: true });
+                  }}
+                  disabled={contactRunIsActive}
+                  className="text-gray-700 border-gray-300 hover:bg-gray-50"
+                  title="Force a full rescan — ignores the 24h resume-from-last skip list. Costs API credits."
+                >
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                  Force Rescan
                 </Button>
                 {contactRunResult && !contactRunIsActive && (
                   <Button
