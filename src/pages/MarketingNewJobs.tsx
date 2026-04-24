@@ -1420,6 +1420,7 @@ const MarketingNewJobs: React.FC = () => {
           <TabsContent value="jobs" className="flex-1 mt-0">
             <JobsTabContent
               jobs={jobs}
+              companies={companies}
               loading={loading}
               onRefresh={loadData}
             />

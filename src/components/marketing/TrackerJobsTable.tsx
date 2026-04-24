@@ -94,7 +94,7 @@ const COLUMNS: Array<{ key: SortKey; label: string; className?: string; filter: 
 ];
 
 // Cleaner label from the tracker's internal source tags.
-function sourceLabel(j: TrackerJobsTableRow): string {
+export function sourceLabel(j: TrackerJobsTableRow): string {
   const raw = (j.source || j.website_source || '').trim();
   if (!raw) return '—';
   const gmatch = raw.match(/^(Google Jobs)/i);
@@ -107,7 +107,7 @@ function sourceLabel(j: TrackerJobsTableRow): string {
   return raw;
 }
 
-function sourceUrl(j: TrackerJobsTableRow): string {
+export function sourceUrl(j: TrackerJobsTableRow): string {
   return j.job_url || j.google_jobs_url || j.indeed_url || j.linkedin_url || '';
 }
 
@@ -118,7 +118,7 @@ function fmtDate(iso?: string): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-function fmtDateTime(iso?: string): string {
+export function fmtDateTime(iso?: string): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '—';
@@ -139,7 +139,7 @@ function cleanRoleLabel(s: string): string {
 // Care Physician" is preferred over the generic "Physician"). The DB's
 // job_type column is often a copy of the raw title rather than a
 // normalized role name, so we redo the matching client-side.
-function matchJobType(title: string | undefined, options: string[]): string {
+export function matchJobType(title: string | undefined, options: string[]): string {
   if (!title || options.length === 0) return '';
   const lowerTitle = title.toLowerCase();
   const sorted = [...options].sort((a, b) => b.length - a.length);
@@ -162,7 +162,7 @@ function rowFieldForKey(j: TrackerJobsTableRow, key: SortKey, matchedType: strin
 }
 
 // Company-type chip colors — mirrors what v151 tiles used.
-function companyTypeBadge(cat?: string): string {
+export function companyTypeBadge(cat?: string): string {
   const colors: Record<string, string> = {
     'Value Based Care (VBC)': 'bg-blue-100 text-blue-800',
     'PACE Medical Groups': 'bg-purple-100 text-purple-800',

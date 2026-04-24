@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -16,15 +16,20 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter
 } from '@/components/ui/dialog';
 import { MultiSelectColumnHeader } from './MultiSelectColumnHeader';
+import { sourceLabel, sourceUrl, fmtDateTime, companyTypeBadge, matchJobType } from './TrackerJobsTable';
 import { useToast } from '@/hooks/use-toast';
 
 interface JobsTabContentProps {
   jobs: any[];
+  companies?: any[];
   loading: boolean;
   onRefresh: () => void;
 }
 
-type SortField = 'job_category' | 'company_name' | 'job_title' | 'job_type' | 'location' | 'job_url' | 'high_priority' | 'date_posted' | 'has_description';
+// Sort keys mirror the Tracker's jobs table. Legacy keys (job_category,
+// location, job_url, has_description, date_posted, high_priority) have
+// been dropped in favor of the Tracker's column shape.
+type SortField = 'job_title' | 'job_type' | 'company_name' | 'company_type' | 'city' | 'state' | 'source' | 'created_at';
 
 type SortDir = 'asc' | 'desc';
 
@@ -133,26 +138,41 @@ const MAX_CONSECUTIVE_ERRORS = 10; // Stop if too many consecutive errors
 
 // ---- Main Component ----
 
-const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefresh }) => {
+const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], loading, onRefresh }) => {
   const { toast } = useToast();
   const [subTab, setSubTab] = useState<'open' | 'closed'>('open');
   const [searchTerm, setSearchTerm] = useState('');
-  const [sortField, setSortField] = useState<SortField>('company_name');
-  const [sortDir, setSortDir] = useState<SortDir>('asc');
+  // Default sort matches the Tracker: most recently found first.
+  const [sortField, setSortField] = useState<SortField>('created_at');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [movingJobId, setMovingJobId] = useState<string | null>(null);
   const [togglingPriorityId, setTogglingPriorityId] = useState<string | null>(null);
   const [filterHighPriority, setFilterHighPriority] = useState(false);
 
-
+  // Tracker uses user-configured job_types (from the `job_types` table)
+  // instead of the Jobs tab's legacy five-bucket classifier. Load them
+  // once so Job Type matching mirrors the Tracker exactly; fall back to
+  // an empty list when the table is empty or unavailable (matchJobType
+  // returns '' in that case and the cell shows —).
+  const [jobTypeOptions, setJobTypeOptions] = useState<string[]>([]);
+  useEffect(() => {
+    supabase.from('job_types').select('name').then(({ data }) => {
+      if (data) setJobTypeOptions(data.map((r: any) => r.name).filter(Boolean));
+    });
+  }, []);
 
   // Column filters. Multi-select: empty set == "no filter applied" (all
   // values pass). Any non-empty set restricts the column to the listed
-  // values via .has() checks below.
-  const [filterCategory, setFilterCategory] = useState<Set<string>>(new Set());
+  // values via .has() checks below. Key names mirror Tracker columns:
+  // company_type, city, state, source, created_at (plus job_title /
+  // job_type / company_name for overlap).
+  const [filterCompanyType, setFilterCompanyType] = useState<Set<string>>(new Set());
   const [filterJobType, setFilterJobType] = useState<Set<string>>(new Set());
   const [filterJobTitle, setFilterJobTitle] = useState<Set<string>>(new Set());
   const [filterCompany, setFilterCompany] = useState<Set<string>>(new Set());
-  const [filterLocation, setFilterLocation] = useState<Set<string>>(new Set());
+  const [filterCity, setFilterCity] = useState<Set<string>>(new Set());
+  const [filterState, setFilterState] = useState<Set<string>>(new Set());
+  const [filterSource, setFilterSource] = useState<Set<string>>(new Set());
 
   // Dropdown open state is managed inside each MultiSelectColumnHeader
   // via Radix Popover — no parent-level coordination needed.
@@ -197,94 +217,129 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
   const viewingJob = viewingJobId ? jobs.find(j => j.id === viewingJobId) : null;
 
 
+  // Enrich each job with company-level fields the Tracker table
+  // expects (_companyType, _companyIsBlocked, _companyIsHighPriority)
+  // by looking it up in the companies prop. Looks up by company_id
+  // first, falls back to case-insensitive company_name so older rows
+  // without an FK still get enriched. `matchedType` is the job_title
+  // → tracked-role match (mirrors the Tracker's matching).
+  const enrichedJobs = useMemo(() => {
+    const byId = new Map<string, any>();
+    const byName = new Map<string, any>();
+    for (const co of companies) {
+      if (co?.id) byId.set(co.id, co);
+      if (co?.company_name) byName.set(String(co.company_name).toLowerCase().trim(), co);
+    }
+    return jobs.map(j => {
+      const co = (j.company_id && byId.get(j.company_id)) ||
+                 (j.company_name && byName.get(String(j.company_name).toLowerCase().trim())) ||
+                 null;
+      return {
+        ...j,
+        _companyType: co?.company_type || null,
+        _companyIsBlocked: !!co?.is_blocked,
+        _companyIsHighPriority: !!co?.is_high_priority,
+        _matchedJobType: matchJobType(j.job_title, jobTypeOptions),
+      };
+    });
+  }, [jobs, companies, jobTypeOptions]);
+
   // Derive unique values for filter dropdowns. No 'All' sentinel: the
   // multi-select checkbox list uses an empty set to mean "no filter".
   const uniqueCompanies = useMemo(() => {
     const set = new Set<string>();
-    jobs.forEach(j => { if (j.company_name) set.add(j.company_name); });
+    enrichedJobs.forEach(j => { if (j.company_name) set.add(j.company_name); });
     return Array.from(set).sort();
-  }, [jobs]);
-
-  const uniqueLocations = useMemo(() => {
-    const set = new Set<string>();
-    jobs.forEach(j => {
-      const loc = j.city && j.state ? `${j.city}, ${j.state}` : j.state || j.city;
-      if (loc) set.add(loc);
-    });
-    return Array.from(set).sort();
-  }, [jobs]);
+  }, [enrichedJobs]);
 
   const uniqueJobTitles = useMemo(() => {
     const set = new Set<string>();
-    jobs.forEach(j => { if (j.job_title) set.add(j.job_title); });
+    enrichedJobs.forEach(j => { if (j.job_title) set.add(j.job_title); });
     return Array.from(set).sort();
-  }, [jobs]);
+  }, [enrichedJobs]);
+
+  const uniqueCompanyTypes = useMemo(() => {
+    const set = new Set<string>();
+    enrichedJobs.forEach(j => { if (j._companyType) set.add(j._companyType); });
+    return Array.from(set).sort();
+  }, [enrichedJobs]);
+
+  const uniqueJobTypes = useMemo(() => {
+    const set = new Set<string>();
+    enrichedJobs.forEach(j => { if (j._matchedJobType) set.add(j._matchedJobType); });
+    return Array.from(set).sort();
+  }, [enrichedJobs]);
+
+  const uniqueCities = useMemo(() => {
+    const set = new Set<string>();
+    enrichedJobs.forEach(j => { if (j.city) set.add(j.city); });
+    return Array.from(set).sort();
+  }, [enrichedJobs]);
+
+  const uniqueStates = useMemo(() => {
+    const set = new Set<string>();
+    enrichedJobs.forEach(j => { if (j.state) set.add(j.state); });
+    return Array.from(set).sort();
+  }, [enrichedJobs]);
+
+  const uniqueSources = useMemo(() => {
+    const set = new Set<string>();
+    enrichedJobs.forEach(j => { const s = sourceLabel(j); if (s && s !== '—') set.add(s); });
+    return Array.from(set).sort();
+  }, [enrichedJobs]);
 
   // Split jobs into open and closed
-  const openJobs = useMemo(() => jobs.filter(isJobOpen), [jobs]);
-  const closedJobs = useMemo(() => jobs.filter(j => !isJobOpen(j)), [jobs]);
+  const openJobs = useMemo(() => enrichedJobs.filter(isJobOpen), [enrichedJobs]);
+  const closedJobs = useMemo(() => enrichedJobs.filter(j => !isJobOpen(j)), [enrichedJobs]);
 
   const baseJobs = subTab === 'open' ? openJobs : closedJobs;
 
-  // Count high priority jobs in the current tab
-  const highPriorityCount = useMemo(() => baseJobs.filter(j => j.high_priority).length, [baseJobs]);
+  // Count high priority jobs in the current tab. Matches Tracker:
+  // either a job's own high_priority OR its company's is_high_priority
+  // (on the enriched row) counts.
+  const highPriorityCount = useMemo(
+    () => baseJobs.filter((j: any) => j.high_priority || j._companyIsHighPriority).length,
+    [baseJobs]
+  );
 
   // Apply filters and search
   const filteredJobs = useMemo(() => {
-    return baseJobs.filter(j => {
+    return baseJobs.filter((j: any) => {
       // Block filter: hide blocked rows unless the user explicitly opts in.
-      if (!showBlocked && j.is_blocked) return false;
-      // High priority quick-filter
-      if (filterHighPriority && !j.high_priority) return false;
+      if (!showBlocked && (j.is_blocked || j._companyIsBlocked)) return false;
+      // High priority quick-filter (job-level OR company-level, matching Tracker).
+      if (filterHighPriority && !(j.high_priority || j._companyIsHighPriority)) return false;
       if (searchTerm) {
         const s = searchTerm.toLowerCase();
         const matchesSearch =
           (j.company_name || '').toLowerCase().includes(s) ||
           (j.job_title || '').toLowerCase().includes(s) ||
-          (j.job_type || '').toLowerCase().includes(s) ||
-          (j.opportunity_type || '').toLowerCase().includes(s) ||
+          (j._matchedJobType || '').toLowerCase().includes(s) ||
+          (j._companyType || '').toLowerCase().includes(s) ||
           (j.city || '').toLowerCase().includes(s) ||
           (j.state || '').toLowerCase().includes(s) ||
-          (j.job_category || '').toLowerCase().includes(s);
+          sourceLabel(j).toLowerCase().includes(s);
         if (!matchesSearch) return false;
       }
-      if (filterCategory.size > 0 && !filterCategory.has(j.job_category || '')) return false;
+      if (filterCompanyType.size > 0 && !filterCompanyType.has(j._companyType || '')) return false;
       if (filterJobTitle.size > 0 && !filterJobTitle.has(j.job_title || '')) return false;
-      if (filterJobType.size > 0) {
-        const classified = classifyJobType(j.job_title || '', j.job_type || j.opportunity_type || '');
-        if (!filterJobType.has(classified)) return false;
-      }
+      if (filterJobType.size > 0 && !filterJobType.has(j._matchedJobType || '')) return false;
       if (filterCompany.size > 0 && !filterCompany.has(j.company_name || '')) return false;
-      if (filterLocation.size > 0) {
-        const loc = j.city && j.state ? `${j.city}, ${j.state}` : j.state || j.city || '';
-        if (!filterLocation.has(loc)) return false;
-      }
+      if (filterCity.size > 0 && !filterCity.has(j.city || '')) return false;
+      if (filterState.size > 0 && !filterState.has(j.state || '')) return false;
+      if (filterSource.size > 0 && !filterSource.has(sourceLabel(j))) return false;
       return true;
     });
-  }, [baseJobs, searchTerm, filterCategory, filterJobType, filterJobTitle, filterCompany, filterLocation, filterHighPriority]);
+  }, [baseJobs, searchTerm, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource, filterHighPriority, showBlocked]);
 
 
   // Sort
   const sortedJobs = useMemo(() => {
-    return [...filteredJobs].sort((a, b) => {
-      // Special handling for high_priority (boolean sort)
-      if (sortField === 'high_priority') {
-        const aP = a.high_priority ? 1 : 0;
-        const bP = b.high_priority ? 1 : 0;
-        const cmp = aP - bP;
-        return sortDir === 'asc' ? cmp : -cmp;
-      }
-      // Boolean sort for "has description" (empty-or-null = false).
-      if (sortField === 'has_description') {
-        const aD = (a.description && String(a.description).trim().length > 0) ? 1 : 0;
-        const bD = (b.description && String(b.description).trim().length > 0) ? 1 : 0;
-        const cmp = aD - bD;
-        return sortDir === 'asc' ? cmp : -cmp;
-      }
-      // Numeric sort for date_posted (older first when asc).
-      if (sortField === 'date_posted') {
-        const aT = a.date_posted ? new Date(a.date_posted).getTime() : 0;
-        const bT = b.date_posted ? new Date(b.date_posted).getTime() : 0;
+    return [...filteredJobs].sort((a: any, b: any) => {
+      // Numeric sort for created_at (oldest first when asc).
+      if (sortField === 'created_at') {
+        const aT = a.created_at ? new Date(a.created_at).getTime() : 0;
+        const bT = b.created_at ? new Date(b.created_at).getTime() : 0;
         const cmp = aT - bT;
         return sortDir === 'asc' ? cmp : -cmp;
       }
@@ -292,21 +347,13 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
       let aVal = '';
       let bVal = '';
       switch (sortField) {
-        case 'job_category': aVal = a.job_category || ''; bVal = b.job_category || ''; break;
         case 'company_name': aVal = a.company_name || ''; bVal = b.company_name || ''; break;
+        case 'company_type': aVal = a._companyType || ''; bVal = b._companyType || ''; break;
         case 'job_title': aVal = a.job_title || ''; bVal = b.job_title || ''; break;
-        case 'job_type':
-          aVal = classifyJobType(a.job_title || '', a.job_type || a.opportunity_type || '');
-          bVal = classifyJobType(b.job_title || '', b.job_type || b.opportunity_type || '');
-          break;
-        case 'location':
-          aVal = a.city && a.state ? `${a.city}, ${a.state}` : a.state || a.city || '';
-          bVal = b.city && b.state ? `${b.city}, ${b.state}` : b.state || b.city || '';
-          break;
-        case 'job_url':
-          aVal = getDirectJobUrl(a);
-          bVal = getDirectJobUrl(b);
-          break;
+        case 'job_type': aVal = a._matchedJobType || ''; bVal = b._matchedJobType || ''; break;
+        case 'city': aVal = a.city || ''; bVal = b.city || ''; break;
+        case 'state': aVal = a.state || ''; bVal = b.state || ''; break;
+        case 'source': aVal = sourceLabel(a); bVal = sourceLabel(b); break;
       }
       const cmp = aVal.toLowerCase().localeCompare(bVal.toLowerCase());
       return sortDir === 'asc' ? cmp : -cmp;
@@ -452,17 +499,20 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
   }, [toast, onRefresh]);
 
 
-  // Export to CSV
+  // Export to CSV — columns mirror the visible Tracker-style layout.
   const handleExportCSV = useCallback(() => {
-    const headers = ['Job Category', 'Company', 'Job Title', 'Job Type', 'Location', 'High Priority', 'Job URL'];
-    const rows = sortedJobs.map(j => [
-      j.job_category || '',
-      j.company_name || '',
+    const headers = ['Job Title', 'Job Type', 'Company', 'Company Type', 'City', 'State', 'Source', 'Source URL', 'Date Found', 'High Priority'];
+    const rows = sortedJobs.map((j: any) => [
       j.job_title || '',
-      classifyJobType(j.job_title || '', j.job_type || j.opportunity_type || ''),
-      j.city && j.state ? `${j.city}, ${j.state}` : j.state || j.city || '',
-      j.high_priority ? 'Yes' : 'No',
-      getDirectJobUrl(j)
+      j._matchedJobType || '',
+      j.company_name || '',
+      j._companyType || '',
+      j.city || '',
+      j.state || '',
+      sourceLabel(j),
+      sourceUrl(j),
+      j.created_at || '',
+      (j.high_priority || j._companyIsHighPriority) ? 'Yes' : 'No',
     ]);
 
 
@@ -684,14 +734,16 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
 
   // Active filter count — counts each column that has at least one value
   // selected (not the total number of selected values across columns).
-  const activeFilterCount = [filterCategory, filterJobType, filterJobTitle, filterCompany, filterLocation].filter(s => s.size > 0).length;
+  const activeFilterCount = [filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource].filter(s => s.size > 0).length;
 
   const clearAllFilters = () => {
-    setFilterCategory(new Set());
+    setFilterCompanyType(new Set());
     setFilterJobType(new Set());
     setFilterJobTitle(new Set());
     setFilterCompany(new Set());
-    setFilterLocation(new Set());
+    setFilterCity(new Set());
+    setFilterState(new Set());
+    setFilterSource(new Set());
     setFilterHighPriority(false);
     setSearchTerm('');
   };
@@ -946,35 +998,23 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                   title={allVisibleSelected ? 'Deselect all visible' : 'Select all visible'}
                 />
               </th>
-              <MultiSelectColumnHeader<SortField> field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              {/* Columns mirror Tracker's jobs table:
+                  Job Title | Job Type | Company | Company Type | City | State | Source | Date Found.
+                  High-priority star is rendered inline on the Job Title cell. */}
               <MultiSelectColumnHeader<SortField> field="job_title" label="Job Title" filterValues={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={JOB_TYPE_OPTIONS} onFilterChange={setFilterJobType} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="job_category" label="Company Category" filterValues={filterCategory} filterOptions={CATEGORY_OPTIONS} onFilterChange={setFilterCategory} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="location" label="Location" filterValues={filterLocation} filterOptions={uniqueLocations} onFilterChange={setFilterLocation} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={uniqueJobTypes} onFilterChange={setFilterJobType} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="company_type" label="Company Type" filterValues={filterCompanyType} filterOptions={uniqueCompanyTypes} onFilterChange={setFilterCompanyType} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="city" label="City" filterValues={filterCity} filterOptions={uniqueCities} onFilterChange={setFilterCity} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="state" label="State" filterValues={filterState} filterOptions={uniqueStates} onFilterChange={setFilterState} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="source" label="Source" filterValues={filterSource} filterOptions={uniqueSources} onFilterChange={setFilterSource} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
 
-              <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[110px]">
-                <button onClick={() => handleSort('date_posted')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
-                  Date Posted
-                  <SortIcon field="date_posted" />
+              <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[160px]">
+                <button onClick={() => handleSort('created_at')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
+                  Date Found
+                  <SortIcon field="created_at" />
                 </button>
               </th>
-              <th className="text-center px-2 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[60px]" title="Job description scraped (Yes/No)">
-                <button onClick={() => handleSort('has_description')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
-                  Desc
-                  <SortIcon field="has_description" />
-                </button>
-              </th>
-
-              <th className="text-center px-4 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[80px]">
-                <button
-                  onClick={() => handleSort('high_priority')}
-                  className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors"
-                >
-                  Priority
-                  <SortIcon field="high_priority" />
-                </button>
-              </th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold">Job URL</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[100px]">Actions</th>
 
             </tr>
@@ -982,14 +1022,14 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={11} className="text-center py-16">
+                <td colSpan={10} className="text-center py-16">
                   <Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400 mb-2" />
                   <span className="text-sm text-gray-400">Loading jobs...</span>
                 </td>
               </tr>
             ) : sortedJobs.length === 0 ? (
               <tr>
-                <td colSpan={11} className="text-center py-16">
+                <td colSpan={10} className="text-center py-16">
 
                   <div className="text-gray-400">
                     {searchTerm || activeFilterCount > 0 || filterHighPriority ? (
@@ -1010,18 +1050,20 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                 </td>
               </tr>
             ) : (
-              sortedJobs.map((j, idx) => {
-                const loc = j.city && j.state ? `${j.city}, ${j.state}` : j.state || j.city || '';
-                const classified = classifyJobType(j.job_title || '', j.job_type || j.opportunity_type || '');
+              sortedJobs.map((j: any, idx: number) => {
+                const matchedJobType = j._matchedJobType || '';
+                const srcLabel = sourceLabel(j);
+                const srcUrl = sourceUrl(j);
                 const isMoving = movingJobId === j.id;
-                const directUrl = getDirectJobUrl(j);
                 const isSelected = selectedIds.has(j.id);
-                const blocked = !!j.is_blocked;
+                const blocked = !!j.is_blocked || !!j._companyIsBlocked;
+                const priority = !!j.high_priority || !!j._companyIsHighPriority;
 
                 return (
                   <tr
                     key={j.id}
                     className={`border-b transition-colors ${isMoving ? 'opacity-50' : ''} ${blocked ? 'bg-gray-100 opacity-60' : isSelected ? 'bg-amber-50 hover:bg-amber-100/50' : (
+                      priority ? 'bg-amber-50/70 hover:bg-amber-100/70' :
                       subTab === 'open'
                         ? j.is_net_new ? 'bg-blue-50/30 hover:bg-blue-50/60' : idx % 2 === 0 ? 'bg-white hover:bg-gray-50' : 'bg-gray-50/30 hover:bg-gray-100/50'
                         : idx % 2 === 0 ? 'bg-white hover:bg-gray-50' : 'bg-gray-50/30 hover:bg-gray-100/50'
@@ -1035,99 +1077,74 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                         className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406] cursor-pointer"
                       />
                     </td>
-                    <td className="px-4 py-3 font-medium text-gray-900 max-w-[200px]">
-                      <span className="truncate block">{j.company_name || '-'}</span>
-                    </td>
-                    <td className="px-4 py-3 text-gray-800 max-w-[250px]">
-                      <span className="truncate block">{j.job_title || '-'}</span>
-                    </td>
-                    <td className="px-4 py-3">
-                      {editingJobTypeId === j.id ? (
-                        <select
-                          autoFocus
-                          // Start blank unless the current classification is one of the
-                          // edit options, so picking the "already visible" choice still
-                          // fires onChange and saves.
-                          value={JOB_TYPE_EDIT_OPTIONS.includes(classified) ? classified : ''}
-                          onChange={e => { if (e.target.value) handleSaveJobType(j.id, e.target.value); }}
-                          onBlur={() => setEditingJobTypeId(null)}
-                          className="text-xs border border-[#911406] rounded px-2 py-1 bg-white focus:ring-1 focus:ring-[#911406] focus:border-[#911406] outline-none"
+                    {/* Job Title (with inline priority star — clickable to toggle). */}
+                    <td className="px-4 py-3 text-gray-800 max-w-[260px]">
+                      <div className="flex items-start gap-1.5">
+                        <button
+                          onClick={() => handleTogglePriority(j.id, !!j.high_priority)}
+                          disabled={togglingPriorityId === j.id}
+                          className={`flex-shrink-0 mt-0.5 transition-colors ${priority ? 'text-amber-500 hover:text-amber-600' : 'text-gray-300 hover:text-yellow-400'}`}
+                          title={priority ? 'Remove high priority' : 'Mark as high priority'}
                         >
-                          <option value="" disabled>Select job type…</option>
-                          {JOB_TYPE_EDIT_OPTIONS.map(opt => (
-                            <option key={opt} value={opt}>{opt}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap font-medium ${jobTypeBadgeColor(classified)}`}>{classified}</span>
-                      )}
+                          {togglingPriorityId === j.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Star className="w-3.5 h-3.5" fill={priority ? 'currentColor' : 'none'} strokeWidth={priority ? 0 : 1.5} />
+                          )}
+                        </button>
+                        <span className="truncate block font-medium">{j.job_title || '(untitled)'}</span>
+                      </div>
                     </td>
+                    {/* Job Type (matched against tracked job_types). */}
                     <td className="px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap ${categoryBadge(j.job_category)}`}>{j.job_category || '-'}</span>
+                      {matchedJobType
+                        ? <span className="text-gray-700">{matchedJobType}</span>
+                        : <span className="text-gray-300">—</span>}
                     </td>
-                    <td className="px-4 py-3 text-gray-600">
-                      {loc ? (
-                        <span className="flex items-center gap-1 whitespace-nowrap">
-                          <MapPin className="w-3 h-3 text-gray-400 flex-shrink-0" />
-                          {loc}
-                        </span>
-                      ) : (
-                        <span className="text-gray-300 text-xs">-</span>
-                      )}
+                    {/* Company (with BLOCKED badge when applicable). */}
+                    <td className="px-4 py-3 font-medium text-gray-900 max-w-[200px]">
+                      {j.company_name ? (
+                        <div className="flex items-center gap-1.5">
+                          <span className={`truncate ${blocked ? 'text-gray-500 line-through' : ''}`}>{j.company_name}</span>
+                          {blocked && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold flex-shrink-0">BLOCKED</span>
+                          )}
+                        </div>
+                      ) : <span className="text-gray-300">—</span>}
                     </td>
-                    {/* Date Posted */}
-                    <td className="px-3 py-3 text-gray-600 whitespace-nowrap">
-                      {j.date_posted ? (
-                        <span className="text-xs text-gray-700" title={new Date(j.date_posted).toLocaleString()}>
-                          {new Date(j.date_posted).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
-                        </span>
-                      ) : (
-                        <span className="text-gray-300 text-xs">—</span>
-                      )}
+                    {/* Company Type (from enriched marketing_companies). */}
+                    <td className="px-4 py-3">
+                      {j._companyType
+                        ? <span className={`inline-block text-[10px] px-2 py-0.5 rounded-full ${companyTypeBadge(j._companyType)}`}>{j._companyType}</span>
+                        : <span className="text-gray-300">—</span>}
                     </td>
-                    {/* Has Description */}
-                    <td className="px-2 py-3 text-center">
-                      {j.description && String(j.description).trim().length > 0 ? (
-                        <FileText className="w-4 h-4 text-emerald-600 inline-block" aria-label="Has description" />
-                      ) : (
-                        <Minus className="w-4 h-4 text-gray-300 inline-block" aria-label="No description" />
-                      )}
-                    </td>
-                    {/* High Priority Star */}
-                    <td className="px-4 py-3 text-center">
-                      <button
-                        onClick={() => handleTogglePriority(j.id, !!j.high_priority)}
-                        disabled={togglingPriorityId === j.id}
-                        className={`inline-flex items-center justify-center w-8 h-8 rounded-lg transition-all ${
-                          j.high_priority
-                            ? 'text-yellow-500 hover:text-yellow-600'
-                            : 'text-gray-300 hover:text-yellow-400'
-                        }`}
-                        title={j.high_priority ? 'Remove high priority' : 'Mark as high priority'}
-                      >
-                        {togglingPriorityId === j.id ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <Star
-                            className="w-5 h-5"
-                            fill={j.high_priority ? 'currentColor' : 'none'}
-                            strokeWidth={j.high_priority ? 0 : 1.5}
-                          />
-                        )}
-                      </button>
-                    </td>
-                    <td className="px-4 py-3 text-center">
-
-                      {directUrl ? (
+                    {/* City */}
+                    <td className="px-4 py-3 text-gray-700">{j.city || <span className="text-gray-300">—</span>}</td>
+                    {/* State */}
+                    <td className="px-4 py-3 text-gray-700">{j.state || <span className="text-gray-300">—</span>}</td>
+                    {/* Source (label + external link to sourceUrl). */}
+                    <td className="px-4 py-3">
+                      {srcUrl ? (
                         <a
-                          href={directUrl.startsWith('http') ? directUrl : `https://${directUrl}`}
+                          href={srcUrl.startsWith('http') ? srcUrl : `https://${srcUrl}`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-800 border border-emerald-200 transition-colors"
-                          title={directUrl}
+                          className="inline-flex items-center gap-1 text-emerald-700 hover:text-emerald-900 hover:underline"
+                          title={srcUrl}
                         >
-                          <ExternalLink className="w-4 h-4" />
+                          {srcLabel}
+                          <ExternalLink className="w-3 h-3" />
                         </a>
+                      ) : (
+                        <span className="text-gray-500">{srcLabel}</span>
+                      )}
+                    </td>
+                    {/* Date Found (created_at, with datetime tooltip). */}
+                    <td className="px-3 py-3 text-gray-600 whitespace-nowrap">
+                      {j.created_at ? (
+                        <span className="text-xs text-gray-700" title={new Date(j.created_at).toLocaleString()}>
+                          {fmtDateTime(j.created_at)}
+                        </span>
                       ) : (
                         <span className="text-gray-300 text-xs">—</span>
                       )}
@@ -1163,13 +1180,6 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, loading, onRefres
                             Reopen
                           </button>
                         )}
-                        <button
-                          onClick={() => setEditingJobTypeId(prev => prev === j.id ? null : j.id)}
-                          className="inline-flex items-center justify-center p-1 rounded text-blue-600 hover:bg-blue-50"
-                          title="Edit job type"
-                        >
-                          <Pencil className="w-3.5 h-3.5" />
-                        </button>
                         <button
                           onClick={() => handleToggleBlock(j.id, blocked)}
                           className={`inline-flex items-center justify-center p-1 rounded ${blocked ? 'text-gray-600 hover:bg-gray-200' : 'text-red-600 hover:bg-red-50'}`}
