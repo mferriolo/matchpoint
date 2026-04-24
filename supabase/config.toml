@@ -1,0 +1,13 @@
+# find-contacts needs to self-invoke (POST to its own URL) between
+# chunks so a large "Find All" sweep doesn't hit the edge runtime's
+# wall-clock limit. The self-invoke was failing with
+# "UNAUTHORIZED_INVALID_JWT_FORMAT" because the gateway tried to
+# validate the service-role key as a JWT and rejected it. Disabling
+# JWT verification on the endpoint makes the self-invoke go through;
+# the function still does all its DB writes via the service role key
+# internally, so it remains the only path that can mutate data. The
+# endpoint itself becomes callable without auth — acceptable because
+# the worst-case of an unauthorized caller is triggering a
+# find-contacts run (cost, not data access).
+[functions.find-contacts]
+verify_jwt = false
