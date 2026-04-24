@@ -82,22 +82,15 @@ const MarketingNewJobs: React.FC = () => {
   const [showWipeContactsConfirm, setShowWipeContactsConfirm] = useState(false);
   const [wipingContacts, setWipingContacts] = useState(false);
 
-  // Duplicate-review state. Groups are computed client-side from the
-  // already-loaded contacts list (no edge function needed for detection
-  // itself). Per-group LinkedIn lookups are on-demand; the user picks
-  // which group to check, we call lookup-linkedin-profile for that one.
-  const [showDuplicateReview, setShowDuplicateReview] = useState(false);
-  const [duplicateLinkedin, setDuplicateLinkedin] = useState<Record<string, { linkedinUrl: string|null; currentCompany: string|null; currentTitle: string|null; snippet?: string; cached?: boolean; cachedAgeDays?: number; extractionSource?: string|null; alternativeProfiles?: { linkedinUrl: string; title: string; snippet: string }[]; manualOverride?: boolean }>>({});
-  // Per-group state for the "paste URL" input so each group has its own draft.
-  const [duplicateManualUrlDraft, setDuplicateManualUrlDraft] = useState<Record<string, string>>({});
-  // Set of group keys currently being looked up so multiple in-flight
-  // LinkedIn queries each show their own spinner. Previously this was
-  // a single string, so clicking a second "Check LinkedIn" button
-  // visually reset the first one while it was still processing.
-  const [duplicateLookingUp, setDuplicateLookingUp] = useState<Set<string>>(new Set());
-  const [duplicateDeleteIds, setDuplicateDeleteIds] = useState<Set<string>>(new Set());
-  const [duplicateDeleting, setDuplicateDeleting] = useState(false);
-  const [duplicateReplacing, setDuplicateReplacing] = useState<string | null>(null);
+  // Contact merge-candidate review state — mirror of the company
+  // merge flow. Auto-detected groups are computed from the loaded
+  // contacts (same name → same group); manual group comes from the
+  // bulk-selection bar. Merge calls the merge_contacts RPC.
+  const [showContactMerge, setShowContactMerge] = useState(false);
+  const [contactMergeSelection, setContactMergeSelection] = useState<Record<string, { canonicalId: string; includeIds: Set<string> }>>({});
+  const [contactMergingInFlight, setContactMergingInFlight] = useState(false);
+  const [contactMergeResultSummary, setContactMergeResultSummary] = useState<Array<{ group: string; ok: boolean; contacts_deleted?: number; fields_filled?: string[]; error?: string }> | null>(null);
+  const [contactManualMergeGroup, setContactManualMergeGroup] = useState<{ key: string; items: any[] } | null>(null);
 
   const toggleContactSelect = (id: string) => {
     setSelectedContactIds(prev => {
@@ -240,150 +233,48 @@ const MarketingNewJobs: React.FC = () => {
     }
   };
 
-  // Ask the lookup-linkedin-profile function where a named person
-  // currently works. Stores the result keyed by group key so the UI
-  // can show it beside each duplicate group.
-  const handleLookupLinkedinForGroup = async (groupKey: string, firstName: string, lastName: string, hintCompany?: string, force = false, manualUrl?: string) => {
-    setDuplicateLookingUp(prev => { const next = new Set(prev); next.add(groupKey); return next; });
-    try {
-      const { data, error } = await supabase.functions.invoke('lookup-linkedin-profile', {
-        body: { firstName, lastName, company: hintCompany || undefined, force, manualUrl: manualUrl || undefined },
-      });
-      if (error) {
-        // supabase-js wraps 4xx/5xx responses in a FunctionsHttpError
-        // whose .message is just "Edge Function returned a non-2xx
-        // status code". The actual error is in .context (a Response).
-        let detail = error.message || 'Unknown error';
-        try {
-          const ctx: any = (error as any).context;
-          if (ctx && typeof ctx.text === 'function') {
-            const raw = await ctx.text();
-            try {
-              const parsed = JSON.parse(raw);
-              if (parsed?.error) detail = parsed.error;
-              else if (raw) detail = raw.slice(0, 500);
-            } catch {
-              if (raw) detail = raw.slice(0, 500);
-            }
-          }
-        } catch {}
-        console.error('lookup-linkedin-profile error detail:', detail);
-        throw new Error(detail);
+  // Confirm contact merges: for each group with ≥2 items, call the
+  // merge_contacts RPC. Falls back to defaultMergeSelection if state
+  // wasn't populated (same fast-click safety net as the company flow).
+  const handleConfirmContactMerges = async () => {
+    setContactMergingInFlight(true);
+    const activeGroups = contactManualMergeGroup ? [contactManualMergeGroup] : contactMergeCandidates;
+    const results: Array<{ group: string; ok: boolean; contacts_deleted?: number; fields_filled?: string[]; error?: string }> = [];
+    for (const g of activeGroups) {
+      const sel = contactMergeSelection[g.key] || defaultMergeSelection(g.items);
+      const mergeIds = Array.from(sel.includeIds).filter(id => id !== sel.canonicalId);
+      if (mergeIds.length === 0) continue;
+      try {
+        const { data, error } = await supabase.rpc('merge_contacts', {
+          canonical_id: sel.canonicalId,
+          merge_ids: mergeIds,
+        });
+        if (error) throw error;
+        results.push({ group: g.key, ok: true, ...((data as any) || {}) });
+      } catch (err: any) {
+        results.push({ group: g.key, ok: false, error: err.message || String(err) });
       }
-      if (!data?.success) throw new Error(data?.error || 'Lookup failed');
-      setDuplicateLinkedin(prev => ({
-        ...prev,
-        [groupKey]: {
-          linkedinUrl: data.linkedinUrl || null,
-          currentCompany: data.currentCompany || null,
-          currentTitle: data.currentTitle || null,
-          snippet: data.snippet || undefined,
-          cached: !!data.cached,
-          cachedAgeDays: data.cached_age_days || undefined,
-          extractionSource: data.extraction_source || null,
-          alternativeProfiles: Array.isArray(data.alternative_profiles) ? data.alternative_profiles : [],
-          manualOverride: !!data.manual_override,
-        },
-      }));
-    } catch (err: any) {
-      toast({ title: 'LinkedIn lookup failed', description: err.message || String(err), variant: 'destructive' });
-    } finally {
-      setDuplicateLookingUp(prev => { const next = new Set(prev); next.delete(groupKey); return next; });
     }
-  };
-
-  // Delete every contact the user checked for removal in the duplicate-
-  // review dialog. Single DELETE ... WHERE id IN (...) call.
-  const handleDeleteMarkedDuplicates = async () => {
-    if (duplicateDeleteIds.size === 0) return;
-    setDuplicateDeleting(true);
-    try {
-      const ids = Array.from(duplicateDeleteIds);
-      const { error } = await supabase.from('marketing_contacts').delete().in('id', ids);
-      if (error) throw error;
-      toast({ title: `${ids.length} duplicate${ids.length === 1 ? '' : 's'} deleted` });
-      setDuplicateDeleteIds(new Set());
-      setShowDuplicateReview(false);
-      loadData();
-    } catch (err: any) {
-      toast({ title: 'Delete failed', description: err.message || String(err), variant: 'destructive' });
-    } finally {
-      setDuplicateDeleting(false);
-    }
-  };
-
-  const toggleDuplicateDelete = (id: string) => {
-    setDuplicateDeleteIds(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
+    setContactMergingInFlight(false);
+    setContactMergeResultSummary(results);
+    const okResults = results.filter(r => r.ok);
+    const failResults = results.filter(r => !r.ok);
+    const totalDeleted = okResults.reduce((n, r) => n + (r.contacts_deleted || 0), 0);
+    const totalFieldsFilled = okResults.reduce((n, r) => n + (r.fields_filled?.length || 0), 0);
+    toast({
+      title: failResults.length === 0
+        ? `Merged ${okResults.length} contact group${okResults.length === 1 ? '' : 's'}`
+        : `Merged ${okResults.length}, ${failResults.length} failed`,
+      description: failResults.length > 0
+        ? failResults.map(r => r.error).join(' · ')
+        : `${totalDeleted} contact${totalDeleted === 1 ? '' : 's'} deleted${totalFieldsFilled > 0 ? ` · filled ${totalFieldsFilled} empty field${totalFieldsFilled === 1 ? '' : 's'} on canonicals` : ''}`,
+      variant: failResults.length > 0 ? 'destructive' : undefined,
     });
-  };
-
-  // Replace every record in a duplicate group with a single new record
-  // reflecting the person's current company + title (from LinkedIn).
-  // Used when the LinkedIn lookup shows the person now works somewhere
-  // NOT represented by any of their existing records. Looks up the
-  // matching marketing_companies row (if any) so the new contact is
-  // properly linked; falls back to an unlinked row with just
-  // company_name if the company isn't on file yet.
-  const handleReplaceGroupWithNewAtCompany = async (group: { key: string; name: string; contacts: any[] }, currentCompany: string, currentTitle: string | null, linkedinUrl: string | null) => {
-    if (!currentCompany) return;
-    const confirmReplace = window.confirm(
-      `Delete all ${group.contacts.length} existing record${group.contacts.length === 1 ? '' : 's'} for ${group.name} and create one new record at "${currentCompany}"${currentTitle ? ` (${currentTitle})` : ''}?`
-    );
-    if (!confirmReplace) return;
-    setDuplicateReplacing(group.key);
-    try {
-      // Try to find an existing marketing_companies row whose name is a
-      // loose match for the LinkedIn-reported current company. We'd
-      // rather link the new contact properly than leave company_id null.
-      const { data: candidateCompanies } = await supabase
-        .from('marketing_companies')
-        .select('id, company_name')
-        .ilike('company_name', `%${currentCompany.split(' ')[0]}%`)
-        .limit(10);
-      const matchedCompany = (candidateCompanies || []).find(co => companyMatches(co.company_name, currentCompany)) || null;
-
-      const nameParts = group.name.trim().split(/\s+/);
-      const fn = nameParts[0] || '';
-      const ln = nameParts.slice(1).join(' ') || '';
-
-      const { error: insertErr } = await supabase.from('marketing_contacts').insert({
-        first_name: fn,
-        last_name: ln,
-        company_name: currentCompany,
-        company_id: matchedCompany?.id || null,
-        title: currentTitle || '',
-        linkedin_url: linkedinUrl || null,
-        source: 'LinkedIn (dedup replace)',
-        source_url: linkedinUrl || null,
-        is_verified: true,
-        notes: `Created via duplicate-review replace action on ${new Date().toISOString().slice(0, 10)} — previous ${group.contacts.length} record${group.contacts.length === 1 ? '' : 's'} deleted.`,
-      });
-      if (insertErr) throw insertErr;
-
-      const ids = group.contacts.map(c => c.id);
-      const { error: delErr } = await supabase.from('marketing_contacts').delete().in('id', ids);
-      if (delErr) throw delErr;
-
-      // Clean up any marked-for-deletion IDs that just got deleted so
-      // the footer count updates immediately.
-      setDuplicateDeleteIds(prev => {
-        const next = new Set(prev);
-        ids.forEach(id => next.delete(id));
-        return next;
-      });
-
-      toast({
-        title: `Replaced ${ids.length} record${ids.length === 1 ? '' : 's'} for ${group.name} with new at ${currentCompany}${matchedCompany ? '' : ' (unlinked — company not found in database)'}`,
-      });
-      loadData();
-    } catch (err: any) {
-      toast({ title: 'Replace failed', description: err.message || String(err), variant: 'destructive' });
-    } finally {
-      setDuplicateReplacing(null);
-    }
+    setShowContactMerge(false);
+    setContactMergeSelection({});
+    setContactManualMergeGroup(null);
+    clearContactSelection();
+    loadData();
   };
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1167,12 +1058,13 @@ const MarketingNewJobs: React.FC = () => {
   }, [contacts]);
   const PRESENCE_OPTIONS = ['Has data', 'No data'];
 
-  // Duplicate groups: contacts sharing the same first + last name
-  // (case-insensitive). Groups are ordered by biggest first so the
-  // user can tackle the worst offenders. Within each group, records
-  // are sorted most-recently-added first since those are usually the
-  // more authoritative current ones.
-  const duplicateGroups = useMemo(() => {
+  // Contact merge candidates: contacts sharing the same first + last
+  // name (case-insensitive). Same shape as companyMergeCandidates so
+  // the merge dialog can render either with the same pattern. Ordered
+  // biggest group first; within each group, top-sorted item is the
+  // canonical default (most recent, with a preference for rows that
+  // have richer data).
+  const contactMergeCandidates = useMemo(() => {
     const groups = new Map<string, any[]>();
     for (const c of contacts) {
       const fn = (c.first_name || '').toLowerCase().trim();
@@ -1182,33 +1074,48 @@ const MarketingNewJobs: React.FC = () => {
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(c);
     }
+    const richness = (c: any) => {
+      let s = 0;
+      if (c.email) s++;
+      if (c.phone_work || c.phone_home || c.phone_cell) s++;
+      if (c.linkedin_url) s++;
+      if (c.title) s++;
+      if (c.company_name) s++;
+      if (c.is_verified) s += 2;
+      return s;
+    };
     return Array.from(groups.entries())
       .filter(([, items]) => items.length >= 2)
       .map(([key, items]) => ({
         key,
-        name: `${items[0].first_name || ''} ${items[0].last_name || ''}`.trim() || '(unnamed)',
-        contacts: items.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')),
+        items: items.slice().sort((a, b) => {
+          const rd = richness(b) - richness(a);
+          if (rd !== 0) return rd;
+          return (b.created_at || '').localeCompare(a.created_at || '');
+        }),
       }))
-      .sort((a, b) => b.contacts.length - a.contacts.length);
+      .sort((a, b) => b.items.length - a.items.length);
   }, [contacts]);
 
-  // Fuzzy company-name match used to score which record in a duplicate
-  // group best matches the currentCompany from LinkedIn. Lowercase +
-  // substring-in-either-direction is enough for most recruiting
-  // scenarios (e.g. "UnitedHealth Group" ≈ "UnitedHealthcare").
-  const companyMatches = (a: string | null | undefined, b: string | null | undefined): boolean => {
-    if (!a || !b) return false;
-    const A = a.toLowerCase().trim();
-    const B = b.toLowerCase().trim();
-    if (!A || !B) return false;
-    if (A === B) return true;
-    if (A.includes(B) || B.includes(A)) return true;
-    // Strip common suffixes and recompare.
-    const strip = (s: string) => s.replace(/\b(inc|llc|corp|corporation|group|healthcare|health|medical|system|systems|care|pllc|pc)\.?\b/g, '').replace(/\s+/g, ' ').trim();
-    const sA = strip(A); const sB = strip(B);
-    if (sA && sB && (sA === sB || sA.includes(sB) || sB.includes(sA))) return true;
-    return false;
-  };
+  const activeContactMergeGroups = contactManualMergeGroup ? [contactManualMergeGroup] : contactMergeCandidates;
+
+  // Seed contact merge selection when the dialog opens (mirror of the
+  // company-merge useEffect pattern; avoids setState-during-render
+  // races so a fast Confirm click doesn't silently no-op).
+  useEffect(() => {
+    if (!showContactMerge) return;
+    setContactMergeSelection(prev => {
+      let next = prev;
+      let changed = false;
+      for (const g of activeContactMergeGroups) {
+        if (!next[g.key]) {
+          if (!changed) { next = { ...prev }; changed = true; }
+          next[g.key] = defaultMergeSelection(g.items);
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [showContactMerge, activeContactMergeGroups]);
 
   // Contacts filter + sort
   const filteredContacts = useMemo(() => {
@@ -2126,13 +2033,20 @@ const MarketingNewJobs: React.FC = () => {
                 )}
                 <Button
                   variant="outline"
-                  onClick={() => { setDuplicateDeleteIds(new Set()); setShowDuplicateReview(true); }}
-                  disabled={duplicateGroups.length === 0}
-                  className="text-gray-700"
-                  title={duplicateGroups.length === 0 ? 'No duplicate contacts detected' : `${duplicateGroups.length} name${duplicateGroups.length === 1 ? '' : 's'} with multiple records`}
+                  onClick={() => {
+                    setContactManualMergeGroup(null);
+                    setContactMergeSelection({});
+                    setContactMergeResultSummary(null);
+                    setShowContactMerge(true);
+                  }}
+                  disabled={contactMergeCandidates.length === 0}
+                  className="text-purple-700 border-purple-300 hover:bg-purple-50 hover:text-purple-800 hover:border-purple-400"
+                  title={contactMergeCandidates.length === 0
+                    ? 'No merge candidates detected'
+                    : `${contactMergeCandidates.length} group${contactMergeCandidates.length === 1 ? '' : 's'} of contacts sharing a name`}
                 >
-                  <Copy className="w-4 h-4 mr-2" />
-                  Deduplicate{duplicateGroups.length > 0 ? ` (${duplicateGroups.length})` : ''}
+                  <GitMerge className="w-4 h-4 mr-2" />
+                  Search and Merge Contacts{contactMergeCandidates.length > 0 ? ` (${contactMergeCandidates.length})` : ''}
                 </Button>
                 <Button
                   variant="outline"
@@ -2170,6 +2084,41 @@ const MarketingNewJobs: React.FC = () => {
                     >
                       <Zap className="w-4 h-4 mr-1.5" />
                       Enrich {selectedContactIds.size}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        // Build a manual merge group from the current
+                        // selection and open the merge dialog. Mirrors
+                        // the company-tab bulk merge flow.
+                        const selected = contacts.filter(c => selectedContactIds.has(c.id));
+                        if (selected.length < 2) return;
+                        const items = selected.slice().sort((a, b) => {
+                          const richness = (c: any) => {
+                            let s = 0;
+                            if (c.email) s++;
+                            if (c.phone_work || c.phone_home || c.phone_cell) s++;
+                            if (c.linkedin_url) s++;
+                            if (c.title) s++;
+                            if (c.company_name) s++;
+                            if (c.is_verified) s += 2;
+                            return s;
+                          };
+                          const rd = richness(b) - richness(a);
+                          if (rd !== 0) return rd;
+                          return (b.created_at || '').localeCompare(a.created_at || '');
+                        });
+                        setContactManualMergeGroup({ key: 'manual-selection', items });
+                        setContactMergeSelection({});
+                        setContactMergeResultSummary(null);
+                        setShowContactMerge(true);
+                      }}
+                      disabled={selectedContactIds.size < 2}
+                      className="text-purple-700 border-purple-300 hover:bg-purple-50 hover:text-purple-800 hover:border-purple-400 disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={selectedContactIds.size < 2 ? 'Select at least two contacts to merge' : 'Merge the selected contacts — pick a canonical; others are merged into it'}
+                    >
+                      <GitMerge className="w-4 h-4 mr-1.5" />
+                      Merge {selectedContactIds.size}
                     </Button>
                     <Button
                       onClick={() => setShowDeleteContactsConfirm(true)}
@@ -3055,28 +3004,37 @@ const MarketingNewJobs: React.FC = () => {
         </div>
       )}
 
-      {/* Duplicate Review Dialog — groups contacts by name and lets
-          the user see each person's records side by side, optionally
-          check LinkedIn to find their current company, and tick the
-          records to delete. */}
-      {showDuplicateReview && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => !duplicateDeleting && setShowDuplicateReview(false)}>
+      {/* Merge Candidates / Selected Contacts Dialog — mirrors the
+          company-merge dialog. Auto-detected groups cluster contacts
+          that share a first + last name; a manual group can also be
+          built by selecting rows and clicking Merge in the bulk bar.
+          Confirm calls the merge_contacts RPC per group (canonical
+          row keeps its identity + any non-empty fields, merged rows'
+          non-empty values fill canonical's empty fields, notes are
+          concatenated, confidence recomputed, merged rows deleted). */}
+      {showContactMerge && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => !contactMergingInFlight && (setShowContactMerge(false), setContactManualMergeGroup(null))}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl overflow-hidden max-h-[88vh] flex flex-col" onClick={e => e.stopPropagation()}>
             <div className="p-5 border-b">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
-                  <Copy className="w-5 h-5 text-blue-700" />
+                <div className="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center">
+                  <GitMerge className="w-5 h-5 text-purple-700" />
                 </div>
                 <div className="flex-1">
-                  <h3 className="text-lg font-bold text-gray-900">Duplicate contacts</h3>
+                  <h3 className="text-lg font-bold text-gray-900">{contactManualMergeGroup ? 'Merge selected contacts' : 'Merge candidates'}</h3>
                   <p className="text-sm text-gray-500">
-                    {duplicateGroups.length} name{duplicateGroups.length === 1 ? '' : 's'} with multiple records.
-                    Click <em>Check LinkedIn</em> to find each person's current company — the record that matches
-                    gets highlighted as the one to keep.
+                    {contactManualMergeGroup
+                      ? `${contactManualMergeGroup.items.length} contact${contactManualMergeGroup.items.length === 1 ? '' : 's'} selected for merge.`
+                      : `${activeContactMergeGroups.length} group${activeContactMergeGroups.length === 1 ? '' : 's'} of contacts sharing a name.`}
+                    {' '}Pick the canonical row{contactManualMergeGroup ? '' : ' in each group'}; non-empty fields from the others fill canonical's empty slots and the merged rows are deleted.
+                  </p>
+                  <p className="text-[11px] text-gray-400 mt-1 leading-snug">
+                    Empty fields on canonical are filled from merged rows (company, email, title, phones, LinkedIn, source).
+                    is_verified ORs across all rows. notes are concatenated with a "[merged from …]" prefix. Confidence recomputes. id, first_name, last_name, created_at stay on canonical.
                   </p>
                 </div>
                 <button
-                  onClick={() => setShowDuplicateReview(false)}
+                  onClick={() => !contactMergingInFlight && (setShowContactMerge(false), setContactManualMergeGroup(null))}
                   className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100"
                 >
                   <X className="w-5 h-5" />
@@ -3085,340 +3043,129 @@ const MarketingNewJobs: React.FC = () => {
             </div>
 
             <div className="overflow-y-auto flex-1 p-5 space-y-5 bg-gray-50">
-              {duplicateGroups.map(g => {
-                const li = duplicateLinkedin[g.key];
-                const lookedUp = !!li;
+              {activeContactMergeGroups.map(g => {
+                const sel = contactMergeSelection[g.key] || defaultMergeSelection(g.items);
+                const canonicalId = sel.canonicalId;
+                const includeIds = sel.includeIds;
+                const mergeCount = Array.from(includeIds).filter(id => id !== canonicalId).length;
+                const headerName = g.items[0]
+                  ? `${g.items[0].first_name || ''} ${g.items[0].last_name || ''}`.trim() || '(unnamed)'
+                  : g.key;
                 return (
                   <div key={g.key} className="bg-white rounded-lg border border-gray-200 overflow-hidden">
                     <div className="px-4 py-3 border-b bg-white flex items-center justify-between flex-wrap gap-2">
                       <div>
-                        <h4 className="text-sm font-bold text-gray-900">{g.name}</h4>
-                        <p className="text-xs text-gray-500">{g.contacts.length} records</p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {lookedUp && li.linkedinUrl && (
-                          <a
-                            href={li.linkedinUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-sky-50 text-sky-800 border border-sky-200 hover:bg-sky-100"
-                          >
-                            <Linkedin className="w-3 h-3" />
-                            Profile
-                          </a>
-                        )}
-                        {lookedUp ? (
-                          <div className="text-xs text-right">
-                            {li.currentCompany ? (
-                              <>
-                                <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                                  <span>Current: <strong className="text-emerald-700">{li.currentCompany}</strong></span>
-                                  {li.extractionSource && (
-                                    <span
-                                      className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${
-                                        li.extractionSource === 'apollo' ? 'bg-emerald-100 text-emerald-800' :
-                                        li.extractionSource === 'snippet' ? 'bg-teal-100 text-teal-800' :
-                                        li.extractionSource === 'regex' ? 'bg-amber-100 text-amber-800' :
-                                        'bg-orange-100 text-orange-800'
-                                      }`}
-                                      title={
-                                        li.extractionSource === 'apollo'
-                                          ? 'Apollo structured work history — most reliable'
-                                          : li.extractionSource === 'snippet'
-                                            ? 'Parsed from LinkedIn\'s Experience meta-description in the Google snippet — reflects the real current employer'
-                                            : li.extractionSource === 'regex'
-                                              ? 'LinkedIn headline via title regex — often the person\'s self-description rather than their employer. Verify against the profile.'
-                                              : 'AI-extracted from Google snippet — verify against the profile'
-                                      }
-                                    >
-                                      {li.extractionSource === 'apollo' ? 'Apollo' :
-                                        li.extractionSource === 'snippet' ? 'Experience' :
-                                        li.extractionSource === 'regex' ? 'Headline ⚠' : 'AI'}
-                                    </span>
-                                  )}
-                                  {li.cached && (
-                                    <span className="text-[9px] uppercase tracking-wider bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-semibold" title={`Served from cache${li.cachedAgeDays !== undefined ? ` (${li.cachedAgeDays}d old)` : ''} — no SerpAPI credit used`}>
-                                      Cached{li.cachedAgeDays !== undefined ? ` ${li.cachedAgeDays}d` : ''}
-                                    </span>
-                                  )}
-                                </div>
-                                {li.currentTitle && (
-                                  <div className="text-gray-600 mt-0.5">Title: <span className="font-medium">{li.currentTitle}</span></div>
-                                )}
-                                {li.cached && (
-                                  <button
-                                    onClick={() => {
-                                      const [fn, ...rest] = g.name.split(' ');
-                                      const ln = rest.join(' ');
-                                      handleLookupLinkedinForGroup(g.key, fn, ln, undefined, true);
-                                    }}
-                                    disabled={duplicateLookingUp.has(g.key)}
-                                    className="text-[10px] text-gray-500 hover:text-[#911406] underline mt-1"
-                                    title="Force a fresh SerpAPI lookup (bypasses the 30-day cache)"
-                                  >
-                                    {duplicateLookingUp.has(g.key) ? 'Refreshing…' : 'Refresh from SerpAPI'}
-                                  </button>
-                                )}
-                                {/* Alternative LinkedIn profiles — for
-                                    shared-name cases (e.g. two Julie
-                                    Ittys). The user can pick a
-                                    different profile or paste their own
-                                    URL if they know the right one. */}
-                                {((li.alternativeProfiles && li.alternativeProfiles.length > 0) || true) && (
-                                  <details className="mt-1 text-left">
-                                    <summary className="text-[10px] text-gray-500 hover:text-[#911406] cursor-pointer">
-                                      Wrong profile? {li.alternativeProfiles && li.alternativeProfiles.length > 0 ? `${li.alternativeProfiles.length} other candidate${li.alternativeProfiles.length === 1 ? '' : 's'}` : 'Paste correct URL'}
-                                    </summary>
-                                    <div className="space-y-1 mt-1.5 bg-gray-50 border border-gray-200 rounded p-2">
-                                      {(li.alternativeProfiles || []).map(alt => {
-                                        const slug = (alt.linkedinUrl.match(/\/in\/([^\/\?]+)/) || [])[1] || alt.linkedinUrl;
-                                        return (
-                                          <div key={alt.linkedinUrl} className="flex items-start gap-2 text-[10px]">
-                                            <div className="flex-1 min-w-0">
-                                              <div className="font-medium text-gray-700 truncate" title={alt.title}>{alt.title || slug}</div>
-                                              <div className="text-gray-400 truncate" title={alt.linkedinUrl}>{slug}</div>
-                                            </div>
-                                            <button
-                                              onClick={() => {
-                                                const [fn, ...rest] = g.name.split(' ');
-                                                const ln = rest.join(' ');
-                                                handleLookupLinkedinForGroup(g.key, fn, ln, undefined, true, alt.linkedinUrl);
-                                              }}
-                                              disabled={duplicateLookingUp.has(g.key)}
-                                              className="text-[10px] px-1.5 py-0.5 rounded bg-[#911406] text-white hover:bg-[#7a1005] flex-shrink-0"
-                                            >
-                                              Use
-                                            </button>
-                                          </div>
-                                        );
-                                      })}
-                                      <div className="pt-1 border-t border-gray-200 mt-1">
-                                        <input
-                                          type="text"
-                                          placeholder="https://linkedin.com/in/..."
-                                          value={duplicateManualUrlDraft[g.key] || ''}
-                                          onChange={e => setDuplicateManualUrlDraft(prev => ({ ...prev, [g.key]: e.target.value }))}
-                                          className="w-full text-[10px] border border-gray-200 rounded px-1.5 py-0.5 font-mono"
-                                        />
-                                        <button
-                                          onClick={() => {
-                                            const draft = duplicateManualUrlDraft[g.key]?.trim();
-                                            if (!draft || !draft.includes('linkedin.com/in/')) {
-                                              toast({ title: 'Enter a linkedin.com/in/… URL', variant: 'destructive' });
-                                              return;
-                                            }
-                                            const [fn, ...rest] = g.name.split(' ');
-                                            const ln = rest.join(' ');
-                                            handleLookupLinkedinForGroup(g.key, fn, ln, undefined, true, draft);
-                                            setDuplicateManualUrlDraft(prev => ({ ...prev, [g.key]: '' }));
-                                          }}
-                                          disabled={duplicateLookingUp.has(g.key)}
-                                          className="mt-1 text-[10px] px-2 py-0.5 rounded bg-gray-700 text-white hover:bg-gray-800"
-                                        >
-                                          Look up this URL
-                                        </button>
-                                      </div>
-                                    </div>
-                                  </details>
-                                )}
-                              </>
-                            ) : (
-                              <div className="space-y-1">
-                                <span className="text-gray-500 italic">
-                                  {li.linkedinUrl
-                                    ? `LinkedIn profile found but the company couldn't be extracted from the Google snippet.`
-                                    : `No matching LinkedIn profile found for this person.`}
-                                </span>
-                                {li.linkedinUrl && (
-                                  <div className="flex items-center gap-2 justify-end">
-                                    <a
-                                      href={li.linkedinUrl}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-sky-50 text-sky-800 border border-sky-200 hover:bg-sky-100"
-                                    >
-                                      <Linkedin className="w-3 h-3" />
-                                      Open profile
-                                    </a>
-                                    <span className="text-[9px] text-gray-400 truncate max-w-[160px]" title={li.linkedinUrl}>
-                                      {(li.linkedinUrl.match(/\/in\/([^\/\?]+)/) || [])[1] || li.linkedinUrl}
-                                    </span>
-                                  </div>
-                                )}
-                                {li.snippet && (
-                                  <details className="text-[10px] text-gray-400 cursor-pointer">
-                                    <summary className="hover:text-gray-600">show raw snippet</summary>
-                                    <pre className="whitespace-pre-wrap break-all font-mono bg-gray-50 p-2 rounded mt-1 max-w-xs text-left">{li.snippet}</pre>
-                                  </details>
-                                )}
-                                <button
-                                  onClick={() => {
-                                    const [fn, ...rest] = g.name.split(' ');
-                                    const ln = rest.join(' ');
-                                    handleLookupLinkedinForGroup(g.key, fn, ln, undefined, true);
-                                  }}
-                                  disabled={duplicateLookingUp.has(g.key)}
-                                  className="text-[11px] text-[#911406] hover:underline font-medium"
-                                >
-                                  {duplicateLookingUp.has(g.key) ? 'Refreshing…' : 'Re-run with fresh SerpAPI query'}
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => {
-                              // Don't pass a hint company — the group has
-                              // multiple companies by definition and a
-                              // stale hint biases Google toward old records.
-                              // We verify the result matches the person
-                              // by name on the server side.
-                              const [fn, ...rest] = g.name.split(' ');
-                              const ln = rest.join(' ');
-                              handleLookupLinkedinForGroup(g.key, fn, ln);
-                            }}
-                            disabled={duplicateLookingUp.has(g.key)}
-                          >
-                            {duplicateLookingUp.has(g.key)
-                              ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> Checking…</>
-                              : <><Linkedin className="w-3.5 h-3.5 mr-1" /> Check LinkedIn</>}
-                          </Button>
-                        )}
+                        <h4 className="text-sm font-bold text-gray-900">{headerName}</h4>
+                        <p className="text-xs text-gray-500">{g.items.length} records · {mergeCount} will be merged into canonical</p>
                       </div>
                     </div>
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-50 text-gray-500 uppercase tracking-wider text-[10px]">
-                        <tr>
-                          <th className="text-center px-2 py-2 font-semibold w-[90px]">Delete?</th>
-                          <th className="text-left px-3 py-2 font-semibold">Company</th>
-                          <th className="text-left px-3 py-2 font-semibold">Title</th>
-                          <th className="text-left px-3 py-2 font-semibold">Email</th>
-                          <th className="text-left px-3 py-2 font-semibold">Phone(s)</th>
-                          <th className="text-left px-3 py-2 font-semibold">LinkedIn</th>
-                          <th className="text-left px-3 py-2 font-semibold">Source</th>
-                          <th className="text-right px-3 py-2 font-semibold">Added</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {g.contacts.map(c => {
-                          const marked = duplicateDeleteIds.has(c.id);
-                          // If we've done a LinkedIn check, highlight the record that matches the current employer.
-                          const isCurrent = lookedUp && li.currentCompany && companyMatches(c.company_name, li.currentCompany);
-                          const phones = [c.phone_work, c.phone_home, c.phone_cell].filter(Boolean).join(' · ') || '—';
-                          const linkedin = c.linkedin_url || (c.source_url?.includes('linkedin.com/in/') ? c.source_url : '') || '';
-                          return (
-                            <tr
-                              key={c.id}
-                              className={`border-t border-gray-100 align-top ${marked ? 'bg-red-50/50 text-gray-500' : isCurrent ? 'bg-emerald-50' : ''}`}
-                            >
-                              <td className="px-2 py-2 text-center">
-                                <input
-                                  type="checkbox"
-                                  checked={marked}
-                                  onChange={() => toggleDuplicateDelete(c.id)}
-                                  className="w-4 h-4 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30 cursor-pointer"
-                                />
-                              </td>
-                              <td className="px-3 py-2 font-medium truncate max-w-[180px]" title={c.company_name || ''}>
-                                {c.company_name || <span className="text-gray-300">—</span>}
-                                {isCurrent && <span className="ml-1.5 inline-block text-[9px] px-1.5 py-0.5 rounded bg-emerald-200 text-emerald-900 font-semibold uppercase tracking-wider">Current</span>}
-                              </td>
-                              <td className="px-3 py-2 truncate max-w-[160px]" title={c.title || ''}>{c.title || <span className="text-gray-300">—</span>}</td>
-                              <td className="px-3 py-2 truncate max-w-[180px]" title={c.email || ''}>{c.email || <span className="text-gray-300">—</span>}</td>
-                              <td className="px-3 py-2 truncate max-w-[160px]" title={phones}>{phones}</td>
-                              <td className="px-3 py-2">
-                                {linkedin
-                                  ? <a href={linkedin} target="_blank" rel="noopener noreferrer" className="text-sky-700 hover:underline">profile</a>
-                                  : <span className="text-gray-300">—</span>}
-                              </td>
-                              <td className="px-3 py-2 truncate max-w-[120px]" title={c.source || ''}>{c.source || <span className="text-gray-300">—</span>}</td>
-                              <td className="px-3 py-2 text-right tabular-nums text-gray-500">
-                                {c.created_at ? new Date(c.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                    {/* After LinkedIn check: two shortcut actions.
-                        (1) Mark all non-matching records for deletion —
-                        useful when one existing record already matches
-                        the current employer.
-                        (2) Replace all with a new record — useful when
-                        the person now works somewhere not in the group
-                        (e.g. Sarah Brown has 6 old records, none at
-                        her current DaVita role). */}
-                    {lookedUp && li.currentCompany && (() => {
-                      const hasMatchingRecord = g.contacts.some(c => companyMatches(c.company_name, li.currentCompany));
-                      const nonMatchingCount = g.contacts.filter(c => !companyMatches(c.company_name, li.currentCompany)).length;
-                      return (
-                        <div className="px-4 py-2 border-t bg-white flex items-center justify-end gap-3 flex-wrap">
-                          {hasMatchingRecord && (
-                            <button
-                              onClick={() => {
-                                const next = new Set(duplicateDeleteIds);
-                                for (const c of g.contacts) {
-                                  if (!companyMatches(c.company_name, li.currentCompany)) next.add(c.id);
-                                  else next.delete(c.id);
-                                }
-                                setDuplicateDeleteIds(next);
-                              }}
-                              className="text-[11px] text-[#911406] hover:underline font-medium"
-                            >
-                              Mark all non-matching ({nonMatchingCount}) for deletion
-                            </button>
-                          )}
-                          <button
-                            onClick={() => handleReplaceGroupWithNewAtCompany(g, li.currentCompany!, li.currentTitle, li.linkedinUrl)}
-                            disabled={duplicateReplacing === g.key}
-                            className="text-[11px] inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-medium disabled:opacity-50"
-                            title={`Delete all ${g.contacts.length} existing records and create one new record at ${li.currentCompany}`}
-                          >
-                            {duplicateReplacing === g.key
-                              ? <><Loader2 className="w-3 h-3 animate-spin" /> Replacing…</>
-                              : <>Replace all with new at {li.currentCompany}{li.currentTitle ? ` (${li.currentTitle})` : ''}</>}
-                          </button>
-                        </div>
-                      );
-                    })()}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50 text-gray-500 uppercase tracking-wider text-[10px]">
+                          <tr>
+                            <th className="text-center px-2 py-2 font-semibold w-[60px]" title="Canonical: the row everything else merges into">Keep</th>
+                            <th className="text-center px-2 py-2 font-semibold w-[60px]" title="Include this row in the merge (if unchecked, row is left alone)">Merge</th>
+                            <th className="text-left px-3 py-2 font-semibold">Company</th>
+                            <th className="text-left px-3 py-2 font-semibold">Title</th>
+                            <th className="text-left px-3 py-2 font-semibold">Email</th>
+                            <th className="text-left px-3 py-2 font-semibold">Phones</th>
+                            <th className="text-center px-2 py-2 font-semibold" title="Confidence score (0-5)">Conf</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {g.items.map(c => {
+                            const isCanonical = c.id === canonicalId;
+                            const isIncluded = includeIds.has(c.id);
+                            const phones = [c.phone_work, c.phone_cell, c.phone_home].filter(Boolean).join(' · ') || '—';
+                            return (
+                              <tr key={c.id} className={`border-t border-gray-100 ${isCanonical ? 'bg-emerald-50/60' : isIncluded ? '' : 'text-gray-400'}`}>
+                                <td className="text-center px-2 py-2">
+                                  <input
+                                    type="radio"
+                                    name={`contact-canonical-${g.key}`}
+                                    checked={isCanonical}
+                                    onChange={() => setContactMergeSelection(prev => ({
+                                      ...prev,
+                                      [g.key]: {
+                                        canonicalId: c.id,
+                                        includeIds: new Set([...(prev[g.key]?.includeIds || new Set()), c.id]),
+                                      },
+                                    }))}
+                                    disabled={contactMergingInFlight}
+                                  />
+                                </td>
+                                <td className="text-center px-2 py-2">
+                                  <input
+                                    type="checkbox"
+                                    checked={isIncluded}
+                                    disabled={isCanonical || contactMergingInFlight}
+                                    onChange={() => setContactMergeSelection(prev => {
+                                      const cur = prev[g.key] || { canonicalId, includeIds: new Set<string>() };
+                                      const next = new Set(cur.includeIds);
+                                      if (next.has(c.id)) next.delete(c.id); else next.add(c.id);
+                                      return { ...prev, [g.key]: { ...cur, includeIds: next } };
+                                    })}
+                                    title={isCanonical ? 'Canonical row is always included' : 'Include this row in the merge'}
+                                  />
+                                </td>
+                                <td className="px-3 py-2 truncate max-w-[180px]" title={c.company_name || ''}>
+                                  {c.company_name || <span className="text-gray-300">—</span>}
+                                  {isCanonical && <span className="ml-2 text-[10px] uppercase tracking-wider text-emerald-700 font-semibold">canonical</span>}
+                                </td>
+                                <td className="px-3 py-2 truncate max-w-[160px]" title={c.title || ''}>{c.title || <span className="text-gray-300">—</span>}</td>
+                                <td className="px-3 py-2 text-xs truncate max-w-[160px]" title={c.email || ''}>
+                                  {c.email ? (
+                                    <a href={`mailto:${c.email}`} onClick={e => e.stopPropagation()} className="text-blue-600 hover:underline">{c.email}</a>
+                                  ) : <span className="text-gray-300">—</span>}
+                                </td>
+                                <td className="px-3 py-2 text-xs text-gray-600 truncate max-w-[150px]" title={phones}>{phones}</td>
+                                <td className="px-2 py-2 text-center tabular-nums">{c.confidence_score ?? 0}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 );
               })}
-              {duplicateGroups.length === 0 && (
-                <p className="text-sm text-gray-500 italic text-center py-10">No duplicate names detected.</p>
+              {activeContactMergeGroups.length === 0 && (
+                <p className="text-sm text-gray-500 italic text-center py-10">No merge candidates detected.</p>
               )}
             </div>
 
             <div className="p-4 border-t bg-white flex items-center justify-between">
               <p className="text-sm text-gray-600">
-                {duplicateDeleteIds.size} contact{duplicateDeleteIds.size === 1 ? '' : 's'} marked for deletion
+                {(() => {
+                  const totalMerges = activeContactMergeGroups.reduce((n, g) => {
+                    const sel = contactMergeSelection[g.key] || defaultMergeSelection(g.items);
+                    return n + Array.from(sel.includeIds).filter(id => id !== sel.canonicalId).length;
+                  }, 0);
+                  return totalMerges > 0
+                    ? `${totalMerges} contact${totalMerges === 1 ? '' : 's'} will be merged into their canonical.`
+                    : 'No merges queued yet.';
+                })()}
               </p>
               <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  onClick={() => setShowDuplicateReview(false)}
-                  disabled={duplicateDeleting}
-                >
-                  Close
+                <Button variant="outline" onClick={() => { setShowContactMerge(false); setContactManualMergeGroup(null); }} disabled={contactMergingInFlight}>
+                  Cancel
                 </Button>
                 <Button
-                  onClick={handleDeleteMarkedDuplicates}
-                  disabled={duplicateDeleteIds.size === 0 || duplicateDeleting}
-                  className="bg-[#911406] hover:bg-[#7a1005] text-white"
+                  onClick={handleConfirmContactMerges}
+                  disabled={contactMergingInFlight || activeContactMergeGroups.every(g => {
+                    const sel = contactMergeSelection[g.key] || defaultMergeSelection(g.items);
+                    return Array.from(sel.includeIds).filter(id => id !== sel.canonicalId).length === 0;
+                  })}
+                  className="bg-purple-700 hover:bg-purple-800 text-white"
                 >
-                  {duplicateDeleting ? (
-                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Deleting…</>
-                  ) : (
-                    <><Trash2 className="w-4 h-4 mr-2" /> Delete {duplicateDeleteIds.size}</>
-                  )}
+                  {contactMergingInFlight ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Merging…</>) : (<><GitMerge className="w-4 h-4 mr-2" /> Confirm merges</>)}
                 </Button>
               </div>
             </div>
           </div>
         </div>
       )}
+
 
       {/* Delete Selected Contacts Confirmation */}
       {showDeleteContactsConfirm && (
