@@ -10,7 +10,7 @@ import {
   Database, Shield, Phone, Send,
   Linkedin, Unlink, Upload, Trash2, Zap,
   ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert, FileText, ArrowRightLeft,
-  Ban, RotateCcw, Eye, EyeOff, Pencil, Filter, X, Copy
+  Ban, RotateCcw, Eye, EyeOff, Pencil, Filter, X, Copy, GitMerge
 } from 'lucide-react';
 
 import { supabase } from '@/lib/supabase';
@@ -448,6 +448,18 @@ const MarketingNewJobs: React.FC = () => {
   const [filterCompanyCategory, setFilterCompanyCategory] = useState<Set<string>>(new Set());
   const [companyCategoryFilterOpen, setCompanyCategoryFilterOpen] = useState(false);
 
+  // Company merge-candidate review. mergeSelection is keyed by group key
+  // and stores { canonicalId, includeIds } — the canonical is the row
+  // everything else gets reassigned to; includeIds are the members of
+  // the group the user wants swept into the merge (unchecked ones are
+  // left alone). mergingInFlight disables UI while RPC calls are in
+  // flight. mergeResultSummary holds the list of per-group outcomes
+  // from the most recent confirm, for the results toast/dialog.
+  const [showMergeCandidates, setShowMergeCandidates] = useState(false);
+  const [mergeSelection, setMergeSelection] = useState<Record<string, { canonicalId: string; includeIds: Set<string> }>>({});
+  const [mergingInFlight, setMergingInFlight] = useState(false);
+  const [mergeResultSummary, setMergeResultSummary] = useState<Array<{ group: string; ok: boolean; canonical_name?: string; jobs_moved?: number; contacts_moved?: number; companies_deleted?: number; error?: string }> | null>(null);
+
   // Kick off a find-contacts run. The edge function returns a run_id
   // immediately and continues processing in the background. We then
   // poll the contact_runs row every 2s until it hits completed/failed.
@@ -836,6 +848,129 @@ const MarketingNewJobs: React.FC = () => {
   }, [companies, searchCompanies, filterHighPriorityCompanies, filterCompanyCategory, showBlockedCompanies, companySortField, companySortDir]);
 
   const highPriorityCompanyCount = useMemo(() => companies.filter(c => c.is_high_priority).length, [companies]);
+
+  // Company-name normalization for merge-candidate detection. Strips
+  // generic corporate / healthcare suffixes iteratively until nothing
+  // matches so "Devoted Health Services", "Devoted Medical Group", and
+  // "Devoted Medical Services" all collapse to "devoted". A company
+  // whose ENTIRE name is a generic suffix (e.g. "Medical Group" on its
+  // own) is left alone so it doesn't become an empty-key magnet.
+  const companyMergeCandidates = useMemo(() => {
+    const COMPANY_SUFFIXES = [
+      // Multi-word first (longest match wins)
+      'health services', 'medical services', 'medical group', 'health group',
+      'medical center', 'health center', 'health system', 'health systems',
+      'medical associates', 'medical partners',
+      // Single-word
+      'healthcare', 'health', 'medical', 'hospital', 'clinic',
+      'services', 'group', 'corp', 'corporation', 'incorporated', 'inc',
+      'llc', 'ltd', 'pllc', 'associates', 'partners', 'enterprises',
+      'holdings', 'systems', 'system', 'company', 'co', 'pa', 'pc',
+    ].sort((a, b) => b.length - a.length);
+
+    const normalize = (name: string): string => {
+      let s = (name || '').toLowerCase().trim();
+      if (!s) return '';
+      s = s.replace(/[.,\-\(\)&'"\/]/g, ' ').replace(/\s+/g, ' ').trim();
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const sfx of COMPANY_SUFFIXES) {
+          if (s === sfx) return s; // don't strip to empty
+          if (s.endsWith(' ' + sfx)) {
+            s = s.slice(0, -(sfx.length + 1)).trim();
+            changed = true;
+            break;
+          }
+        }
+      }
+      return s;
+    };
+
+    // Per-company contact counts — contact_count on the row isn't always
+    // populated, so derive from the loaded contacts array for the UI.
+    const contactCountByCoId = new Map<string, number>();
+    for (const ct of contacts) {
+      if (!ct.company_id) continue;
+      contactCountByCoId.set(ct.company_id, (contactCountByCoId.get(ct.company_id) || 0) + 1);
+    }
+
+    const groups = new Map<string, any[]>();
+    for (const c of companies) {
+      const key = normalize(c.company_name);
+      if (!key) continue;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push({
+        ...c,
+        _contact_count: c.contact_count ?? contactCountByCoId.get(c.id) ?? 0,
+      });
+    }
+    return Array.from(groups.entries())
+      .filter(([, items]) => items.length >= 2)
+      .map(([key, items]) => ({
+        key,
+        items: items.slice().sort((a, b) => {
+          // Sort members so the "best" canonical default lands first:
+          // most open roles first, then most contacts, then shortest
+          // name (more generic short name is often the canonical).
+          const scoreA = (a.open_roles_count || 0) * 10 + (a._contact_count || 0);
+          const scoreB = (b.open_roles_count || 0) * 10 + (b._contact_count || 0);
+          if (scoreA !== scoreB) return scoreB - scoreA;
+          return (a.company_name || '').length - (b.company_name || '').length;
+        }),
+      }))
+      .sort((a, b) => b.items.length - a.items.length);
+  }, [companies, contacts]);
+
+  // Seed mergeSelection for a group on first view: pick the top-sorted
+  // member as canonical, include every other member. Keeps whatever the
+  // user has already toggled if they re-open the dialog mid-review.
+  const ensureMergeSelection = (groupKey: string, items: any[]) => {
+    if (mergeSelection[groupKey]) return;
+    setMergeSelection(prev => ({
+      ...prev,
+      [groupKey]: {
+        canonicalId: items[0].id,
+        includeIds: new Set(items.map(i => i.id)),
+      },
+    }));
+  };
+
+  // Confirm the queued merges: for each group where the user left ≥ 2
+  // rows checked (canonical + at least one merge), call the
+  // merge_companies RPC. Results are accumulated for the summary.
+  const handleConfirmCompanyMerges = async () => {
+    setMergingInFlight(true);
+    const results: Array<{ group: string; ok: boolean; canonical_name?: string; jobs_moved?: number; contacts_moved?: number; companies_deleted?: number; error?: string }> = [];
+    for (const g of companyMergeCandidates) {
+      const sel = mergeSelection[g.key];
+      if (!sel) continue;
+      const mergeIds = Array.from(sel.includeIds).filter(id => id !== sel.canonicalId);
+      if (mergeIds.length === 0) continue;
+      try {
+        const { data, error } = await supabase.rpc('merge_companies', {
+          canonical_id: sel.canonicalId,
+          merge_ids: mergeIds,
+        });
+        if (error) throw error;
+        results.push({ group: g.key, ok: true, ...((data as any) || {}) });
+      } catch (err: any) {
+        results.push({ group: g.key, ok: false, error: err.message || String(err) });
+      }
+    }
+    setMergingInFlight(false);
+    setMergeResultSummary(results);
+    const okCount = results.filter(r => r.ok).length;
+    const failCount = results.filter(r => !r.ok).length;
+    toast({
+      title: failCount === 0 ? `Merged ${okCount} group${okCount === 1 ? '' : 's'}` : `Merged ${okCount}, ${failCount} failed`,
+      description: failCount > 0 ? results.filter(r => !r.ok).map(r => r.error).join(' · ') : undefined,
+      variant: failCount > 0 ? 'destructive' : undefined,
+    });
+    setShowMergeCandidates(false);
+    setMergeSelection({});
+    loadData();
+  };
 
   // Derived LinkedIn URL per contact — the column reads from either the
   // explicit linkedin_url field or falls back to source_url when it looks
@@ -1316,6 +1451,26 @@ const MarketingNewJobs: React.FC = () => {
                     <Zap className="w-4 h-4" />
                   )}
                   {autoPrioritizing ? 'Analyzing...' : 'Auto-Prioritize'}
+                </Button>
+
+                {/* Merge Candidates — groups companies by normalized
+                    name prefix so obvious dupes can be collapsed. */}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setMergeSelection({});
+                    setMergeResultSummary(null);
+                    setShowMergeCandidates(true);
+                  }}
+                  disabled={companyMergeCandidates.length === 0}
+                  className="gap-1.5 text-purple-700 border-purple-300 hover:bg-purple-50 hover:text-purple-800 hover:border-purple-400"
+                  title={companyMergeCandidates.length === 0
+                    ? 'No merge candidates detected'
+                    : `${companyMergeCandidates.length} group${companyMergeCandidates.length === 1 ? '' : 's'} of similar company names detected`}
+                >
+                  <GitMerge className="w-4 h-4" />
+                  Merge Candidates{companyMergeCandidates.length > 0 ? ` (${companyMergeCandidates.length})` : ''}
                 </Button>
               </div>
 
@@ -2290,6 +2445,156 @@ const MarketingNewJobs: React.FC = () => {
 
         </Tabs>
       </div>
+
+      {/* Merge Candidates Dialog — groups companies whose normalized
+          names collapse to the same prefix (e.g. "Devoted Health
+          Services" / "Devoted Medical Group" / "Devoted Medical Services"
+          → "devoted"). For each group the user picks a canonical row;
+          other checked members get their jobs + contacts reassigned to
+          canonical and their company rows deleted via the
+          merge_companies RPC (one transaction per group). */}
+      {showMergeCandidates && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => !mergingInFlight && setShowMergeCandidates(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl overflow-hidden max-h-[88vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="p-5 border-b">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center">
+                  <GitMerge className="w-5 h-5 text-purple-700" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-lg font-bold text-gray-900">Merge candidates</h3>
+                  <p className="text-sm text-gray-500">
+                    {companyMergeCandidates.length} group{companyMergeCandidates.length === 1 ? '' : 's'} of similar company names.
+                    Pick the canonical row in each group; jobs and contacts from unchecked rows are reassigned to it and the merged company records are deleted.
+                  </p>
+                </div>
+                <button
+                  onClick={() => !mergingInFlight && setShowMergeCandidates(false)}
+                  className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-y-auto flex-1 p-5 space-y-5 bg-gray-50">
+              {companyMergeCandidates.map(g => {
+                ensureMergeSelection(g.key, g.items);
+                const sel = mergeSelection[g.key];
+                const canonicalId = sel?.canonicalId || g.items[0].id;
+                const includeIds = sel?.includeIds || new Set(g.items.map(i => i.id));
+                const mergeCount = Array.from(includeIds).filter(id => id !== canonicalId).length;
+                return (
+                  <div key={g.key} className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+                    <div className="px-4 py-3 border-b bg-white flex items-center justify-between flex-wrap gap-2">
+                      <div>
+                        <h4 className="text-sm font-bold text-gray-900">Normalized: <span className="font-mono text-purple-700">{g.key}</span></h4>
+                        <p className="text-xs text-gray-500">{g.items.length} companies · {mergeCount} will be merged into canonical</p>
+                      </div>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50 text-gray-500 uppercase tracking-wider text-[10px]">
+                          <tr>
+                            <th className="text-center px-2 py-2 font-semibold w-[60px]" title="Canonical: the row everything else merges into">Keep</th>
+                            <th className="text-center px-2 py-2 font-semibold w-[60px]" title="Include this row in the merge (if unchecked, row is left alone)">Merge</th>
+                            <th className="text-left px-3 py-2 font-semibold">Company</th>
+                            <th className="text-left px-3 py-2 font-semibold">Website</th>
+                            <th className="text-right px-2 py-2 font-semibold">Roles</th>
+                            <th className="text-right px-2 py-2 font-semibold">Contacts</th>
+                            <th className="text-left px-3 py-2 font-semibold">Category</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {g.items.map(c => {
+                            const isCanonical = c.id === canonicalId;
+                            const isIncluded = includeIds.has(c.id);
+                            return (
+                              <tr key={c.id} className={`border-t border-gray-100 ${isCanonical ? 'bg-emerald-50/60' : isIncluded ? '' : 'text-gray-400'}`}>
+                                <td className="text-center px-2 py-2">
+                                  <input
+                                    type="radio"
+                                    name={`canonical-${g.key}`}
+                                    checked={isCanonical}
+                                    onChange={() => setMergeSelection(prev => ({
+                                      ...prev,
+                                      [g.key]: {
+                                        canonicalId: c.id,
+                                        includeIds: new Set([...(prev[g.key]?.includeIds || new Set()), c.id]),
+                                      },
+                                    }))}
+                                    disabled={mergingInFlight}
+                                  />
+                                </td>
+                                <td className="text-center px-2 py-2">
+                                  <input
+                                    type="checkbox"
+                                    checked={isIncluded}
+                                    disabled={isCanonical || mergingInFlight}
+                                    onChange={() => setMergeSelection(prev => {
+                                      const cur = prev[g.key] || { canonicalId, includeIds: new Set<string>() };
+                                      const next = new Set(cur.includeIds);
+                                      if (next.has(c.id)) next.delete(c.id); else next.add(c.id);
+                                      return { ...prev, [g.key]: { ...cur, includeIds: next } };
+                                    })}
+                                    title={isCanonical ? 'Canonical row is always included' : 'Include this row in the merge'}
+                                  />
+                                </td>
+                                <td className="px-3 py-2 font-medium">
+                                  {c.company_name}
+                                  {isCanonical && <span className="ml-2 text-[10px] uppercase tracking-wider text-emerald-700 font-semibold">canonical</span>}
+                                </td>
+                                <td className="px-3 py-2 text-xs text-gray-600 truncate max-w-[200px]" title={c.website || ''}>
+                                  {c.website ? (
+                                    <a href={c.website.startsWith('http') ? c.website : `https://${c.website}`} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                                      {c.website}
+                                    </a>
+                                  ) : <span className="text-gray-300">—</span>}
+                                </td>
+                                <td className="px-2 py-2 text-right tabular-nums">{c.open_roles_count || 0}</td>
+                                <td className="px-2 py-2 text-right tabular-nums">{c._contact_count || 0}</td>
+                                <td className="px-3 py-2 text-xs text-gray-600">{c.company_type || c.industry || '—'}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })}
+              {companyMergeCandidates.length === 0 && (
+                <p className="text-sm text-gray-500 italic text-center py-10">No merge candidates detected.</p>
+              )}
+            </div>
+
+            <div className="p-4 border-t bg-white flex items-center justify-between">
+              <p className="text-sm text-gray-600">
+                {(() => {
+                  const totalMerges = Object.entries(mergeSelection).reduce((n, [, s]) => {
+                    return n + Array.from(s.includeIds).filter(id => id !== s.canonicalId).length;
+                  }, 0);
+                  return totalMerges > 0
+                    ? `${totalMerges} compan${totalMerges === 1 ? 'y' : 'ies'} will be merged into their canonical.`
+                    : 'No merges queued yet.';
+                })()}
+              </p>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" onClick={() => setShowMergeCandidates(false)} disabled={mergingInFlight}>
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleConfirmCompanyMerges}
+                  disabled={mergingInFlight || Object.entries(mergeSelection).every(([, s]) => Array.from(s.includeIds).filter(id => id !== s.canonicalId).length === 0)}
+                  className="bg-purple-700 hover:bg-purple-800 text-white"
+                >
+                  {mergingInFlight ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Merging…</>) : (<><GitMerge className="w-4 h-4 mr-2" /> Confirm merges</>)}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Duplicate Review Dialog — groups contacts by name and lets
           the user see each person's records side by side, optionally
