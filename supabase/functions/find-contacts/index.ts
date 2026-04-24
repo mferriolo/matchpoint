@@ -704,32 +704,38 @@ Deno.serve(async (req) => {
         .filter(c => activeIds.has(c.id) || activeNames.has((c.company_name || '').toLowerCase().trim()))
         .map(c => ({ id: c.id, company_name: c.company_name, website: c.website }));
 
-      // Resume-from-last: skip companies that a previous run in the
-      // last 24h already processed. Lets the user re-click "Find All"
-      // after a timeout without redoing the work.
+      // Resume-from-last: skip companies that ANY prior mode='all' run
+      // in the last 24h already processed. Aggregates across every such
+      // run (not just the most recent) so partial-sweep → timeout →
+      // retry doesn't silently rescan the earlier successful companies.
+      // Lets the user re-click "Find All" after any failure and only
+      // pay API costs for companies that still need work.
       if (!forceRestart) {
         const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
         const { data: priorRuns } = await supabase.from('contact_runs')
-          .select('per_item, started_at, status')
+          .select('id, per_item, started_at, status, items_processed')
           .eq('mode', 'all')
           .in('status', ['completed', 'failed'])
           .gte('started_at', cutoff)
-          .order('started_at', { ascending: false })
-          .limit(1);
-        const lastRun = priorRuns && priorRuns[0];
-        if (lastRun?.per_item) {
-          const per = Array.isArray(lastRun.per_item) ? lastRun.per_item : [];
-          const processedIds = new Set<string>();
-          const processedNames = new Set<string>();
+          .order('started_at', { ascending: false });
+        const processedIds = new Set<string>();
+        const processedNames = new Set<string>();
+        let runsConsidered = 0;
+        for (const r of (priorRuns || [])) {
+          const per = Array.isArray(r.per_item) ? r.per_item : [];
+          if (per.length === 0) continue;
+          runsConsidered++;
           for (const p of per) {
             if (p?.company_id) processedIds.add(p.company_id);
             if (p?.label) processedNames.add(String(p.label).toLowerCase().trim());
           }
+        }
+        if (processedIds.size > 0 || processedNames.size > 0) {
           const before = targets.length;
           targets = targets.filter(c => !processedIds.has(c.id) && !processedNames.has((c.company_name || '').toLowerCase().trim()));
           const skipped = before - targets.length;
           if (skipped > 0) {
-            resumeDiag = `skipped ${skipped} companies already processed in prior run (pass forceRestart:true to override)`;
+            resumeDiag = `skipped ${skipped} companies already processed across ${runsConsidered} prior run${runsConsidered === 1 ? '' : 's'} in the last 24h (pass forceRestart:true to override)`;
             console.log(`find-contacts fresh-run: ${resumeDiag}`);
           }
         }
