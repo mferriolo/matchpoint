@@ -534,6 +534,10 @@ const MarketingNewJobs: React.FC = () => {
           setFindingContactsForId(null);
           setContactRunResult(data);
           setShowContactRunResult(true);
+          // Reload even on failure/cancel — partial runs may have
+          // already inserted rows into marketing_contacts that the user
+          // would otherwise need to refresh the page to see.
+          loadData();
         }
       } catch (e) {
         console.warn('contact_runs poll error:', e);
