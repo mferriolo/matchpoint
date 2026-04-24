@@ -421,7 +421,9 @@ const MarketingNewJobs: React.FC = () => {
     setEditingContact(c);
     setEditingContactDraft({
       first_name: c.first_name ?? '',
+      middle_name: c.middle_name ?? '',
       last_name: c.last_name ?? '',
+      suffix: c.suffix ?? '',
       title: c.title ?? '',
       email: c.email ?? '',
       phone_work: c.phone_work ?? '',
@@ -439,7 +441,7 @@ const MarketingNewJobs: React.FC = () => {
     setSavingContactEdit(true);
     try {
       const updates: Record<string, any> = { ...editingContactDraft, updated_at: new Date().toISOString() };
-      for (const k of ['title', 'email', 'phone_work', 'phone_home', 'phone_cell', 'linkedin_url', 'source', 'notes']) {
+      for (const k of ['middle_name', 'suffix', 'title', 'email', 'phone_work', 'phone_home', 'phone_cell', 'linkedin_url', 'source', 'notes']) {
         if (updates[k] === '') updates[k] = null;
       }
       const { error } = await supabase.from('marketing_contacts').update(updates).eq('id', editingContact.id);
@@ -2515,7 +2517,8 @@ const MarketingNewJobs: React.FC = () => {
                     <div className="flex items-start justify-between">
                       <div>
                         <h3 className="font-semibold text-gray-900 text-base">
-                          {selectedContact.first_name} {selectedContact.last_name}
+                          {[selectedContact.first_name, selectedContact.middle_name, selectedContact.last_name].filter(Boolean).join(' ')}
+                          {selectedContact.suffix ? `, ${selectedContact.suffix}` : ''}
                         </h3>
                         <p className="text-sm text-gray-500">{selectedContact.title}{selectedContact.title && selectedContact.company_name ? ' at ' : ''}{selectedContact.company_name}</p>
                       </div>
@@ -2529,8 +2532,16 @@ const MarketingNewJobs: React.FC = () => {
                         <p className="text-sm text-gray-900">{selectedContact.first_name || '—'}</p>
                       </div>
                       <div>
+                        <label className="text-xs text-gray-500 font-medium">Middle</label>
+                        <p className="text-sm text-gray-900">{selectedContact.middle_name || '—'}</p>
+                      </div>
+                      <div>
                         <label className="text-xs text-gray-500 font-medium">Last Name</label>
                         <p className="text-sm text-gray-900">{selectedContact.last_name || '—'}</p>
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-500 font-medium">Suffix</label>
+                        <p className="text-sm text-gray-900">{selectedContact.suffix || '—'}</p>
                       </div>
                       <div>
                         <label className="text-xs text-gray-500 font-medium">Email</label>
@@ -2926,7 +2937,11 @@ const MarketingNewJobs: React.FC = () => {
               </div>
               <div className="flex-1">
                 <h3 className="text-lg font-bold text-gray-900">Edit contact</h3>
-                <p className="text-xs text-gray-500">{[editingContact.first_name, editingContact.last_name].filter(Boolean).join(' ') || '(unnamed)'}{editingContact.company_name ? ` · ${editingContact.company_name}` : ''}</p>
+                <p className="text-xs text-gray-500">{(() => {
+                  const name = [editingContact.first_name, editingContact.middle_name, editingContact.last_name].filter(Boolean).join(' ');
+                  const withSuffix = editingContact.suffix ? `${name || '(unnamed)'}, ${editingContact.suffix}` : (name || '(unnamed)');
+                  return editingContact.company_name ? `${withSuffix} · ${editingContact.company_name}` : withSuffix;
+                })()}</p>
               </div>
               <button
                 onClick={() => { setEditingContact(null); setEditingContactDraft({}); }}
@@ -2937,14 +2952,22 @@ const MarketingNewJobs: React.FC = () => {
               </button>
             </div>
             <div className="overflow-y-auto flex-1 p-5 space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
+              <div className="grid grid-cols-12 gap-3">
+                <div className="col-span-4">
                   <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">First name</label>
                   <Input value={editingContactDraft.first_name || ''} onChange={e => setEditingContactDraft(d => ({ ...d, first_name: e.target.value }))} className="mt-1" />
                 </div>
-                <div>
+                <div className="col-span-2">
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Middle</label>
+                  <Input value={editingContactDraft.middle_name || ''} onChange={e => setEditingContactDraft(d => ({ ...d, middle_name: e.target.value }))} className="mt-1" placeholder="A. or Anne" />
+                </div>
+                <div className="col-span-4">
                   <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Last name</label>
                   <Input value={editingContactDraft.last_name || ''} onChange={e => setEditingContactDraft(d => ({ ...d, last_name: e.target.value }))} className="mt-1" />
+                </div>
+                <div className="col-span-2">
+                  <label className="text-xs font-medium text-gray-600 uppercase tracking-wider">Suffix</label>
+                  <Input value={editingContactDraft.suffix || ''} onChange={e => setEditingContactDraft(d => ({ ...d, suffix: e.target.value }))} className="mt-1" placeholder="MD, MBA" />
                 </div>
               </div>
               <div>
