@@ -46,8 +46,8 @@ const MarketingNewJobs: React.FC = () => {
   type ContactSortField =
     | 'first_name' | 'last_name' | 'company_name' | 'title'
     | 'email' | 'phone_work' | 'phone_home' | 'phone_cell'
-    | 'source' | 'created_at' | 'linkedin_url';
-  const [contactSortField, setContactSortField] = useState<ContactSortField>('created_at');
+    | 'source' | 'created_at' | 'linkedin_url' | 'confidence_score';
+  const [contactSortField, setContactSortField] = useState<ContactSortField>('confidence_score');
   const [contactSortDir, setContactSortDir] = useState<'asc'|'desc'>('desc');
   const [filterFirstName, setFilterFirstName] = useState<Set<string>>(new Set());
   const [filterLastName, setFilterLastName] = useState<Set<string>>(new Set());
@@ -60,6 +60,7 @@ const MarketingNewJobs: React.FC = () => {
   const [filterPhoneHomePresence, setFilterPhoneHomePresence] = useState<Set<string>>(new Set());
   const [filterPhoneCellPresence, setFilterPhoneCellPresence] = useState<Set<string>>(new Set());
   const [filterLinkedInPresence, setFilterLinkedInPresence] = useState<Set<string>>(new Set());
+  const [filterConfidence, setFilterConfidence] = useState<Set<string>>(new Set());
   // Cross-phone filter: "has ANY phone populated" vs "has NO phones".
   // Stored separately from the per-column filters so the user can mix them
   // (e.g. "has any phone but no cell").
@@ -78,6 +79,8 @@ const MarketingNewJobs: React.FC = () => {
   const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
   const [showDeleteContactsConfirm, setShowDeleteContactsConfirm] = useState(false);
   const [deletingContacts, setDeletingContacts] = useState(false);
+  const [showWipeContactsConfirm, setShowWipeContactsConfirm] = useState(false);
+  const [wipingContacts, setWipingContacts] = useState(false);
 
   // Duplicate-review state. Groups are computed client-side from the
   // already-loaded contacts list (no edge function needed for detection
@@ -178,8 +181,15 @@ const MarketingNewJobs: React.FC = () => {
     setDeletingContacts(true);
     try {
       const ids = Array.from(selectedContactIds);
-      const { error } = await supabase.from('marketing_contacts').delete().in('id', ids);
-      if (error) throw error;
+      // Batch to keep the request URL + payload under Supabase/PostgREST
+      // limits. Single `.in('id', ids)` with thousands of UUIDs returns
+      // silently on some proxies; chunking ~500 at a time is reliable.
+      const batchSize = 500;
+      for (let i = 0; i < ids.length; i += batchSize) {
+        const batch = ids.slice(i, i + batchSize);
+        const { error } = await supabase.from('marketing_contacts').delete().in('id', batch);
+        if (error) throw error;
+      }
       toast({
         title: `${ids.length} contact${ids.length === 1 ? '' : 's'} deleted`,
       });
@@ -190,6 +200,41 @@ const MarketingNewJobs: React.FC = () => {
       toast({ title: 'Delete failed', description: err.message || String(err), variant: 'destructive' });
     } finally {
       setDeletingContacts(false);
+    }
+  };
+
+  // Nuke every row in marketing_contacts. Delegated to the wipe-contacts
+  // edge function (service role) so we don't hit PostgREST row limits
+  // or RLS quirks from the client.
+  const handleWipeAllContacts = async () => {
+    setWipingContacts(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('wipe-contacts', {
+        body: { confirm: 'WIPE_ALL_CONTACTS' },
+      });
+      if (error) {
+        let detail = error.message || 'Unknown error';
+        try {
+          const ctx: any = (error as any).context;
+          if (ctx && typeof ctx.text === 'function') {
+            const raw = await ctx.text();
+            try { const parsed = JSON.parse(raw); if (parsed?.error) detail = parsed.error; } catch { if (raw) detail = raw.slice(0, 500); }
+          }
+        } catch {}
+        throw new Error(detail);
+      }
+      if (!data?.success) throw new Error(data?.error || 'Wipe failed');
+      toast({
+        title: `Wiped ${data.deleted || 0} contact${data.deleted === 1 ? '' : 's'}`,
+        description: 'marketing_contacts cleared and contact_count zeroed.',
+      });
+      clearContactSelection();
+      setShowWipeContactsConfirm(false);
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Wipe failed', description: err.message || String(err), variant: 'destructive' });
+    } finally {
+      setWipingContacts(false);
     }
   };
 
@@ -908,6 +953,7 @@ const MarketingNewJobs: React.FC = () => {
       if (!presencePasses(c.phone_home, filterPhoneHomePresence)) return false;
       if (!presencePasses(c.phone_cell, filterPhoneCellPresence)) return false;
       if (!presencePasses(getLinkedin(c), filterLinkedInPresence)) return false;
+      if (filterConfidence.size > 0 && !filterConfidence.has(String(c.confidence_score ?? 0))) return false;
       // "Any phone" cross-column check: filter option labels map to
       // presence semantics — Has data = any of the 3 phones populated,
       // No data = all 3 empty.
@@ -934,6 +980,7 @@ const MarketingNewJobs: React.FC = () => {
         case 'source': aVal = (a.source || '').toLowerCase(); bVal = (b.source || '').toLowerCase(); break;
         case 'created_at': aVal = a.created_at ? new Date(a.created_at).getTime() : 0; bVal = b.created_at ? new Date(b.created_at).getTime() : 0; break;
         case 'linkedin_url': aVal = getLinkedin(a).toLowerCase(); bVal = getLinkedin(b).toLowerCase(); break;
+        case 'confidence_score': aVal = Number(a.confidence_score ?? 0); bVal = Number(b.confidence_score ?? 0); break;
       }
       if (typeof aVal === 'number' && typeof bVal === 'number') {
         return contactSortDir === 'asc' ? aVal - bVal : bVal - aVal;
@@ -945,7 +992,11 @@ const MarketingNewJobs: React.FC = () => {
       filterFirstName, filterLastName, filterContactCompany, filterContactTitle,
       filterContactSource, filterDateAdded, filterEmailPresence,
       filterPhoneWorkPresence, filterPhoneHomePresence, filterPhoneCellPresence,
-      filterLinkedInPresence, filterAnyPhonePresence]);
+      filterLinkedInPresence, filterAnyPhonePresence, filterConfidence]);
+
+  // Options shown in the Confidence column's filter popover. Stringified
+  // numbers so MultiSelectColumnHeader's string-Set matches our scores.
+  const CONFIDENCE_OPTIONS = ['5', '4', '3', '2', '1', '0'];
 
   const openJobsCount = jobs.filter(j => !j.is_closed && j.status !== 'Closed').length;
   const closedJobsCount = jobs.filter(j => j.is_closed || j.status === 'Closed').length;
@@ -978,6 +1029,8 @@ const MarketingNewJobs: React.FC = () => {
 
   const sourceBadge = (source: string) => {
     if (source === 'Crelate ATS') return 'bg-indigo-100 text-indigo-800 border border-indigo-200';
+    if (source === 'LinkedIn') return 'bg-sky-100 text-sky-800 border border-sky-200';
+    if (source === 'About/Team Page') return 'bg-teal-100 text-teal-800 border border-teal-200';
     if (source?.includes('Sweep')) return 'bg-violet-100 text-violet-800 border border-violet-200';
     if (source?.includes('AI')) return 'bg-emerald-100 text-emerald-800 border border-emerald-200';
     return 'bg-gray-100 text-gray-700 border border-gray-200';
@@ -985,6 +1038,8 @@ const MarketingNewJobs: React.FC = () => {
 
   const sourceIcon = (source: string) => {
     if (source === 'Crelate ATS') return <Database className="w-3 h-3" />;
+    if (source === 'LinkedIn') return <Linkedin className="w-3 h-3" />;
+    if (source === 'About/Team Page') return <Globe className="w-3 h-3" />;
     if (source?.includes('AI')) return <Globe className="w-3 h-3" />;
     return <Users className="w-3 h-3" />;
   };
@@ -1720,6 +1775,16 @@ const MarketingNewJobs: React.FC = () => {
                   <Copy className="w-4 h-4 mr-2" />
                   Deduplicate{duplicateGroups.length > 0 ? ` (${duplicateGroups.length})` : ''}
                 </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => setShowWipeContactsConfirm(true)}
+                  disabled={contacts.length === 0 || contactRunIsActive || wipingContacts}
+                  className="text-red-700 border-red-200 hover:bg-red-50"
+                  title="Delete every row in marketing_contacts. Use before rerunning Find Contacts from scratch."
+                >
+                  <Trash2 className="w-4 h-4 mr-2" />
+                  Wipe All
+                </Button>
                 <span className="text-sm text-gray-500">{filteredContacts.length} contacts</span>
               </div>
 
@@ -1922,6 +1987,7 @@ const MarketingNewJobs: React.FC = () => {
                       <MultiSelectColumnHeader<ContactSortField> field="source" label="Source" filterValues={filterContactSource} filterOptions={uniqueContactSourceValues} onFilterChange={setFilterContactSource} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
                       <MultiSelectColumnHeader<ContactSortField> field="created_at" label="Date / Time Added" filterValues={filterDateAdded} filterOptions={uniqueContactDates} onFilterChange={setFilterDateAdded} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by date added" />
                       <MultiSelectColumnHeader<ContactSortField> field="linkedin_url" label="LinkedIn URL" filterValues={filterLinkedInPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterLinkedInPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by LinkedIn presence" />
+                      <MultiSelectColumnHeader<ContactSortField> field="confidence_score" label="Confidence" filterValues={filterConfidence} filterOptions={CONFIDENCE_OPTIONS} onFilterChange={setFilterConfidence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by confidence score" />
                       <th className="text-center px-3 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider w-[50px]">
                         <input
                           type="checkbox"
@@ -1960,9 +2026,9 @@ const MarketingNewJobs: React.FC = () => {
                   </thead>
                   <tbody>
                     {loading ? (
-                      <tr><td colSpan={12} className="text-center py-12"><Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400" /></td></tr>
+                      <tr><td colSpan={13} className="text-center py-12"><Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400" /></td></tr>
                     ) : filteredContacts.length === 0 ? (
-                      <tr><td colSpan={12} className="text-center py-12 text-gray-500">No contacts found. Run the tracker or import data to add contacts.</td></tr>
+                      <tr><td colSpan={13} className="text-center py-12 text-gray-500">No contacts found. Run the tracker or import data to add contacts.</td></tr>
                     ) : filteredContacts.map((c, idx) => {
                       // Derive LinkedIn URL: prefer linkedin_url field, then check source_url for LinkedIn links
                       const linkedinUrl = c.linkedin_url || 
@@ -2066,6 +2132,32 @@ const MarketingNewJobs: React.FC = () => {
                             ) : (
                               <span className="text-gray-300">—</span>
                             )}
+                          </td>
+                          {/* Confidence (0-5). Bar widens + recolors with score. */}
+                          <td className="px-3 py-2.5 border-r border-gray-100" onClick={e => e.stopPropagation()}>
+                            {(() => {
+                              const score = Number(c.confidence_score ?? 0);
+                              const barColor =
+                                score >= 5 ? 'bg-emerald-600' :
+                                score >= 4 ? 'bg-emerald-500' :
+                                score >= 3 ? 'bg-amber-500' :
+                                score >= 2 ? 'bg-orange-500' :
+                                score >= 1 ? 'bg-red-400' : 'bg-red-600';
+                              const pillColor =
+                                score >= 4 ? 'bg-emerald-50 text-emerald-800 border-emerald-200' :
+                                score >= 2 ? 'bg-amber-50 text-amber-800 border-amber-200' :
+                                                'bg-red-50 text-red-800 border-red-200';
+                              return (
+                                <div className="flex items-center gap-2" title={`Confidence ${score}/5`}>
+                                  <span className={`inline-flex items-center justify-center tabular-nums text-xs font-semibold px-1.5 py-0.5 rounded border ${pillColor}`} style={{ minWidth: 26 }}>
+                                    {score}
+                                  </span>
+                                  <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden" style={{ minWidth: 50 }}>
+                                    <div className={`h-full ${barColor}`} style={{ width: `${(score / 5) * 100}%` }} />
+                                  </div>
+                                </div>
+                              );
+                            })()}
                           </td>
                           {/* Selection checkbox (far right). stopPropagation
                               so clicking the box doesn't also toggle the
@@ -2590,6 +2682,55 @@ const MarketingNewJobs: React.FC = () => {
                   <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Deleting…</>
                 ) : (
                   <><Trash2 className="w-4 h-4 mr-2" /> Delete {selectedContactIds.size}</>
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Wipe All Contacts Confirmation */}
+      {showWipeContactsConfirm && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => !wipingContacts && setShowWipeContactsConfirm(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="p-6 border-b">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                  <Trash2 className="w-5 h-5 text-red-700" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">
+                    Wipe ALL contacts?
+                  </h3>
+                  <p className="text-sm text-gray-500">This deletes every row in marketing_contacts.</p>
+                </div>
+              </div>
+            </div>
+            <div className="p-6 text-sm text-gray-700 space-y-2">
+              <p>
+                All <strong>{contacts.length}</strong> contact{contacts.length === 1 ? '' : 's'} will be permanently removed and every company's contact_count will be reset to 0. This cannot be undone.
+              </p>
+              <p className="text-xs text-gray-500">
+                Use this to start over with the new About/Team + LinkedIn-only discovery. You can rebuild the list by pressing Find Contacts afterwards.
+              </p>
+            </div>
+            <div className="p-4 border-t bg-gray-50 flex items-center justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setShowWipeContactsConfirm(false)}
+                disabled={wipingContacts}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleWipeAllContacts}
+                disabled={wipingContacts}
+                className="bg-[#911406] hover:bg-[#7a1005] text-white"
+              >
+                {wipingContacts ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Wiping…</>
+                ) : (
+                  <><Trash2 className="w-4 h-4 mr-2" /> Wipe {contacts.length} contact{contacts.length === 1 ? '' : 's'}</>
                 )}
               </Button>
             </div>

@@ -721,6 +721,9 @@ async function processRun(runId: string, contactIds: string[], apolloKey: string
 
     diag.push(`processed ${rows.length} contacts in ${Math.round((Date.now() - startedAt) / 1000)}s`);
     diag.push(`totals: enriched=${totals.enriched} serp=${totals.serp} lusha=${totals.lusha} apollo=${totals.apollo} hunter=${totals.hunter} skipped=${totals.skipped}`);
+    // Recompute confidence_score for every contact now that fields have changed.
+    try { await supabase.rpc('recompute_contact_confidence'); }
+    catch (e) { console.warn('recompute_contact_confidence RPC failed:', (e as Error).message); }
     // Lusha typically only charges a credit on successful reveals, so
     // attempts is a ceiling — actual billed credits are usually closer
     // to `lusha` (the successful-match count).
