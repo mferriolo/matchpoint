@@ -12,6 +12,8 @@ import { useToast } from '@/hooks/use-toast';
 import StartCallDialog from '@/components/StartCallDialog';
 import ScheduleCallDialog from '@/components/ScheduleCallDialog';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
+import { useIsMobile } from '@/hooks/use-mobile';
+import MobileLiveCalls from '@/components/mobile/MobileLiveCalls';
 
 interface CallRecord {
   id: string;
@@ -27,7 +29,12 @@ interface CallRecord {
   display_order?: number;
 }
 
-export const LiveCallsLanding: React.FC<{ onStartCall: () => void }> = ({ onStartCall }) => {
+export const LiveCallsLanding: React.FC<{ onStartCall: () => void }> = (props) => {
+  const isMobile = useIsMobile();
+  return isMobile ? <MobileLiveCalls onStartCall={props.onStartCall} /> : <DesktopLiveCallsLanding {...props} />;
+};
+
+const DesktopLiveCallsLanding: React.FC<{ onStartCall: () => void }> = ({ onStartCall }) => {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [showStartCallDialog, setShowStartCallDialog] = useState(false);

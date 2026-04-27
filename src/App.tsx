@@ -37,7 +37,9 @@ const App = () => (
               <Route path="/resume-parser" element={<MobileRoute title="Resume Parser"><ResumeParser /></MobileRoute>} />
               <Route path="/live-calls" element={<MobileRoute title="Live Calls"><LiveCalls /></MobileRoute>} />
               <Route path="/call-summary/:callId" element={<MobileRoute title="Call Summary"><CallSummaryPage /></MobileRoute>} />
-              <Route path="/presentations" element={<MobileRoute title="Presentations"><PresentationsWithSidebar /></MobileRoute>} />
+              {/* PresentationsWithSidebar branches internally on mobile and
+                  brings its own MobileShell, so no MobileRoute wrap here. */}
+              <Route path="/presentations" element={<PresentationsWithSidebar />} />
               <Route path="/join-call" element={<MobileRoute title="Join Call" hideBottomNav><JoinCall /></MobileRoute>} />
               <Route path="/marketing" element={<MarketingNewJobs />} />
               <Route path="*" element={<NotFound />} />

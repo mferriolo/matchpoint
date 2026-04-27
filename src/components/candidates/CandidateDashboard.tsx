@@ -10,12 +10,19 @@ import CandidateUpload from './CandidateUpload';
 import CandidateDetails from './CandidateDetails';
 import { supabase } from '@/lib/supabase';
 import { useToast } from '@/hooks/use-toast';
+import { useIsMobile } from '@/hooks/use-mobile';
+import MobileCandidates from '@/components/mobile/MobileCandidates';
 
 interface CandidateDashboardProps {
   onStartCall?: () => void;
 }
 
-const CandidateDashboard: React.FC<CandidateDashboardProps> = ({ onStartCall }) => {
+const CandidateDashboard: React.FC<CandidateDashboardProps> = (props) => {
+  const isMobile = useIsMobile();
+  return isMobile ? <MobileCandidates onStartCall={props.onStartCall} /> : <DesktopCandidateDashboard {...props} />;
+};
+
+const DesktopCandidateDashboard: React.FC<CandidateDashboardProps> = ({ onStartCall }) => {
 
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);

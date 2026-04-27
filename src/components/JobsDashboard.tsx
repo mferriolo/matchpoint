@@ -18,14 +18,23 @@ import { useJobTypes } from '@/contexts/JobTypesContext';
 import { useToast } from '@/hooks/use-toast';
 import { StartCallDialog } from '@/components/StartCallDialog';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
+import { useIsMobile } from '@/hooks/use-mobile';
+import MobileJobs from '@/components/mobile/MobileJobs';
 
 interface JobsDashboardProps {
   onJobSelect: (job: Job) => void;
   onStartCall?: () => void;
 }
 
-// Emergency logging to detect infinite render loops
-const JobsDashboard: React.FC<JobsDashboardProps> = ({ onJobSelect, onStartCall }) => {
+// Route entry. Branches on viewport so the heavy desktop component (and
+// its dozens of hooks) only mounts when its UI is shown — same pattern
+// as MarketingNewJobs.
+const JobsDashboard: React.FC<JobsDashboardProps> = (props) => {
+  const isMobile = useIsMobile();
+  return isMobile ? <MobileJobs onStartCall={props.onStartCall} /> : <DesktopJobsDashboard {...props} />;
+};
+
+const DesktopJobsDashboard: React.FC<JobsDashboardProps> = ({ onJobSelect, onStartCall }) => {
   const { jobs, addJob, duplicateJob, deleteJob, renameJob, isAnalyzing, setAnalyzing, toggleJobActive, updateJob, reorderJobs } = useCallPrompt();
   const { analyzeJob } = useChatGPT();
   const { activeJobTypes } = useJobTypes();
