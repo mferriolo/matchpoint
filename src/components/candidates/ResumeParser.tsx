@@ -9,6 +9,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/lib/supabase';
 import * as pdfjsLib from 'pdfjs-dist';
+import mammoth from 'mammoth';
 import { JOB_CATEGORIES } from '@/utils/jobTypesData';
 
 // Static list of all job types (excluding the "Active Jobs" pseudo-category),
@@ -123,7 +124,6 @@ export const ResumeParser: React.FC<{ onParsed: (data: any) => void; onCancel?: 
           console.log('ArrayBuffer size:', arrayBuffer.byteLength);
           
           // Extract text using mammoth
-          const mammoth = await import('mammoth');
           const result = await mammoth.extractRawText({ arrayBuffer });
           
           console.log('Mammoth extraction result:');

@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/lib/supabase';
+import mammoth from 'mammoth';
 
 interface CandidateData {
   firstName: string;
@@ -65,9 +66,7 @@ export default function ResumeParser() {
 
       if (isWord) {
         console.log('Processing Word document - extracting text in frontend...');
-        
-        // Dynamically import mammoth for Word document processing
-        const mammoth = await import('mammoth');
+
         const arrayBuffer = await file.arrayBuffer();
         const result = await mammoth.extractRawText({ arrayBuffer });
         const resumeText = result.value;
