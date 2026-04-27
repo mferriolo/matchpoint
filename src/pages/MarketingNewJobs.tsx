@@ -26,11 +26,27 @@ import MissingTitlesReport from '@/components/marketing/MissingTitlesReport';
 import TitleMapping from '@/components/marketing/TitleMapping';
 import { MultiSelectColumnHeader } from '@/components/marketing/MultiSelectColumnHeader';
 import { exportMasterSheet, exportNewDataSheet } from '@/utils/xlsxExport';
+import { useIsMobile } from '@/hooks/use-mobile';
+import MobileMarketing from '@/components/mobile/MobileMarketing';
 
 
 
 
+/**
+ * Route entry. Picks a viewport-appropriate implementation. We branch
+ * here (rather than inside DesktopMarketingNewJobs) so that the heavy
+ * desktop component — and its dozens of hooks — only mounts when its
+ * UI is actually shown. That keeps Rules-of-Hooks happy if the user
+ * resizes across the breakpoint, and avoids running the desktop's
+ * data-load + multi-tab state machine on a phone.
+ */
 const MarketingNewJobs: React.FC = () => {
+  const isMobile = useIsMobile();
+  return isMobile ? <MobileMarketing /> : <DesktopMarketingNewJobs />;
+};
+
+
+const DesktopMarketingNewJobs: React.FC = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [jobs, setJobs] = useState<any[]>([]);
