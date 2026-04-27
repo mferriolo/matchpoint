@@ -16,6 +16,7 @@ import PresentationsWithSidebar from "./components/PresentationsWithSidebar";
 import NotFound from "./pages/NotFound";
 import JoinCall from "./pages/JoinCall";
 import MarketingNewJobs from "./pages/MarketingNewJobs";
+import MobileRoute from "@/components/mobile/MobileRoute";
 
 
 
@@ -33,11 +34,11 @@ const App = () => (
             <Routes>
               <Route path="/" element={<Index />} />
               <Route path="/admin" element={<Admin />} />
-              <Route path="/resume-parser" element={<ResumeParser />} />
-              <Route path="/live-calls" element={<LiveCalls />} />
-              <Route path="/call-summary/:callId" element={<CallSummaryPage />} />
-              <Route path="/presentations" element={<PresentationsWithSidebar />} />
-              <Route path="/join-call" element={<JoinCall />} />
+              <Route path="/resume-parser" element={<MobileRoute title="Resume Parser"><ResumeParser /></MobileRoute>} />
+              <Route path="/live-calls" element={<MobileRoute title="Live Calls"><LiveCalls /></MobileRoute>} />
+              <Route path="/call-summary/:callId" element={<MobileRoute title="Call Summary"><CallSummaryPage /></MobileRoute>} />
+              <Route path="/presentations" element={<MobileRoute title="Presentations"><PresentationsWithSidebar /></MobileRoute>} />
+              <Route path="/join-call" element={<MobileRoute title="Join Call" hideBottomNav><JoinCall /></MobileRoute>} />
               <Route path="/marketing" element={<MarketingNewJobs />} />
               <Route path="*" element={<NotFound />} />
             </Routes>

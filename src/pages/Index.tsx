@@ -26,9 +26,7 @@ const Index: React.FC = () => {
           <MobileHome />
         ) : (
           <MobileShell title={titleFor(initialView)}>
-            <div className="min-h-full">
-              <AppLayout />
-            </div>
+            <AppLayout />
           </MobileShell>
         )}
       </AppProvider>

@@ -10,6 +10,7 @@ import CandidateDashboard from './candidates/CandidateDashboard';
 import { LiveCallsLanding } from './LiveCallsLanding';
 import { BugButton } from './BugButton';
 import { useNavigate, useLocation } from 'react-router-dom';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 
 import { Job } from '@/types/callprompt';
@@ -20,6 +21,7 @@ type ViewType = 'home' | 'dashboard' | 'candidates' | 'job-details' | 'live-call
 const AppLayoutContent: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
+  const isMobile = useIsMobile();
 
   // Pages that render the sidebar from outside AppLayout (e.g.
   // PresentationsWithSidebar, LiveCalls page) navigate to "/" with
@@ -126,11 +128,24 @@ const AppLayoutContent: React.FC = () => {
   };
 
 
+  // On mobile, MobileShell (rendered by Index.tsx) provides the top
+  // bar + bottom nav, so we drop the desktop sidebar and h-screen here
+  // and let the parent's main scroll container size us. BugButton is a
+  // fixed-position floating button that overlaps the bottom nav on a
+  // phone, so we hide it in that case too.
+  if (isMobile) {
+    return (
+      <div className="w-full min-h-full bg-gray-100 overflow-x-hidden">
+        {renderCurrentView()}
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen bg-gray-100">
       {currentView !== 'home' && (
-        <Navigation 
-          currentView={currentView} 
+        <Navigation
+          currentView={currentView}
           onViewChange={setCurrentView}
           showVideoInSidebar={currentView === 'live-call' && currentCall?.callMethod === 'zoom'}
         />
