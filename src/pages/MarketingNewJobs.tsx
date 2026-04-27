@@ -62,10 +62,13 @@ const DesktopMarketingNewJobs: React.FC = () => {
   // LinkedIn) callers pass options ['Has data', 'No data'] and the
   // filter logic interprets them directly.
   type ContactSortField =
+    | 'priority_score'
     | 'first_name' | 'last_name' | 'company_name' | 'title'
     | 'email' | 'phone_work' | 'phone_home' | 'phone_cell'
     | 'source' | 'created_at' | 'linkedin_url' | 'confidence_score';
-  const [contactSortField, setContactSortField] = useState<ContactSortField>('confidence_score');
+  // Default to priority desc — hottest contacts (those at companies with
+  // the freshest top-rank open jobs) first.
+  const [contactSortField, setContactSortField] = useState<ContactSortField>('priority_score');
   const [contactSortDir, setContactSortDir] = useState<'asc'|'desc'>('desc');
   const [filterFirstName, setFilterFirstName] = useState<Set<string>>(new Set());
   const [filterLastName, setFilterLastName] = useState<Set<string>>(new Set());
@@ -87,7 +90,14 @@ const DesktopMarketingNewJobs: React.FC = () => {
 
   const handleContactSort = (f: ContactSortField) => {
     if (contactSortField === f) setContactSortDir(d => d === 'asc' ? 'desc' : 'asc');
-    else { setContactSortField(f); setContactSortDir('asc'); }
+    else {
+      setContactSortField(f);
+      // Numeric/date columns default to desc (highest/newest first);
+      // text columns default to asc.
+      setContactSortDir(
+        f === 'priority_score' || f === 'confidence_score' || f === 'created_at' ? 'desc' : 'asc'
+      );
+    }
   };
 
   // Multi-select + bulk delete for contacts. The checkbox column is on
@@ -1238,6 +1248,15 @@ const DesktopMarketingNewJobs: React.FC = () => {
       let aVal: string | number = '';
       let bVal: string | number = '';
       switch (contactSortField) {
+        case 'priority_score': {
+          // Same lookup the badge column uses — max open-job score at
+          // the contact's company. Nulls sort last in desc order.
+          const ap = priorityForContact(a);
+          const bp = priorityForContact(b);
+          aVal = ap === null ? -Infinity : ap;
+          bVal = bp === null ? -Infinity : bp;
+          break;
+        }
         case 'first_name': aVal = (a.first_name || '').toLowerCase(); bVal = (b.first_name || '').toLowerCase(); break;
         case 'last_name': aVal = (a.last_name || '').toLowerCase(); bVal = (b.last_name || '').toLowerCase(); break;
         case 'company_name': aVal = (a.company_name || '').toLowerCase(); bVal = (b.company_name || '').toLowerCase(); break;
@@ -1261,7 +1280,8 @@ const DesktopMarketingNewJobs: React.FC = () => {
       filterFirstName, filterLastName, filterContactCompany, filterContactTitle,
       filterContactSource, filterDateAdded, filterEmailPresence,
       filterPhoneWorkPresence, filterPhoneHomePresence, filterPhoneCellPresence,
-      filterLinkedInPresence, filterAnyPhonePresence, filterConfidence]);
+      filterLinkedInPresence, filterAnyPhonePresence, filterConfidence,
+      contactPriorityByCompany]);
 
   // Options shown in the Confidence column's filter popover. Stringified
   // numbers so MultiSelectColumnHeader's string-Set matches our scores.
@@ -2284,12 +2304,22 @@ const DesktopMarketingNewJobs: React.FC = () => {
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
                       {/* Priority — heat-gradient badge, derived from the
-                          hottest open job at the contact's company. Not
-                          sortable from this header (would need a new
-                          ContactSortField); rows still inherit the
-                          existing Date Added default. */}
+                          hottest open job at the contact's company.
+                          Sortable by clicking the header. */}
                       <th className="text-center px-2 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider w-[80px]">
-                        Priority
+                        <button
+                          type="button"
+                          onClick={() => handleContactSort('priority_score')}
+                          className="inline-flex items-center justify-center hover:text-[#911406] transition-colors"
+                          title="Sort by priority"
+                        >
+                          Priority
+                          {contactSortField !== 'priority_score'
+                            ? <ArrowUpDown className="w-3 h-3 ml-1 opacity-40 flex-shrink-0" />
+                            : contactSortDir === 'asc'
+                              ? <ArrowUp className="w-3 h-3 ml-1 text-[#911406] flex-shrink-0" />
+                              : <ArrowDown className="w-3 h-3 ml-1 text-[#911406] flex-shrink-0" />}
+                        </button>
                       </th>
                       <MultiSelectColumnHeader<ContactSortField> field="first_name" label="First Name" filterValues={filterFirstName} filterOptions={uniqueContactFirstNames} onFilterChange={setFilterFirstName} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
                       <MultiSelectColumnHeader<ContactSortField> field="last_name" label="Last Name" filterValues={filterLastName} filterOptions={uniqueContactLastNames} onFilterChange={setFilterLastName} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
