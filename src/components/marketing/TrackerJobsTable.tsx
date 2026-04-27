@@ -8,6 +8,8 @@ import {
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useToast } from '@/hooks/use-toast';
+import JobPriorityBadge from './JobPriorityBadge';
+import { priorityScore } from '@/lib/jobPriorityScore';
 
 // Each row is a marketing_jobs row. The parent decorates each job with a
 // few extra fields the table/dialog needs but can't derive on its own:
@@ -19,6 +21,9 @@ import { useToast } from '@/hooks/use-toast';
 //                            used by the company-summary dialog.
 export interface TrackerJobsTableRow {
   id: string;
+  /** 0–100 priority computed by the SQL trigger / recompute RPC. May be
+   *  null on freshly-inserted rows before the page calls recompute. */
+  priority_score?: number | null;
   job_title?: string;
   company_name?: string;
   city?: string;
@@ -71,6 +76,7 @@ export interface CompanyRecord {
 }
 
 type SortKey =
+  | 'priority_score'
   | 'job_title'
   | 'job_type'
   | 'company_name'
@@ -81,16 +87,17 @@ type SortKey =
   | 'created_at';
 type SortDir = 'asc' | 'desc';
 
-type FilterKind = 'text' | 'select-job-type' | 'select-company-type' | 'select-run';
+type FilterKind = 'text' | 'select-job-type' | 'select-company-type' | 'select-run' | 'none';
 const COLUMNS: Array<{ key: SortKey; label: string; className?: string; filter: FilterKind }> = [
-  { key: 'job_title',    label: 'Job Title',    className: 'w-[20%]', filter: 'text' },
-  { key: 'job_type',     label: 'Job Type',     className: 'w-[12%]', filter: 'select-job-type' },
-  { key: 'company_name', label: 'Company',      className: 'w-[15%]', filter: 'text' },
-  { key: 'company_type', label: 'Company Type', className: 'w-[12%]', filter: 'select-company-type' },
-  { key: 'city',         label: 'City',         className: 'w-[9%]',  filter: 'text' },
+  { key: 'priority_score', label: 'Priority',  className: 'w-[7%]',  filter: 'none' },
+  { key: 'job_title',    label: 'Job Title',    className: 'w-[18%]', filter: 'text' },
+  { key: 'job_type',     label: 'Job Type',     className: 'w-[11%]', filter: 'select-job-type' },
+  { key: 'company_name', label: 'Company',      className: 'w-[14%]', filter: 'text' },
+  { key: 'company_type', label: 'Company Type', className: 'w-[11%]', filter: 'select-company-type' },
+  { key: 'city',         label: 'City',         className: 'w-[8%]',  filter: 'text' },
   { key: 'state',        label: 'State',        className: 'w-[6%]',  filter: 'text' },
   { key: 'source',       label: 'Source',       className: 'w-[10%]', filter: 'text' },
-  { key: 'created_at',   label: 'Date Found',   className: 'w-[16%]', filter: 'select-run' },
+  { key: 'created_at',   label: 'Date Found',   className: 'w-[15%]', filter: 'select-run' },
 ];
 
 // Cleaner label from the tracker's internal source tags.
@@ -153,6 +160,7 @@ export function matchJobType(title: string | undefined, options: string[]): stri
 // Extract the filterable/sortable string for a given column from a row.
 function rowFieldForKey(j: TrackerJobsTableRow, key: SortKey, matchedType: string): string {
   switch (key) {
+    case 'priority_score': return String(j.priority_score ?? '');
     case 'source':       return sourceLabel(j);
     case 'created_at':   return fmtDateTime(j.created_at);
     case 'company_type': return String(j._companyType ?? '');
@@ -193,7 +201,9 @@ export function TrackerJobsTable({
   // Text columns store a single string (substring match); select columns
   // store a string[] (exact-match any-of; empty = show all).
   const [filters, setFilters] = useState<Record<string, string | string[]>>({});
-  const [sortKey, setSortKey] = useState<SortKey>('created_at');
+  // Default sort: hottest priority first. high_priority manual flag still
+  // takes precedence within ties — handled in the sort comparator below.
+  const [sortKey, setSortKey] = useState<SortKey>('priority_score');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [selectedJob, setSelectedJob] = useState<TrackerJobsTableRow | null>(null);
   const [selectedCompany, setSelectedCompany] = useState<CompanyRecord | null>(null);
@@ -262,7 +272,9 @@ export function TrackerJobsTable({
     return jobs.filter(j => {
       for (const col of COLUMNS) {
         const v = filters[col.key];
-        if (col.filter === 'text') {
+        if (col.filter === 'none') {
+          continue;
+        } else if (col.filter === 'text') {
           if (typeof v !== 'string' || !v) continue;
           if (!fieldFor(j, col.key).toLowerCase().includes(v.toLowerCase())) return false;
         } else {
@@ -280,11 +292,31 @@ export function TrackerJobsTable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobs, filters, matchedTypes]);
 
+  // Resolve a row's effective priority. Falls back to a client-side
+  // compute so freshly-inserted rows (where the SQL trigger hasn't fired
+  // yet, e.g. during a Tracker run that hasn't called recompute) still
+  // sort sensibly instead of bottoming out at null.
+  const effectivePriority = (j: TrackerJobsTableRow): number => {
+    if (typeof j.priority_score === 'number') return j.priority_score;
+    return priorityScore({
+      createdAt: j.created_at,
+      jobTitle: j.job_title,
+      companyType: j._companyType,
+    }).total;
+  };
+
   const sorted = useMemo(() => {
     const arr = [...filtered];
     arr.sort((a, b) => {
+      // Manual high_priority flag pins to the top regardless of sort key.
+      const aP = (a.high_priority || a._companyIsHighPriority) ? 1 : 0;
+      const bP = (b.high_priority || b._companyIsHighPriority) ? 1 : 0;
+      if (aP !== bP) return bP - aP;
+
       let cmp = 0;
-      if (sortKey === 'created_at') {
+      if (sortKey === 'priority_score') {
+        cmp = effectivePriority(a) - effectivePriority(b);
+      } else if (sortKey === 'created_at') {
         const ad = a.created_at ? new Date(a.created_at).getTime() : 0;
         const bd = b.created_at ? new Date(b.created_at).getTime() : 0;
         cmp = ad - bd;
@@ -308,7 +340,9 @@ export function TrackerJobsTable({
       setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
     } else {
       setSortKey(key);
-      setSortDir(key === 'created_at' ? 'desc' : 'asc');
+      // Numeric/date columns default to desc (newest/highest first);
+      // text columns default to asc (alphabetical).
+      setSortDir(key === 'created_at' || key === 'priority_score' ? 'desc' : 'asc');
     }
   };
 
@@ -417,11 +451,15 @@ export function TrackerJobsTable({
                 : priority
                   ? 'bg-amber-50/70 hover:bg-amber-100/70'
                   : '';
+              const eff = effectivePriority(j);
               return (
                 <tr
                   key={j.id}
                   className={`border-b border-gray-100 hover:bg-gray-50 transition-colors ${rowBg}`}
                 >
+                  <td className="px-2 py-2 align-top text-center">
+                    <JobPriorityBadge score={eff} />
+                  </td>
                   <td className="px-3 py-2 align-top">
                     <div className="flex items-start gap-1.5">
                       {priority && <Star className="w-3.5 h-3.5 text-amber-500 mt-0.5 flex-shrink-0" />}

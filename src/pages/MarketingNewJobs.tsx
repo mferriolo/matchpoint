@@ -28,6 +28,8 @@ import { MultiSelectColumnHeader } from '@/components/marketing/MultiSelectColum
 import { exportMasterSheet, exportNewDataSheet } from '@/utils/xlsxExport';
 import { useIsMobile } from '@/hooks/use-mobile';
 import MobileMarketing from '@/components/mobile/MobileMarketing';
+import JobPriorityBadge from '@/components/marketing/JobPriorityBadge';
+import { priorityScore } from '@/lib/jobPriorityScore';
 
 
 
@@ -652,8 +654,21 @@ const DesktopMarketingNewJobs: React.FC = () => {
     setLoading(true);
     setLoadError(null);
     try {
+      // Refresh priority_score before reading. Recency drifts daily, so
+      // a row written yesterday at 100 may be 75 today — the RPC fixes
+      // every job in a single UPDATE. Awaited so the subsequent SELECT
+      // sees fresh values; if the RPC fails (e.g. older DB without the
+      // migration applied), we just log and let the client-side
+      // priorityScore() fallback cover it.
+      try {
+        const { error: recErr } = await supabase.rpc('recompute_marketing_job_priorities');
+        if (recErr) console.warn('recompute_marketing_job_priorities:', recErr.message);
+      } catch (e) {
+        console.warn('recompute_marketing_job_priorities exception:', (e as Error).message);
+      }
+
       const results = await Promise.allSettled([
-        supabase.from('marketing_jobs').select('*').order('created_at', { ascending: false }),
+        supabase.from('marketing_jobs').select('*').order('priority_score', { ascending: false }),
         supabase.from('marketing_companies').select('*').order('open_roles_count', { ascending: false }),
         supabase.from('marketing_contacts').select('*').order('created_at', { ascending: false })
       ]);
@@ -1134,6 +1149,52 @@ const DesktopMarketingNewJobs: React.FC = () => {
       return changed ? next : prev;
     });
   }, [showContactMerge, activeContactMergeGroups]);
+
+  // Contact priority = the highest priority_score among open jobs at the
+  // contact's company. Cached per company so we don't iterate all jobs
+  // for every contact row. Falls back to a client-side compute when the
+  // DB hasn't backfilled yet.
+  const contactPriorityByCompany = useMemo(() => {
+    const m = new Map<string, number>();
+    const isOpen = (j: any) => j.is_active !== false && !j.archived && !j.is_blocked;
+    const companyTypeById = new Map<string, string>();
+    const companyTypeByName = new Map<string, string>();
+    for (const co of companies) {
+      if (co?.id && co.company_type) companyTypeById.set(co.id, co.company_type);
+      if (co?.company_name && co.company_type) {
+        companyTypeByName.set(String(co.company_name).toLowerCase().trim(), co.company_type);
+      }
+    }
+    for (const j of jobs) {
+      if (!isOpen(j)) continue;
+      const ct = (j.company_id && companyTypeById.get(j.company_id)) ||
+        (j.company_name && companyTypeByName.get(String(j.company_name).toLowerCase().trim())) ||
+        null;
+      const score = typeof j.priority_score === 'number'
+        ? j.priority_score
+        : priorityScore({ createdAt: j.created_at, jobTitle: j.job_title, companyType: ct }).total;
+      const keys: string[] = [];
+      if (j.company_id) keys.push(`id:${j.company_id}`);
+      if (j.company_name) keys.push(`name:${String(j.company_name).toLowerCase().trim()}`);
+      for (const k of keys) {
+        const prev = m.get(k);
+        if (prev === undefined || score > prev) m.set(k, score);
+      }
+    }
+    return m;
+  }, [jobs, companies]);
+
+  const priorityForContact = (c: any): number | null => {
+    if (c.company_id) {
+      const v = contactPriorityByCompany.get(`id:${c.company_id}`);
+      if (typeof v === 'number') return v;
+    }
+    if (c.company_name) {
+      const v = contactPriorityByCompany.get(`name:${String(c.company_name).toLowerCase().trim()}`);
+      if (typeof v === 'number') return v;
+    }
+    return null;
+  };
 
   // Contacts filter + sort
   const filteredContacts = useMemo(() => {
@@ -2222,6 +2283,14 @@ const DesktopMarketingNewJobs: React.FC = () => {
                 <table className="w-full text-sm border-collapse">
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
+                      {/* Priority — heat-gradient badge, derived from the
+                          hottest open job at the contact's company. Not
+                          sortable from this header (would need a new
+                          ContactSortField); rows still inherit the
+                          existing Date Added default. */}
+                      <th className="text-center px-2 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider w-[80px]">
+                        Priority
+                      </th>
                       <MultiSelectColumnHeader<ContactSortField> field="first_name" label="First Name" filterValues={filterFirstName} filterOptions={uniqueContactFirstNames} onFilterChange={setFilterFirstName} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
                       <MultiSelectColumnHeader<ContactSortField> field="last_name" label="Last Name" filterValues={filterLastName} filterOptions={uniqueContactLastNames} onFilterChange={setFilterLastName} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
                       <MultiSelectColumnHeader<ContactSortField> field="company_name" label="Company" filterValues={filterContactCompany} filterOptions={uniqueContactCompanies} onFilterChange={setFilterContactCompany} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
@@ -2353,22 +2422,30 @@ const DesktopMarketingNewJobs: React.FC = () => {
                   </thead>
                   <tbody>
                     {loading ? (
-                      <tr><td colSpan={13} className="text-center py-12"><Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400" /></td></tr>
+                      <tr><td colSpan={14} className="text-center py-12"><Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400" /></td></tr>
                     ) : filteredContacts.length === 0 ? (
-                      <tr><td colSpan={13} className="text-center py-12 text-gray-500">No contacts found. Run the tracker or import data to add contacts.</td></tr>
+                      <tr><td colSpan={14} className="text-center py-12 text-gray-500">No contacts found. Run the tracker or import data to add contacts.</td></tr>
                     ) : filteredContacts.map((c, idx) => {
                       // Derive LinkedIn URL: prefer linkedin_url field, then check source_url for LinkedIn links
                       const linkedinUrl = c.linkedin_url || 
                         (c.source_url && c.source_url.includes('linkedin.com/in/') ? c.source_url : '');
 
+                      const cPriority = priorityForContact(c);
                       return (
-                        <tr 
-                          key={c.id} 
+                        <tr
+                          key={c.id}
                           className={`border-b border-gray-100 hover:bg-blue-50/40 cursor-pointer transition-colors ${
                             idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/30'
                           } ${selectedContact?.id === c.id ? 'bg-blue-50 ring-1 ring-blue-200' : ''}`}
                           onClick={() => setSelectedContact(selectedContact?.id === c.id ? null : c)}
                         >
+                          {/* Priority (heat-gradient badge) */}
+                          <td className="px-2 py-2.5 border-r border-gray-100 text-center">
+                            <JobPriorityBadge
+                              score={cPriority}
+                              title={cPriority !== null ? `Top open-job priority at this company: ${Math.round(cPriority)}/100` : undefined}
+                            />
+                          </td>
                           {/* First Name */}
                           <td className="px-4 py-2.5 border-r border-gray-100 text-gray-900 font-medium">
                             {c.first_name || <span className="text-gray-300">—</span>}

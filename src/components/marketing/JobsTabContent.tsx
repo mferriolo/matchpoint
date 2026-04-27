@@ -17,6 +17,8 @@ import {
 } from '@/components/ui/dialog';
 import { MultiSelectColumnHeader } from './MultiSelectColumnHeader';
 import { sourceLabel, sourceUrl, fmtDateTime, companyTypeBadge, matchJobType } from './TrackerJobsTable';
+import JobPriorityBadge from './JobPriorityBadge';
+import { priorityScore } from '@/lib/jobPriorityScore';
 import { useToast } from '@/hooks/use-toast';
 
 interface JobsTabContentProps {
@@ -29,7 +31,7 @@ interface JobsTabContentProps {
 // Sort keys mirror the Tracker's jobs table. Legacy keys (job_category,
 // location, job_url, has_description, date_posted, high_priority) have
 // been dropped in favor of the Tracker's column shape.
-type SortField = 'job_title' | 'job_type' | 'company_name' | 'company_type' | 'city' | 'state' | 'source' | 'created_at';
+type SortField = 'priority_score' | 'job_title' | 'job_type' | 'company_name' | 'company_type' | 'city' | 'state' | 'source' | 'created_at';
 
 type SortDir = 'asc' | 'desc';
 
@@ -143,7 +145,8 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
   const [subTab, setSubTab] = useState<'open' | 'closed'>('open');
   const [searchTerm, setSearchTerm] = useState('');
   // Default sort matches the Tracker: most recently found first.
-  const [sortField, setSortField] = useState<SortField>('created_at');
+  // Default sort is by priority — hottest jobs first.
+  const [sortField, setSortField] = useState<SortField>('priority_score');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [movingJobId, setMovingJobId] = useState<string | null>(null);
   const [togglingPriorityId, setTogglingPriorityId] = useState<string | null>(null);
@@ -234,12 +237,19 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       const co = (j.company_id && byId.get(j.company_id)) ||
                  (j.company_name && byName.get(String(j.company_name).toLowerCase().trim())) ||
                  null;
+      const companyType = co?.company_type || null;
+      // Trust the SQL-computed priority_score when present; otherwise
+      // compute on the fly so newly-inserted rows still rank correctly.
+      const eff = typeof j.priority_score === 'number'
+        ? j.priority_score
+        : priorityScore({ createdAt: j.created_at, jobTitle: j.job_title, companyType }).total;
       return {
         ...j,
-        _companyType: co?.company_type || null,
+        _companyType: companyType,
         _companyIsBlocked: !!co?.is_blocked,
         _companyIsHighPriority: !!co?.is_high_priority,
         _matchedJobType: matchJobType(j.job_title, jobTypeOptions),
+        _priorityScore: eff,
       };
     });
   }, [jobs, companies, jobTypeOptions]);
@@ -336,6 +346,15 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
   // Sort
   const sortedJobs = useMemo(() => {
     return [...filteredJobs].sort((a: any, b: any) => {
+      // Manual high_priority pins to the top regardless of sort key.
+      const aP = (a.high_priority || a._companyIsHighPriority) ? 1 : 0;
+      const bP = (b.high_priority || b._companyIsHighPriority) ? 1 : 0;
+      if (aP !== bP) return bP - aP;
+
+      if (sortField === 'priority_score') {
+        const cmp = (a._priorityScore || 0) - (b._priorityScore || 0);
+        return sortDir === 'asc' ? cmp : -cmp;
+      }
       // Numeric sort for created_at (oldest first when asc).
       if (sortField === 'created_at') {
         const aT = a.created_at ? new Date(a.created_at).getTime() : 0;
@@ -501,8 +520,9 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
 
   // Export to CSV — columns mirror the visible Tracker-style layout.
   const handleExportCSV = useCallback(() => {
-    const headers = ['Job Title', 'Job Type', 'Company', 'Company Type', 'City', 'State', 'Source', 'Source URL', 'Date Found', 'High Priority'];
+    const headers = ['Priority', 'Job Title', 'Job Type', 'Company', 'Company Type', 'City', 'State', 'Source', 'Source URL', 'Date Found', 'High Priority'];
     const rows = sortedJobs.map((j: any) => [
+      typeof j._priorityScore === 'number' ? Math.round(j._priorityScore).toString() : '',
       j.job_title || '',
       j._matchedJobType || '',
       j.company_name || '',
@@ -998,9 +1018,16 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                   title={allVisibleSelected ? 'Deselect all visible' : 'Select all visible'}
                 />
               </th>
-              {/* Columns mirror Tracker's jobs table:
-                  Job Title | Job Type | Company | Company Type | City | State | Source | Date Found.
+              {/* Columns mirror Tracker's jobs table, with the priority
+                  score added as the leftmost data column.
+                  Priority | Job Title | Job Type | Company | Company Type | City | State | Source | Date Found.
                   High-priority star is rendered inline on the Job Title cell. */}
+              <th className="text-center px-2 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[80px]">
+                <button onClick={() => handleSort('priority_score')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
+                  Priority
+                  <SortIcon field="priority_score" />
+                </button>
+              </th>
               <MultiSelectColumnHeader<SortField> field="job_title" label="Job Title" filterValues={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <MultiSelectColumnHeader<SortField> field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={uniqueJobTypes} onFilterChange={setFilterJobType} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <MultiSelectColumnHeader<SortField> field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
@@ -1022,14 +1049,14 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={10} className="text-center py-16">
+                <td colSpan={11} className="text-center py-16">
                   <Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400 mb-2" />
                   <span className="text-sm text-gray-400">Loading jobs...</span>
                 </td>
               </tr>
             ) : sortedJobs.length === 0 ? (
               <tr>
-                <td colSpan={10} className="text-center py-16">
+                <td colSpan={11} className="text-center py-16">
 
                   <div className="text-gray-400">
                     {searchTerm || activeFilterCount > 0 || filterHighPriority ? (
@@ -1076,6 +1103,10 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                         onChange={() => toggleSelect(j.id)}
                         className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406] cursor-pointer"
                       />
+                    </td>
+                    {/* Priority — heat-gradient badge, 0-100. */}
+                    <td className="px-2 py-3 text-center">
+                      <JobPriorityBadge score={j._priorityScore} />
                     </td>
                     {/* Job Title (with inline priority star — clickable to toggle). */}
                     <td className="px-4 py-3 text-gray-800 max-w-[260px]">
