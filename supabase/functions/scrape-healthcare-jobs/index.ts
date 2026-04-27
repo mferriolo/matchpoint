@@ -1493,6 +1493,115 @@ Deno.serve(async (req) => {
     }
 
     // ------------------------------------------------------------------
+    // ONE-SHOT BACKFILL: refresh date_posted from SerpAPI Google Jobs.
+    //
+    // For each company with at least one open marketing_jobs row, run a
+    // single Google Jobs query, then for every returned listing whose
+    // title fuzzy-matches one of our rows, parse the listing's posted_at
+    // ("3 days ago" / "13 hours ago" / etc.) into an ISO timestamp and
+    // UPDATE that row's date_posted. The trigger re-scores priority.
+    //
+    // Body params: { action: 'backfill_date_posted', limit?: number,
+    // offset?: number }. Returns { updated, scanned, companies_processed,
+    // next_offset, done } so the caller can paginate. limit applies to
+    // companies, not jobs (one query per company).
+    // ------------------------------------------------------------------
+    if (action === 'backfill_date_posted') {
+      const startMs = Date.now();
+      const limit = Math.min(Math.max(Number(body.limit) || 25, 1), 50);
+      const offset = Math.max(Number(body.offset) || 0, 0);
+      const R = (o: any) => new Response(JSON.stringify(o), { headers: { 'Content-Type': 'application/json', ...getCorsHeaders(req) } });
+
+      const serpKey = Deno.env.get("SERP_API_KEY");
+      if (!serpKey) return R({ success: false, error: 'SERP_API_KEY not configured' });
+
+      // Pull every open job once so we can group by company and only
+      // page through unique companies (limit applies to companies).
+      const { data: rows, error: rowsErr } = await supabase
+        .from('marketing_jobs')
+        .select('id, company_name, job_title, city, state, date_posted')
+        .eq('status', 'Open')
+        .not('is_blocked', 'eq', true)
+        .not('company_name', 'is', null)
+        .not('job_title', 'is', null);
+      if (rowsErr) return R({ success: false, error: rowsErr.message });
+      if (!rows || rows.length === 0) {
+        return R({ success: true, message: 'No open jobs to backfill', updated: 0, scanned: 0, done: true, next_offset: 0 });
+      }
+
+      // Group rows by case-insensitive company name. Stable order by
+      // company name so offset/limit pagination is deterministic.
+      const byCompany = new Map<string, typeof rows>();
+      for (const r of rows) {
+        const k = (r.company_name || '').toLowerCase().trim();
+        if (!k) continue;
+        const list = byCompany.get(k) || [];
+        list.push(r);
+        byCompany.set(k, list);
+      }
+      const companyKeys = Array.from(byCompany.keys()).sort();
+      const slice = companyKeys.slice(offset, offset + limit);
+
+      let updated = 0, scanned = 0, companiesWithMatches = 0, serpFailures = 0;
+      const examples: Array<{ company: string; job_title: string; old: string|null; raw: string|null; new: string|null }> = [];
+
+      for (const ck of slice) {
+        const rs = byCompany.get(ck) || [];
+        if (rs.length === 0) continue;
+        const displayName = rs[0].company_name || ck;
+        // Broad role hints so a single query hits every title at the
+        // company. The hint set echoes the scraper's tracker_run path.
+        const roleHints = ['Chief Medical Officer', 'Medical Director', 'Physician', 'Nurse Practitioner', 'Physician Assistant'];
+        const sr = await searchSerpApiForCompany(displayName, roleHints);
+        if (!sr.searchSuccess) { serpFailures++; continue; }
+        let any = false;
+        for (const ours of rs) {
+          // Match any returned listing whose company + title look like ours.
+          const cand = sr.jobsFound.find(sj =>
+            fuzzyCompanyMatch(sj.company_name, displayName) &&
+            fuzzyTitleMatch(sj.title, ours.job_title || '')
+          );
+          scanned++;
+          if (!cand?.posted_at_raw) continue;
+          const iso = parseSerpPostedAt(cand.posted_at_raw);
+          if (!iso) continue;
+          const { error: updErr } = await supabase
+            .from('marketing_jobs')
+            .update({ date_posted: iso })
+            .eq('id', ours.id);
+          if (updErr) continue;
+          updated++; any = true;
+          if (examples.length < 8) {
+            examples.push({
+              company: displayName,
+              job_title: ours.job_title || '',
+              old: ours.date_posted ?? null,
+              raw: cand.posted_at_raw,
+              new: iso,
+            });
+          }
+        }
+        if (any) companiesWithMatches++;
+      }
+
+      const nextOffset = offset + slice.length;
+      const done = nextOffset >= companyKeys.length;
+      return R({
+        success: true,
+        scanned,
+        updated,
+        companies_processed: slice.length,
+        companies_with_matches: companiesWithMatches,
+        companies_total: companyKeys.length,
+        serp_failures: serpFailures,
+        next_offset: done ? null : nextOffset,
+        done,
+        elapsed_ms: Date.now() - startMs,
+        examples,
+      });
+    }
+
+    // ------------------------------------------------------------------
     // SERPAPI-DRIVEN BACKFILL (v83)
     // For each existing marketing_jobs row whose job_url is currently a
     // job-board aggregator (Indeed, LinkedIn, Google Jobs search etc),
