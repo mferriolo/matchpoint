@@ -31,7 +31,7 @@ interface JobsTabContentProps {
 // Sort keys mirror the Tracker's jobs table. Legacy keys (job_category,
 // location, job_url, has_description, date_posted, high_priority) have
 // been dropped in favor of the Tracker's column shape.
-type SortField = 'priority_score' | 'job_title' | 'job_type' | 'company_name' | 'company_type' | 'city' | 'state' | 'source' | 'created_at';
+type SortField = 'priority_score' | 'job_title' | 'job_type' | 'company_name' | 'company_type' | 'city' | 'state' | 'source' | 'date_posted' | 'created_at';
 
 type SortDir = 'asc' | 'desc';
 
@@ -242,7 +242,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       // compute on the fly so newly-inserted rows still rank correctly.
       const eff = typeof j.priority_score === 'number'
         ? j.priority_score
-        : priorityScore({ lastSeenAt: j.last_seen_at, createdAt: j.created_at, jobTitle: j.job_title, companyType }).total;
+        : priorityScore({ datePosted: j.date_posted, lastSeenAt: j.last_seen_at, createdAt: j.created_at, jobTitle: j.job_title, companyType }).total;
       return {
         ...j,
         _companyType: companyType,
@@ -359,6 +359,12 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       if (sortField === 'created_at') {
         const aT = a.created_at ? new Date(a.created_at).getTime() : 0;
         const bT = b.created_at ? new Date(b.created_at).getTime() : 0;
+        const cmp = aT - bT;
+        return sortDir === 'asc' ? cmp : -cmp;
+      }
+      if (sortField === 'date_posted') {
+        const aT = a.date_posted ? new Date(a.date_posted).getTime() : 0;
+        const bT = b.date_posted ? new Date(b.date_posted).getTime() : 0;
         const cmp = aT - bT;
         return sortDir === 'asc' ? cmp : -cmp;
       }
@@ -520,7 +526,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
 
   // Export to CSV — columns mirror the visible Tracker-style layout.
   const handleExportCSV = useCallback(() => {
-    const headers = ['Priority', 'Job Title', 'Job Type', 'Company', 'Company Type', 'City', 'State', 'Source', 'Source URL', 'Date Found', 'High Priority'];
+    const headers = ['Priority', 'Job Title', 'Job Type', 'Company', 'Company Type', 'City', 'State', 'Source', 'Source URL', 'Date Posted', 'Date Found', 'High Priority'];
     const rows = sortedJobs.map((j: any) => [
       typeof j._priorityScore === 'number' ? Math.round(j._priorityScore).toString() : '',
       j.job_title || '',
@@ -531,6 +537,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       j.state || '',
       sourceLabel(j),
       sourceUrl(j),
+      j.date_posted || '',
       j.created_at || '',
       (j.high_priority || j._companyIsHighPriority) ? 'Yes' : 'No',
     ]);
@@ -1036,7 +1043,13 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
               <MultiSelectColumnHeader<SortField> field="state" label="State" filterValues={filterState} filterOptions={uniqueStates} onFilterChange={setFilterState} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <MultiSelectColumnHeader<SortField> field="source" label="Source" filterValues={filterSource} filterOptions={uniqueSources} onFilterChange={setFilterSource} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
 
-              <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[160px]">
+              <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[140px]">
+                <button onClick={() => handleSort('date_posted')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
+                  Date Posted
+                  <SortIcon field="date_posted" />
+                </button>
+              </th>
+              <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[140px]">
                 <button onClick={() => handleSort('created_at')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
                   Date Found
                   <SortIcon field="created_at" />
@@ -1049,14 +1062,14 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={11} className="text-center py-16">
+                <td colSpan={12} className="text-center py-16">
                   <Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400 mb-2" />
                   <span className="text-sm text-gray-400">Loading jobs...</span>
                 </td>
               </tr>
             ) : sortedJobs.length === 0 ? (
               <tr>
-                <td colSpan={11} className="text-center py-16">
+                <td colSpan={12} className="text-center py-16">
 
                   <div className="text-gray-400">
                     {searchTerm || activeFilterCount > 0 || filterHighPriority ? (
@@ -1168,6 +1181,16 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                         </a>
                       ) : (
                         <span className="text-gray-500">{srcLabel}</span>
+                      )}
+                    </td>
+                    {/* Date Posted — drives priority recency. */}
+                    <td className="px-3 py-3 text-gray-600 whitespace-nowrap">
+                      {j.date_posted ? (
+                        <span className="text-xs text-gray-700" title={new Date(j.date_posted).toLocaleString()}>
+                          {fmtDateTime(j.date_posted)}
+                        </span>
+                      ) : (
+                        <span className="text-gray-300 text-xs">—</span>
                       )}
                     </td>
                     {/* Date Found (created_at, with datetime tooltip). */}

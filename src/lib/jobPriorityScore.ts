@@ -62,16 +62,18 @@ export function categoryScore(companyType: string | null | undefined): number {
 }
 
 export function priorityScore(args: {
-  /** When the tracker most recently confirmed the listing is still up.
-   *  Preferred over createdAt: a job inserted a year ago that still
-   *  appears on the company's careers page should score as fresh. */
+  /** Authoritative posting date — what the source site shows. Preferred
+   *  over lastSeenAt and createdAt because users can correct it manually
+   *  and the priority should follow that correction. */
+  datePosted?: string | Date | null;
+  /** When the tracker most recently confirmed the listing is still up. */
   lastSeenAt?: string | Date | null;
-  /** Fallback when the row predates last_seen_at tracking. */
+  /** Final fallback for legacy rows. */
   createdAt?: string | Date | null;
   jobTitle?: string | null;
   companyType?: string | null;
 }): PriorityBreakdown {
-  const recency  = recencyScore(args.lastSeenAt ?? args.createdAt);
+  const recency  = recencyScore(args.datePosted ?? args.lastSeenAt ?? args.createdAt);
   const role     = roleScore(args.jobTitle);
   const category = categoryScore(args.companyType);
   return {

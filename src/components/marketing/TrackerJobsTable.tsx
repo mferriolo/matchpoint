@@ -84,20 +84,22 @@ type SortKey =
   | 'city'
   | 'state'
   | 'source'
+  | 'date_posted'
   | 'created_at';
 type SortDir = 'asc' | 'desc';
 
 type FilterKind = 'text' | 'select-job-type' | 'select-company-type' | 'select-run' | 'none';
 const COLUMNS: Array<{ key: SortKey; label: string; className?: string; filter: FilterKind }> = [
-  { key: 'priority_score', label: 'Priority',  className: 'w-[7%]',  filter: 'none' },
-  { key: 'job_title',    label: 'Job Title',    className: 'w-[18%]', filter: 'text' },
-  { key: 'job_type',     label: 'Job Type',     className: 'w-[11%]', filter: 'select-job-type' },
-  { key: 'company_name', label: 'Company',      className: 'w-[14%]', filter: 'text' },
-  { key: 'company_type', label: 'Company Type', className: 'w-[11%]', filter: 'select-company-type' },
-  { key: 'city',         label: 'City',         className: 'w-[8%]',  filter: 'text' },
-  { key: 'state',        label: 'State',        className: 'w-[6%]',  filter: 'text' },
-  { key: 'source',       label: 'Source',       className: 'w-[10%]', filter: 'text' },
-  { key: 'created_at',   label: 'Date Found',   className: 'w-[15%]', filter: 'select-run' },
+  { key: 'priority_score', label: 'Priority',  className: 'w-[6%]',  filter: 'none' },
+  { key: 'job_title',    label: 'Job Title',    className: 'w-[16%]', filter: 'text' },
+  { key: 'job_type',     label: 'Job Type',     className: 'w-[10%]', filter: 'select-job-type' },
+  { key: 'company_name', label: 'Company',      className: 'w-[13%]', filter: 'text' },
+  { key: 'company_type', label: 'Company Type', className: 'w-[10%]', filter: 'select-company-type' },
+  { key: 'city',         label: 'City',         className: 'w-[7%]',  filter: 'text' },
+  { key: 'state',        label: 'State',        className: 'w-[5%]',  filter: 'text' },
+  { key: 'source',       label: 'Source',       className: 'w-[9%]',  filter: 'text' },
+  { key: 'date_posted',  label: 'Date Posted',  className: 'w-[11%]', filter: 'none' },
+  { key: 'created_at',   label: 'Date Found',   className: 'w-[13%]', filter: 'select-run' },
 ];
 
 // Cleaner label from the tracker's internal source tags.
@@ -162,6 +164,7 @@ function rowFieldForKey(j: TrackerJobsTableRow, key: SortKey, matchedType: strin
   switch (key) {
     case 'priority_score': return String(j.priority_score ?? '');
     case 'source':       return sourceLabel(j);
+    case 'date_posted':   return fmtDateTime(j.date_posted);
     case 'created_at':   return fmtDateTime(j.created_at);
     case 'company_type': return String(j._companyType ?? '');
     case 'job_type':     return matchedType;
@@ -299,6 +302,7 @@ export function TrackerJobsTable({
   const effectivePriority = (j: TrackerJobsTableRow): number => {
     if (typeof j.priority_score === 'number') return j.priority_score;
     return priorityScore({
+      datePosted: j.date_posted,
       lastSeenAt: (j as any).last_seen_at,
       createdAt: j.created_at,
       jobTitle: j.job_title,
@@ -320,6 +324,10 @@ export function TrackerJobsTable({
       } else if (sortKey === 'created_at') {
         const ad = a.created_at ? new Date(a.created_at).getTime() : 0;
         const bd = b.created_at ? new Date(b.created_at).getTime() : 0;
+        cmp = ad - bd;
+      } else if (sortKey === 'date_posted') {
+        const ad = a.date_posted ? new Date(a.date_posted).getTime() : 0;
+        const bd = b.date_posted ? new Date(b.date_posted).getTime() : 0;
         cmp = ad - bd;
       } else {
         const av = fieldFor(a, sortKey);
@@ -343,7 +351,7 @@ export function TrackerJobsTable({
       setSortKey(key);
       // Numeric/date columns default to desc (newest/highest first);
       // text columns default to asc (alphabetical).
-      setSortDir(key === 'created_at' || key === 'priority_score' ? 'desc' : 'asc');
+      setSortDir(key === 'created_at' || key === 'date_posted' || key === 'priority_score' ? 'desc' : 'asc');
     }
   };
 
@@ -524,6 +532,7 @@ export function TrackerJobsTable({
                       <span className="text-gray-500">{sourceLabel(j)}</span>
                     )}
                   </td>
+                  <td className="px-3 py-2 align-top text-gray-600 whitespace-nowrap">{fmtDateTime(j.date_posted)}</td>
                   <td className="px-3 py-2 align-top text-gray-600 whitespace-nowrap">{fmtDateTime(j.created_at)}</td>
                 </tr>
               );
