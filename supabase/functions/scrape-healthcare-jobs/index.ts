@@ -825,7 +825,19 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
 
     // jKeys intentionally includes blocked jobs so that the dedup check
     // catches AI re-discoveries of jobs the user explicitly blocked.
-    const jKeys = new Set(allJ.map(j => `${(j.company_name||'').toLowerCase().trim()}|${(j.job_title||'').toLowerCase().trim()}|${(j.city||'').toLowerCase().trim()}|${(j.state||'').toLowerCase().trim()}`));
+    // We also retain the row id alongside the dk so that, when a dupe
+    // hits, we can mark that row as last_seen_at = now() at end of run
+    // (drives the recency component of priority_score). Without this,
+    // a long-running listing would never refresh its recency score.
+    const jKeyToId = new Map<string, string>();
+    for (const j of allJ) {
+      const dk = `${(j.company_name||'').toLowerCase().trim()}|${(j.job_title||'').toLowerCase().trim()}|${(j.city||'').toLowerCase().trim()}|${(j.state||'').toLowerCase().trim()}`;
+      jKeyToId.set(dk, j.id);
+    }
+    const jKeys = new Set(jKeyToId.keys());
+    // IDs of existing rows the scraper re-encountered this run. Bulk-
+    // updated at end of run (one UPDATE … WHERE id = ANY(ids)).
+    const reseenIds = new Set<string>();
     const coMap = new Map(allC.map(c => [(c.company_name||'').toLowerCase().trim(), c]));
     const ctKeys = new Set(allT.map(c => `${(c.first_name||'').toLowerCase().trim()}|${(c.last_name||'').toLowerCase().trim()}|${(c.company_name||'').toLowerCase().trim()}`));
     // Blocked items the user has explicitly excluded from future scraping.
@@ -960,7 +972,11 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           const city = locParts[0] || '';
           const state = locParts[1] || '';
           const dk = `${company.toLowerCase().trim()}|${m.normalized.toLowerCase().trim()}|${city.toLowerCase()}|${state.toLowerCase()}`;
-          if (jKeys.has(dk)) { dupes++; return; }
+          if (jKeys.has(dk)) {
+            const id = jKeyToId.get(dk);
+            if (id) reseenIds.add(id);
+            dupes++; return;
+          }
           if (foundJobKeys.has(dk)) {
             if (opts?.upgradeUrl) {
               const url = sj.apply_urls?.[0] || '';
@@ -1226,7 +1242,11 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         for (const j of foundJobs) {
           processedInsert++;
           const nt = j._normalizedTitle, dk = j._dedupKey;
-          if (jKeys.has(dk)) { dupes++; continue; }
+          if (jKeys.has(dk)) {
+            const id = jKeyToId.get(dk);
+            if (id) reseenIds.add(id);
+            dupes++; continue;
+          }
           jKeys.add(dk);
           const cat = catCo(j.company);
 
@@ -1278,6 +1298,27 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
       await progress.skipStep('searching_sources');
       await progress.skipStep('deduplicating');
       await progress.skipStep('enriching_contacts');
+    }
+
+    // Refresh last_seen_at on every job the scraper re-encountered this
+    // run. Single bulk UPDATE chunked at 200 ids/call to stay well under
+    // PostgREST URL length limits. This drives the recency component of
+    // priority_score — jobs still listed at their source today get a
+    // fresh score, regardless of how old the original row is.
+    if (reseenIds.size > 0) {
+      const ids = Array.from(reseenIds);
+      const nowIso = new Date().toISOString();
+      for (let i = 0; i < ids.length; i += 200) {
+        const chunk = ids.slice(i, i + 200);
+        const { error } = await supabase.from('marketing_jobs')
+          .update({ last_seen_at: nowIso, tracker_run_id: rid })
+          .in('id', chunk);
+        if (error) {
+          console.warn('last_seen_at bulk update failed:', error.message);
+          break;
+        }
+      }
+      log('deduplicating', `Refreshed last_seen_at on ${ids.length} re-encountered jobs`);
     }
 
     // STEP 7: SUMMARIES

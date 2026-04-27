@@ -299,6 +299,7 @@ export function TrackerJobsTable({
   const effectivePriority = (j: TrackerJobsTableRow): number => {
     if (typeof j.priority_score === 'number') return j.priority_score;
     return priorityScore({
+      lastSeenAt: (j as any).last_seen_at,
       createdAt: j.created_at,
       jobTitle: j.job_title,
       companyType: j._companyType,

@@ -242,7 +242,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       // compute on the fly so newly-inserted rows still rank correctly.
       const eff = typeof j.priority_score === 'number'
         ? j.priority_score
-        : priorityScore({ createdAt: j.created_at, jobTitle: j.job_title, companyType }).total;
+        : priorityScore({ lastSeenAt: j.last_seen_at, createdAt: j.created_at, jobTitle: j.job_title, companyType }).total;
       return {
         ...j,
         _companyType: companyType,
