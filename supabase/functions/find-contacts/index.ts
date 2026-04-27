@@ -493,13 +493,25 @@ async function processChunk(
     let totals = { leadership: 0, linkedin: 0, skipped: 0, filtered: 0 };
     let per: PerItem[] = [];
     if (loadExistingRun) {
-      const { data: runRow } = await supabase.from('contact_runs').select('*').eq('id', runId).single();
-      if (runRow) {
-        totals.leadership = runRow.leadership_added || 0;
-        totals.linkedin = runRow.ai_added || 0;
-        totals.skipped = runRow.duplicates_skipped || 0;
-        per = Array.isArray(runRow.per_item) ? runRow.per_item : [];
+      const { data: runRow, error: runFetchErr } = await supabase
+        .from('contact_runs')
+        .select('*')
+        .eq('id', runId)
+        .maybeSingle();
+      if (runFetchErr || !runRow) {
+        const msg = `Resume chunk aborted: run ${runId} missing or unreadable (${runFetchErr?.message || 'no row'})`;
+        console.error(msg);
+        await supabase.from('contact_runs').update({
+          status: 'failed',
+          completed_at: new Date().toISOString(),
+          error_message: msg,
+        }).eq('id', runId);
+        return;
       }
+      totals.leadership = runRow.leadership_added || 0;
+      totals.linkedin = runRow.ai_added || 0;
+      totals.skipped = runRow.duplicates_skipped || 0;
+      per = Array.isArray(runRow.per_item) ? runRow.per_item : [];
     }
 
     // Refresh existingNameKeys each chunk so dedup reflects inserts
