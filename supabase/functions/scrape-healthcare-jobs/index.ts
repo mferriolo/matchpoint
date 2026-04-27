@@ -272,7 +272,66 @@ function createProgressTracker(rid: string, logs: any[]) {
 // ============================================================
 // SERPAPI BATCH VERIFICATION (STRICT: only verified jobs pass)
 // ============================================================
-interface SerpJobResult { title: string; company_name: string; location: string; via: string; apply_urls: string[]; extensions: string[]; }
+interface SerpJobResult {
+  title: string;
+  company_name: string;
+  location: string;
+  via: string;
+  apply_urls: string[];
+  extensions: string[];
+  /** Raw posted_at string from Google Jobs (e.g. "3 days ago",
+   *  "Just posted", "30+ days ago"). null if Google didn't return one
+   *  for this listing. parseSerpPostedAt() converts it to an absolute
+   *  ISO timestamp at insert time. */
+  posted_at_raw?: string | null;
+}
+
+/**
+ * Convert a SerpAPI Google Jobs "posted_at" string into an ISO timestamp.
+ *
+ * Google returns relative phrases ("3 days ago", "13 hours ago",
+ * "2 weeks ago", "30+ days ago", "Just posted"). We anchor the math on
+ * `now()` since SerpAPI doesn't expose the actual response time. Returns
+ * null if the string is missing or unrecognized — caller falls back to
+ * now() so the row still gets a usable date_posted.
+ */
+function parseSerpPostedAt(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const s = String(raw).toLowerCase().trim();
+  if (!s) return null;
+  if (s === 'just posted' || s === 'today' || s === 'just now') return new Date().toISOString();
+  // "30+ days ago" / "30 days ago" / "13 hours ago" / "2 weeks ago" / "3 months ago"
+  const m = s.match(/(\d+)\s*\+?\s*(minute|hour|day|week|month|year)s?\s*ago/);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  if (!Number.isFinite(n) || n < 0) return null;
+  const unitMs: Record<string, number> = {
+    minute: 60_000,
+    hour:   3_600_000,
+    day:    86_400_000,
+    week:   7 * 86_400_000,
+    month:  30 * 86_400_000,
+    year:   365 * 86_400_000,
+  };
+  const ms = unitMs[m[2]];
+  if (!ms) return null;
+  return new Date(Date.now() - n * ms).toISOString();
+}
+
+/**
+ * Pick the first member of `extensions` that looks like a posted-at
+ * phrase, since older SerpAPI responses sometimes only populate the
+ * extensions array and not detected_extensions.posted_at.
+ */
+function postedAtFromExtensions(exts: string[] | undefined): string | null {
+  if (!Array.isArray(exts)) return null;
+  for (const e of exts) {
+    if (/(just\s*posted|today)|\d+\s*\+?\s*(minute|hour|day|week|month|year)s?\s*ago/i.test(e)) {
+      return e;
+    }
+  }
+  return null;
+}
 interface CompanySearchResult { company: string; searchSuccess: boolean; jobsFound: SerpJobResult[]; error?: string; }
 
 // ============================================================
@@ -553,6 +612,7 @@ async function searchSerpApiForCompany(company: string, roleHints: string[]): Pr
       const jobs: SerpJobResult[] = (data.jobs_results || []).map((j: any) => ({
         title: j.title || '', company_name: j.company_name || '', location: j.location || '', via: j.via || '',
         extensions: j.extensions || [], apply_urls: (j.apply_options || []).map((ao: any) => ao.link).filter((u: string) => u?.startsWith('http')),
+        posted_at_raw: j.detected_extensions?.posted_at || postedAtFromExtensions(j.extensions),
       }));
       return { company, searchSuccess: true, jobsFound: jobs };
     } finally {
@@ -589,6 +649,7 @@ async function searchSerpApiBroad(query: string): Promise<CompanySearchResult> {
       const jobs: SerpJobResult[] = (data.jobs_results || []).map((j: any) => ({
         title: j.title || '', company_name: j.company_name || '', location: j.location || '', via: j.via || '',
         extensions: j.extensions || [], apply_urls: (j.apply_options || []).map((ao: any) => ao.link).filter((u: string) => u?.startsWith('http')),
+        posted_at_raw: j.detected_extensions?.posted_at || postedAtFromExtensions(j.extensions),
       }));
       return { company: '(broad)', searchSuccess: true, jobsFound: jobs };
     } finally {
@@ -1001,6 +1062,8 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             source_found: sj.via || `Google Jobs (${sourceLabel})`,
             _verifiedUrl: url,
             _verifyReason: `Direct from Google Jobs (via ${sj.via || sourceLabel})`,
+            // Carry the source's posted-at through to the insert below.
+            _postedAtRaw: sj.posted_at_raw || null,
           };
           foundJobs.push(entry);
           foundByKey.set(dk, entry);
@@ -1268,6 +1331,11 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           if (!cid) continue;
 
           const directUrl = j._verifiedUrl && isDirectJobUrl(j._verifiedUrl) ? j._verifiedUrl : null;
+          // date_posted: derived from the source ad's posted-at string
+          // (e.g. "3 days ago" → today minus 3 days). Falls back to now()
+          // when the source didn't expose one (e.g. ATS career-page
+          // scrapes that don't surface a date).
+          const datePostedIso = parseSerpPostedAt(j._postedAtRaw) || new Date().toISOString();
           const { error } = await supabase.from('marketing_jobs').insert({
             company_id: cid, company_name: j.company, job_title: nt, job_type: nt, job_category: cat,
             city: j.city || '', state: j.state || '', location: j.city && j.state ? `${j.city}, ${j.state}` : '',
@@ -1275,7 +1343,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             linkedin_url: buildLinkedInUrl(nt, j.company), google_jobs_url: buildGoogleJobsUrl(nt, j.company, j.city, j.state),
             opportunity_type: 'Business Development Opportunity', status: 'Open',
             source: `${j.source_found} - ${new Date().toISOString().split('T')[0]}`,
-            date_posted: new Date().toISOString(), is_net_new: true, tracker_run_id: rid,
+            date_posted: datePostedIso, is_net_new: true, tracker_run_id: rid,
             url_status: 'live',
             url_check_result: (j._verifyReason || '').substring(0, 500),
             last_url_check: new Date().toISOString()
