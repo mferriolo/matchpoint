@@ -252,6 +252,88 @@ export function exportMasterSheet(jobs: Job[], contacts: Contact[], companies: C
   return filename;
 }
 
+/**
+ * Recruiter export: dump the supplied contacts to a one-sheet xlsx with
+ * the columns most useful when handing the list off (CSV-paste into a
+ * dialer, ATS import, sequence import). Includes the new outreach
+ * tracking fields and the priority score the caller computes per row.
+ */
+export function exportContactsToXlsx(
+  contacts: Array<Contact & {
+    middle_name?: string;
+    suffix?: string;
+    notes?: string;
+    confidence_score?: number | null;
+    last_outreach_at?: string | null;
+    outreach_status?: string | null;
+    created_at?: string | null;
+    /** Computed: max open-job priority at this contact's company. */
+    _priorityScore?: number | null;
+  }>,
+  filenamePrefix: string = 'Contacts'
+) {
+  const wb = XLSX.utils.book_new();
+
+  const rows = contacts.map(c => {
+    const linkedin = c.linkedin_url
+      || (c.source_url && String(c.source_url).includes('linkedin.com/in/') ? c.source_url : '');
+    const lastTouchDays = c.last_outreach_at
+      ? Math.floor((Date.now() - new Date(c.last_outreach_at).getTime()) / 86_400_000)
+      : null;
+    return {
+      'Priority Score': typeof c._priorityScore === 'number' ? Math.round(c._priorityScore) : '',
+      'First Name': c.first_name || '',
+      'Middle': c.middle_name || '',
+      'Last Name': c.last_name || '',
+      'Suffix': c.suffix || '',
+      'Title': c.title || '',
+      'Company': c.company_name || '',
+      'Email': c.email || '',
+      'Phone (Cell)': c.phone_cell || '',
+      'Phone (Work)': c.phone_work || '',
+      'Phone (Home)': c.phone_home || '',
+      'LinkedIn': linkedin || '',
+      'Source': c.source || '',
+      'Confidence': typeof c.confidence_score === 'number' ? c.confidence_score : '',
+      'Outreach Status': c.outreach_status || '',
+      'Last Touch':
+        c.last_outreach_at ? new Date(c.last_outreach_at).toLocaleDateString() : '',
+      'Days Since Last Touch':
+        lastTouchDays === null ? '' : lastTouchDays,
+      'Date Added':
+        c.created_at ? new Date(c.created_at).toLocaleDateString() : '',
+      'Notes': c.notes || '',
+    };
+  });
+
+  const ws = XLSX.utils.json_to_sheet(rows.length > 0 ? rows : [{
+    'Priority Score': '', 'First Name': '', 'Middle': '', 'Last Name': '', 'Suffix': '',
+    'Title': '', 'Company': '', 'Email': '',
+    'Phone (Cell)': '', 'Phone (Work)': '', 'Phone (Home)': '',
+    'LinkedIn': '', 'Source': '', 'Confidence': '',
+    'Outreach Status': '', 'Last Touch': '', 'Days Since Last Touch': '',
+    'Date Added': '', 'Notes': '',
+  }]);
+  ws['!cols'] = [
+    { wch: 8 },  // Priority
+    { wch: 14 }, { wch: 8 }, { wch: 16 }, { wch: 8 },   // names
+    { wch: 28 }, { wch: 28 },                            // title, company
+    { wch: 32 },                                         // email
+    { wch: 16 }, { wch: 16 }, { wch: 16 },               // phones
+    { wch: 40 },                                         // linkedin
+    { wch: 18 }, { wch: 10 },                            // source, confidence
+    { wch: 12 }, { wch: 12 }, { wch: 8 },                // outreach
+    { wch: 12 },                                         // date added
+    { wch: 50 },                                         // notes
+  ];
+
+  XLSX.utils.book_append_sheet(wb, ws, 'Contacts');
+
+  const filename = `${filenamePrefix} - ${dateTag()}.xlsx`;
+  downloadWorkbook(wb, filename);
+  return filename;
+}
+
 export function exportNewDataSheet(jobs: Job[]) {
   const wb = XLSX.utils.book_new();
 

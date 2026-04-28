@@ -10,7 +10,7 @@ import {
   Database, Shield, Phone, Send,
   Linkedin, Unlink, Upload, Trash2, Zap,
   ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert, FileText, ArrowRightLeft,
-  Ban, RotateCcw, Eye, EyeOff, Pencil, Filter, X, Copy, GitMerge
+  Ban, RotateCcw, Eye, EyeOff, Pencil, Filter, X, Copy, GitMerge, Download
 } from 'lucide-react';
 
 import { supabase } from '@/lib/supabase';
@@ -25,7 +25,7 @@ import CrelateSyncStatus from '@/components/marketing/CrelateSyncStatus';
 import MissingTitlesReport from '@/components/marketing/MissingTitlesReport';
 import TitleMapping from '@/components/marketing/TitleMapping';
 import { MultiSelectColumnHeader } from '@/components/marketing/MultiSelectColumnHeader';
-import { exportMasterSheet, exportNewDataSheet } from '@/utils/xlsxExport';
+import { exportMasterSheet, exportNewDataSheet, exportContactsToXlsx } from '@/utils/xlsxExport';
 import { useIsMobile } from '@/hooks/use-mobile';
 import MobileMarketing from '@/components/mobile/MobileMarketing';
 import JobPriorityBadge from '@/components/marketing/JobPriorityBadge';
@@ -594,6 +594,27 @@ const DesktopMarketingNewJobs: React.FC = () => {
     } catch {
       toast({ title: 'Copy failed', description: 'Browser blocked clipboard access.', variant: 'destructive' });
     }
+  };
+
+  /**
+   * Hand off contacts to a spreadsheet. If any rows are checked we export
+   * just those; otherwise we export the current filtered/sorted view (so
+   * the recruiter can hit a saved view + Export and get exactly that
+   * list). Each row is decorated with its computed priority so the
+   * exported sheet matches what's on screen.
+   */
+  const handleExportContacts = (which: 'selected' | 'visible') => {
+    const base = which === 'selected'
+      ? contacts.filter(c => selectedContactIds.has(c.id))
+      : filteredContacts;
+    if (base.length === 0) {
+      toast({ title: 'Nothing to export', description: 'No contacts match the current view.', variant: 'destructive' });
+      return;
+    }
+    const decorated = base.map(c => ({ ...c, _priorityScore: priorityForContact(c) }));
+    const prefix = which === 'selected' ? `Contacts (selected ${decorated.length})` : `Contacts (${decorated.length})`;
+    const file = exportContactsToXlsx(decorated, prefix);
+    toast({ title: 'Exported', description: file });
   };
 
   const openEditContact = (c: any) => {
@@ -2421,6 +2442,18 @@ const DesktopMarketingNewJobs: React.FC = () => {
                 </Button>
                 <Button
                   variant="outline"
+                  onClick={() => handleExportContacts(selectedContactIds.size > 0 ? 'selected' : 'visible')}
+                  disabled={contacts.length === 0}
+                  className="text-emerald-700 border-emerald-200 hover:bg-emerald-50"
+                  title={selectedContactIds.size > 0
+                    ? `Export the ${selectedContactIds.size} selected contact${selectedContactIds.size === 1 ? '' : 's'} to .xlsx`
+                    : `Export the ${filteredContacts.length} contact${filteredContacts.length === 1 ? '' : 's'} currently visible to .xlsx`}
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  Export {selectedContactIds.size > 0 ? `${selectedContactIds.size} Selected` : `${filteredContacts.length} Visible`}
+                </Button>
+                <Button
+                  variant="outline"
                   onClick={() => setShowWipeContactsConfirm(true)}
                   disabled={contacts.length === 0 || contactRunIsActive || wipingContacts}
                   className="text-red-700 border-red-200 hover:bg-red-50"
@@ -2455,6 +2488,15 @@ const DesktopMarketingNewJobs: React.FC = () => {
                     >
                       <Zap className="w-4 h-4 mr-1.5" />
                       Enrich {selectedContactIds.size}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => handleExportContacts('selected')}
+                      className="text-emerald-700 border-emerald-300 hover:bg-emerald-50"
+                      title="Export the selected contacts to an .xlsx spreadsheet"
+                    >
+                      <Download className="w-4 h-4 mr-1.5" />
+                      Export {selectedContactIds.size}
                     </Button>
                     <Button
                       variant="outline"
