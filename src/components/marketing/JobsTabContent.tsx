@@ -133,7 +133,13 @@ interface ScrubSummary {
   serpSearchCount: number;
 }
 
-const INTER_JOB_DELAY_MS = 500; // Delay between process-next calls
+// Edge function processes BATCH_SIZE items in parallel per call. We
+// keep INTER_JOB_DELAY_MS small — it exists only to yield to the event
+// loop / UI, since rate-limiting is now handled by the function-side
+// concurrency cap. With BATCH_SIZE=8 a 100-job sweep does ~13 calls,
+// each taking ~5–10s in parallel rather than 100 sequential calls.
+const SCRUB_BATCH_SIZE = 8;
+const INTER_JOB_DELAY_MS = 50;
 const MAX_CONSECUTIVE_ERRORS = 10; // Stop if too many consecutive errors
 
 
@@ -629,12 +635,14 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       return;
     }
 
-    // Step 2: Process jobs one at a time by calling process-next in a loop
+    // Step 2: Process jobs by calling process-next in a loop. Each call
+    // claims SCRUB_BATCH_SIZE pending items and runs them in parallel
+    // server-side, so one HTTP round trip handles a batch of jobs.
     let processed = 0;
     while (!scrubAbortRef.current) {
       try {
         const { data, error } = await supabase.functions.invoke('verify-job-links', {
-          body: { action: 'process-next', run_id: scrubRunIdRef.current }
+          body: { action: 'process-next', run_id: scrubRunIdRef.current, batch_size: SCRUB_BATCH_SIZE }
         });
 
         if (error) {
@@ -664,10 +672,15 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
 
         // Reset consecutive error counter on success
         consecutiveErrors = 0;
-        processed++;
 
-        const result = data?.result;
-        if (result) {
+        // results[] (batch) is the new shape; result (singleton) is kept
+        // for back-compat in case the caller is on an older edge build.
+        const batchResults: any[] = Array.isArray(data?.results)
+          ? data.results
+          : (data?.result ? [data.result] : []);
+
+        for (const result of batchResults) {
+          processed++;
           allResults.push(result);
           setScrubBatchNum(processed);
           setScrubCurrentJob(`${result.company_name || 'Unknown'} — ${result.job_title || 'Unknown'}`);
@@ -691,7 +704,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
 
         setScrubProgress(processed);
 
-        // Small delay between jobs to avoid rate limiting
+        // Tiny yield so the UI can repaint between batches.
         if (!scrubAbortRef.current) {
           await new Promise(r => setTimeout(r, INTER_JOB_DELAY_MS));
         }

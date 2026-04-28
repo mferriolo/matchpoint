@@ -180,21 +180,40 @@ async function handleProcessNext(body: any): Promise<Response> {
   const start = Date.now();
   const runId = body.run_id;
   if (!runId) return jsonResp({ error: 'run_id required' }, 400);
+  // Server-side batch parallelism. Each item still spends ~5–10s on
+  // SerpAPI + URL probes + OpenAI; running them concurrently inside one
+  // edge invocation cuts total wall-clock by ~batchSize× without adding
+  // browser-side complexity. Capped at 8 to stay under the function's
+  // wall-clock budget and avoid SerpAPI/OpenAI bursts.
+  const batchSize = Math.min(Math.max(Number(body.batch_size) || 1, 1), 8);
   const sb = getSupabaseClient();
 
-  // Claim next pending
-  const { data: pending, error: fetchErr } = await sb.from('job_verification_queue').select('*').eq('run_id', runId).eq('status', 'pending').order('created_at', { ascending: true }).limit(1);
+  const { data: pending, error: fetchErr } = await sb.from('job_verification_queue').select('*').eq('run_id', runId).eq('status', 'pending').order('created_at', { ascending: true }).limit(batchSize);
   if (fetchErr) return jsonResp({ error: fetchErr.message }, 500);
   if (!pending?.length) return jsonResp({ done: true, message: 'No more pending jobs' });
 
-  const qi = pending[0];
+  const queueIds = pending.map((p: any) => p.id);
+  await sb.from('job_verification_queue').update({ status: 'processing', started_at: new Date().toISOString() }).in('id', queueIds);
+  log('INFO', 'process', `Claimed ${pending.length} item${pending.length === 1 ? '' : 's'}`);
+
+  const results = await Promise.all(pending.map((qi: any) => processOneQueueItem(sb, qi)));
+
+  // Backward-compat: single-item callers see the same `result` field as
+  // before. Batch callers also get the full `results` array.
+  return jsonResp({
+    done: false,
+    result: results[0],
+    results,
+    elapsed_ms: Date.now() - start,
+  });
+}
+
+async function processOneQueueItem(sb: any, qi: any): Promise<any> {
+  const start = Date.now();
   const queueId = qi.id, jobId = qi.job_id;
   const jobTitle = (qi.job_title || '').replace(/\s*\(.*?\)\s*/g, ' ').trim();
   const company = qi.company_name || '', existingUrl = qi.existing_url || '';
   const city = qi.city || '', state = qi.state || '';
-
-  await sb.from('job_verification_queue').update({ status: 'processing', started_at: new Date().toISOString() }).eq('id', queueId);
-  log('INFO', 'process', `Claimed: "${company}" - "${jobTitle}"`);
 
   try {
     // Check existing URL
@@ -228,7 +247,7 @@ async function handleProcessNext(body: any): Promise<Response> {
     const openaiKey = Deno.env.get("OPENAI_API_KEY");
     if (!openaiKey) {
       await updateQueueItem(sb, queueId, jobId, { status: 'failed', error_message: 'No OpenAI key', details: 'Config error', source: 'config_error' });
-      return jsonResp({ done: false, result: { id: jobId, source: 'config_error', is_live: false, details: 'OpenAI not configured' } });
+      return { id: jobId, source: 'config_error', is_live: false, details: 'OpenAI not configured' };
     }
 
     let searchCtx = '';
@@ -297,7 +316,7 @@ LIVE = real active healthcare org plausibly hiring this role. DEAD = company doe
         verdict = 'LIVE'; reason = `AI failed but live search found ${serpAnalysis.matching.length} matching jobs`; bestUrlAi = serpAnalysis.bestUrl; aiOk = true; searchMode = 'serp_api_only';
       } else {
         await updateQueueItem(sb, queueId, jobId, { status: 'failed', is_live: false, ai_says_live: false, error_message: 'AI failed', details: 'AI unavailable', source: 'ai_failed' });
-        return jsonResp({ done: false, result: { id: jobId, job_title: jobTitle, company_name: company, is_live: false, details: 'AI failed - job unchanged', source: 'ai_failed', search_mode: searchMode } });
+        return { id: jobId, job_title: jobTitle, company_name: company, is_live: false, details: 'AI failed - job unchanged', source: 'ai_failed', search_mode: searchMode };
       }
     }
 
@@ -345,15 +364,11 @@ LIVE = real active healthcare org plausibly hiring this role. DEAD = company doe
 
     await updateQueueItem(sb, queueId, jobId, { status: 'completed', is_live: aiLive, ai_says_live: aiLive, has_direct_url: hasDirectUrl, found_url: bestUrl, candidate_urls: candidateUrls, details: fullReason, source: searchMode === 'ai_only' ? 'ai_verified' : 'serp_verified' });
 
-    return jsonResp({
-      done: false,
-      result: { id: jobId, job_title: jobTitle, company_name: company, is_live: aiLive, ai_says_live: aiLive, has_direct_url: hasDirectUrl, details: fullReason, source: searchMode === 'ai_only' ? 'ai_verified' : 'serp_verified', search_mode: searchMode, found_url: bestUrl, candidate_urls: candidateUrls, serp_jobs_found: serpResult?.jobs?.length || 0, serp_matching_jobs: serpAnalysis?.matching?.length || 0 },
-      elapsed_ms: Date.now() - start,
-    });
+    return { id: jobId, job_title: jobTitle, company_name: company, is_live: aiLive, ai_says_live: aiLive, has_direct_url: hasDirectUrl, details: fullReason, source: searchMode === 'ai_only' ? 'ai_verified' : 'serp_verified', search_mode: searchMode, found_url: bestUrl, candidate_urls: candidateUrls, serp_jobs_found: serpResult?.jobs?.length || 0, serp_matching_jobs: serpAnalysis?.matching?.length || 0, elapsed_ms: Date.now() - start };
   } catch (err: any) {
     log('ERROR', 'process:fatal', err.message, { stack: err.stack?.substring(0, 500) });
     try { await sb.from('job_verification_queue').update({ status: 'failed', error_message: err.message?.substring(0, 1000), completed_at: new Date().toISOString() }).eq('id', queueId); } catch {}
-    return jsonResp({ done: false, result: { id: jobId, job_title: jobTitle, company_name: company, is_live: false, details: `Error: ${err.message}`, source: 'error', search_mode: 'error' }, elapsed_ms: Date.now() - start });
+    return { id: jobId, job_title: jobTitle, company_name: company, is_live: false, details: `Error: ${err.message}`, source: 'error', search_mode: 'error', elapsed_ms: Date.now() - start };
   }
 }
 
