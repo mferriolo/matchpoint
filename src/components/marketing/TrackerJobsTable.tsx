@@ -10,6 +10,8 @@ import { supabase } from '@/lib/supabase';
 import { useToast } from '@/hooks/use-toast';
 import JobPriorityBadge from './JobPriorityBadge';
 import { priorityScore } from '@/lib/jobPriorityScore';
+import EditJobModal, { EditJobRow } from './EditJobModal';
+import { Pencil } from 'lucide-react';
 
 // Each row is a marketing_jobs row. The parent decorates each job with a
 // few extra fields the table/dialog needs but can't derive on its own:
@@ -194,11 +196,15 @@ export function TrackerJobsTable({
   jobs,
   jobTypeOptions = [],
   trackerRuns = [],
+  companies = [],
   onDataRefresh,
 }: {
   jobs: TrackerJobsTableRow[];
   jobTypeOptions?: string[];
   trackerRuns?: TrackerRunOption[];
+  /** Companies for the EditJobModal company dropdown. Optional — when
+   *  empty the field still works as free text. */
+  companies?: Array<{ id?: string; company_name?: string }>;
   onDataRefresh?: () => void;
 }) {
   // Text columns store a single string (substring match); select columns
@@ -210,6 +216,7 @@ export function TrackerJobsTable({
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [selectedJob, setSelectedJob] = useState<TrackerJobsTableRow | null>(null);
   const [selectedCompany, setSelectedCompany] = useState<CompanyRecord | null>(null);
+  const [editingJob, setEditingJob] = useState<EditJobRow | null>(null);
 
   // Pre-compute the matched job type per row so filter/sort/render all
   // agree on what Job Type means for a given job.
@@ -552,18 +559,45 @@ export function TrackerJobsTable({
         Showing {sorted.length} of {jobs.length} jobs
       </div>
 
-      <JobDetailDialog job={selectedJob} onClose={() => setSelectedJob(null)} />
+      <JobDetailDialog
+        job={selectedJob}
+        onClose={() => setSelectedJob(null)}
+        onEdit={j => {
+          setEditingJob({
+            id: j.id,
+            job_title: j.job_title,
+            company_id: (j as any).company_id ?? null,
+            company_name: j.company_name,
+            city: j.city,
+            state: j.state,
+            job_type: j.job_type,
+            date_posted: j.date_posted,
+            description: j.description,
+            notes: j.notes,
+            high_priority: !!j.high_priority,
+            status: (j as any).status ?? 'Open',
+          });
+          setSelectedJob(null);
+        }}
+      />
       <CompanyDetailDialog
         company={selectedCompany}
         onClose={() => setSelectedCompany(null)}
         onJobClick={j => { setSelectedCompany(null); setSelectedJob(j as TrackerJobsTableRow); }}
         onDataRefresh={onDataRefresh}
       />
+      <EditJobModal
+        job={editingJob}
+        companies={companies}
+        jobTypeOptions={jobTypeOptions}
+        onSaved={() => onDataRefresh?.()}
+        onClose={() => setEditingJob(null)}
+      />
     </div>
   );
 }
 
-function JobDetailDialog({ job, onClose }: { job: TrackerJobsTableRow | null; onClose: () => void }) {
+function JobDetailDialog({ job, onClose, onEdit }: { job: TrackerJobsTableRow | null; onClose: () => void; onEdit?: (j: TrackerJobsTableRow) => void }) {
   const url = job ? sourceUrl(job) : '';
   return (
     <Dialog open={!!job} onOpenChange={v => { if (!v) onClose(); }}>
@@ -571,12 +605,24 @@ function JobDetailDialog({ job, onClose }: { job: TrackerJobsTableRow | null; on
         {job && (
           <>
             <DialogHeader>
-              <DialogTitle className="flex items-start gap-2 pr-6">
-                {(job.high_priority || job._companyIsHighPriority) && (
-                  <Star className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+              <div className="flex items-start justify-between gap-2 pr-6">
+                <DialogTitle className="flex items-start gap-2">
+                  {(job.high_priority || job._companyIsHighPriority) && (
+                    <Star className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                  )}
+                  <span>{job.job_title || '(untitled)'}</span>
+                </DialogTitle>
+                {onEdit && (
+                  <button
+                    onClick={() => onEdit(job)}
+                    className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded border border-gray-200 text-gray-600 hover:text-[#911406] hover:border-[#911406]/40 hover:bg-red-50 flex-shrink-0"
+                    title="Edit this job"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                    Edit
+                  </button>
                 )}
-                <span>{job.job_title || '(untitled)'}</span>
-              </DialogTitle>
+              </div>
             </DialogHeader>
 
             <div className="space-y-3 text-sm">

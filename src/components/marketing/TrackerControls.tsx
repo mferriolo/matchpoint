@@ -1812,6 +1812,7 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
               jobs={jobs}
               jobTypeOptions={allJobTypes.map(jt => jt.name)}
               trackerRuns={runHistory}
+              companies={companies}
               onDataRefresh={onComplete}
             />
           );

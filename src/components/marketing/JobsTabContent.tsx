@@ -19,6 +19,7 @@ import { MultiSelectColumnHeader } from './MultiSelectColumnHeader';
 import { sourceLabel, sourceUrl, fmtDateTime, companyTypeBadge, matchJobType } from './TrackerJobsTable';
 import JobPriorityBadge from './JobPriorityBadge';
 import { priorityScore } from '@/lib/jobPriorityScore';
+import EditJobModal, { EditJobRow } from './EditJobModal';
 import { useToast } from '@/hooks/use-toast';
 
 interface JobsTabContentProps {
@@ -223,6 +224,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
   // Per-job detail dialog. viewingJobId === id renders <JobDetailDialog>
   // showing every field on the row including the full description text.
   const [viewingJobId, setViewingJobId] = useState<string | null>(null);
+  const [editingJob, setEditingJob] = useState<EditJobRow | null>(null);
   const viewingJob = viewingJobId ? jobs.find(j => j.id === viewingJobId) : null;
 
 
@@ -1226,6 +1228,26 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                         >
                           <Eye className="w-3.5 h-3.5" />
                         </button>
+                        <button
+                          onClick={() => setEditingJob({
+                            id: j.id,
+                            job_title: j.job_title,
+                            company_id: j.company_id,
+                            company_name: j.company_name,
+                            city: j.city,
+                            state: j.state,
+                            job_type: j.job_type,
+                            date_posted: j.date_posted,
+                            description: j.description,
+                            notes: j.notes,
+                            high_priority: !!j.high_priority,
+                            status: j.status,
+                          })}
+                          className="inline-flex items-center justify-center p-1 rounded text-gray-500 hover:text-[#911406] hover:bg-red-50"
+                          title="Edit this job"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
                         {subTab === 'open' ? (
                           <button
                             onClick={() => handleMoveJob(j.id, true)}
@@ -1653,6 +1675,14 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <EditJobModal
+        job={editingJob}
+        companies={companies}
+        jobTypeOptions={jobTypeOptions}
+        onSaved={() => onRefresh()}
+        onClose={() => setEditingJob(null)}
+      />
     </div>
   );
 };
