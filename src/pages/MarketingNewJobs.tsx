@@ -30,6 +30,21 @@ import { useIsMobile } from '@/hooks/use-mobile';
 import MobileMarketing from '@/components/mobile/MobileMarketing';
 import JobPriorityBadge from '@/components/marketing/JobPriorityBadge';
 import { priorityScore } from '@/lib/jobPriorityScore';
+import OutreachStatusCell, { OutreachStatus } from '@/components/marketing/OutreachStatusCell';
+import { loadSavedViews, writeSavedViews, consumeContactsLastVisit, SavedContactsView } from '@/lib/marketingPrefs';
+import { Sparkles, BookmarkPlus, Bookmark } from 'lucide-react';
+
+/** Compact "12s ago" / "3m ago" / "1h ago" formatter for the freshness indicator. */
+function formatAgo(ms: number): string {
+  if (ms < 0 || !Number.isFinite(ms)) return 'just now';
+  const s = Math.round(ms / 1000);
+  if (s < 5)   return 'just now';
+  if (s < 60)  return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60)  return `${m}m ago`;
+  const h = Math.round(m / 60);
+  return `${h}h ago`;
+}
 
 
 
@@ -87,6 +102,114 @@ const DesktopMarketingNewJobs: React.FC = () => {
   // (e.g. "has any phone but no cell").
   const [filterAnyPhonePresence, setFilterAnyPhonePresence] = useState<Set<string>>(new Set());
   const [anyPhoneFilterOpen, setAnyPhoneFilterOpen] = useState(false);
+  // Outreach-status bucket filter on the Contacts tab. Multi-select. The
+  // synthetic 'Never' value means last_outreach_at IS NULL; the others
+  // are the four CHECK-constrained statuses on marketing_contacts.
+  const [filterOutreachStatus, setFilterOutreachStatus] = useState<Set<string>>(new Set());
+  // "Days since last outreach" bucket — works alongside status.
+  const [filterOutreachAge, setFilterOutreachAge] = useState<Set<string>>(new Set());
+
+  // ── New since last visit ────────────────────────────────────────────
+  // Snapshot the prior lastVisit on first render and advance the stamp
+  // to "now". A toggle then filters Contacts to rows created after the
+  // snapshot. Stable across renders via ref.
+  const previousVisitRef = React.useRef<number>(0);
+  if (previousVisitRef.current === 0) {
+    previousVisitRef.current = consumeContactsLastVisit();
+  }
+  const [newSinceLastVisit, setNewSinceLastVisit] = useState(false);
+
+  // ── Caching / freshness ─────────────────────────────────────────────
+  // loadData skips refetches within FRESHNESS_MS unless force=true. A
+  // ref holds the most recent successful load timestamp so loadData
+  // stays a stable reference across renders (otherwise the
+  // useEffect(()=>loadData(), [loadData]) below loops). A separate
+  // state mirror drives the "Updated Ns ago" indicator re-rendering.
+  const FRESHNESS_MS = 30_000;
+  const lastUpdatedRef = React.useRef<number>(0);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number>(0);
+  const [, setNowTick] = useState<number>(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 5_000);
+    return () => clearInterval(t);
+  }, []);
+
+  // ── Saved views (Contacts tab only for v1) ──────────────────────────
+  const [savedViews, setSavedViews] = useState<SavedContactsView[]>(() => loadSavedViews());
+  const [savedViewsOpen, setSavedViewsOpen] = useState(false);
+  const [activeSavedViewId, setActiveSavedViewId] = useState<string | null>(null);
+
+  /** Snapshot all Contacts-tab filters into a JSON-safe shape. */
+  const captureContactsViewFilters = (): Record<string, string[]> => ({
+    firstName:        Array.from(filterFirstName),
+    lastName:         Array.from(filterLastName),
+    company:          Array.from(filterContactCompany),
+    title:            Array.from(filterContactTitle),
+    source:           Array.from(filterContactSource),
+    dateAdded:        Array.from(filterDateAdded),
+    emailPresence:    Array.from(filterEmailPresence),
+    phoneWorkPresence: Array.from(filterPhoneWorkPresence),
+    phoneHomePresence: Array.from(filterPhoneHomePresence),
+    phoneCellPresence: Array.from(filterPhoneCellPresence),
+    linkedinPresence: Array.from(filterLinkedInPresence),
+    anyPhonePresence: Array.from(filterAnyPhonePresence),
+    confidence:       Array.from(filterConfidence),
+    outreachStatus:   Array.from(filterOutreachStatus),
+    outreachAge:      Array.from(filterOutreachAge),
+  });
+
+  /** Apply a previously-saved view: rehydrate every filter Set + sort + search. */
+  const applySavedView = (v: SavedContactsView) => {
+    const f = v.filters || {};
+    const set = (arr?: string[]) => new Set(arr || []);
+    setFilterFirstName(set(f.firstName));
+    setFilterLastName(set(f.lastName));
+    setFilterContactCompany(set(f.company));
+    setFilterContactTitle(set(f.title));
+    setFilterContactSource(set(f.source));
+    setFilterDateAdded(set(f.dateAdded));
+    setFilterEmailPresence(set(f.emailPresence));
+    setFilterPhoneWorkPresence(set(f.phoneWorkPresence));
+    setFilterPhoneHomePresence(set(f.phoneHomePresence));
+    setFilterPhoneCellPresence(set(f.phoneCellPresence));
+    setFilterLinkedInPresence(set(f.linkedinPresence));
+    setFilterAnyPhonePresence(set(f.anyPhonePresence));
+    setFilterConfidence(set(f.confidence));
+    setFilterOutreachStatus(set(f.outreachStatus));
+    setFilterOutreachAge(set(f.outreachAge));
+    setSearchContacts(v.search || '');
+    setContactSortField((v.sortField as ContactSortField) || 'priority_score');
+    setContactSortDir(v.sortDir || 'desc');
+    setActiveSavedViewId(v.id);
+    setSavedViewsOpen(false);
+  };
+
+  const saveCurrentView = () => {
+    const name = window.prompt('Name this view (e.g. "VBC CMOs not contacted")');
+    if (!name) return;
+    const view: SavedContactsView = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: name.trim(),
+      createdAt: Date.now(),
+      search: searchContacts,
+      sortField: contactSortField,
+      sortDir: contactSortDir,
+      filters: captureContactsViewFilters(),
+    };
+    const next = [view, ...savedViews];
+    setSavedViews(next);
+    writeSavedViews(next);
+    setActiveSavedViewId(view.id);
+    setSavedViewsOpen(false);
+    toast({ title: 'View saved', description: name });
+  };
+
+  const deleteSavedView = (id: string) => {
+    const next = savedViews.filter(v => v.id !== id);
+    setSavedViews(next);
+    writeSavedViews(next);
+    if (activeSavedViewId === id) setActiveSavedViewId(null);
+  };
 
   const handleContactSort = (f: ContactSortField) => {
     if (contactSortField === f) setContactSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -445,6 +568,34 @@ const DesktopMarketingNewJobs: React.FC = () => {
     }
   };
 
+  /**
+   * Copy a recruiter-friendly "contact pack" to clipboard: name, title,
+   * company, email, phone, LinkedIn — formatted for pasting into a draft
+   * email or ATS note. Only includes fields that have values, so the
+   * paste isn't littered with empty placeholders.
+   */
+  const copyContactPack = async (c: any) => {
+    const name = [c.first_name, c.middle_name, c.last_name].filter(Boolean).join(' ').trim();
+    const fullName = c.suffix ? (name ? `${name}, ${c.suffix}` : c.suffix) : (name || '(unnamed)');
+    const titleAt = [c.title, c.company_name].filter(Boolean).join(' at ');
+    const linkedin = c.linkedin_url || (c.source_url && String(c.source_url).includes('linkedin.com/in/') ? c.source_url : '');
+    const phone = c.phone_cell || c.phone_work || c.phone_home;
+    const lines = [
+      fullName,
+      titleAt,
+      c.email,
+      phone,
+      linkedin,
+    ].filter(Boolean);
+    const text = lines.join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      toast({ title: 'Copied', description: `Contact pack for ${fullName}` });
+    } catch {
+      toast({ title: 'Copy failed', description: 'Browser blocked clipboard access.', variant: 'destructive' });
+    }
+  };
+
   const openEditContact = (c: any) => {
     setEditingContact(c);
     setEditingContactDraft({
@@ -660,7 +811,12 @@ const DesktopMarketingNewJobs: React.FC = () => {
 
 
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (opts: { force?: boolean } = {}) => {
+    // Freshness short-circuit: if we just loaded and nobody asked us to
+    // bypass the cache, skip. Read via ref so the callback stays stable.
+    if (!opts.force && lastUpdatedRef.current && Date.now() - lastUpdatedRef.current < FRESHNESS_MS) {
+      return;
+    }
     setLoading(true);
     setLoadError(null);
     try {
@@ -714,6 +870,10 @@ const DesktopMarketingNewJobs: React.FC = () => {
       const allFailed = results.every(r => r.status === 'rejected' || (r.status === 'fulfilled' && r.value.error));
       if (allFailed) {
         setLoadError('Unable to connect to the database. Please check your connection and try again.');
+      } else {
+        const t = Date.now();
+        lastUpdatedRef.current = t;
+        setLastUpdatedAt(t);
       }
     } catch (err: any) {
       console.error('Critical error loading data:', err);
@@ -1057,6 +1217,20 @@ const DesktopMarketingNewJobs: React.FC = () => {
 
   // "Has data / No data" filter helper. Empty set or both options
   // selected means "no filter"; one option means restrict to that side.
+  /** Map a contact's last_outreach_at to a bucket key the filter uses. */
+  const outreachAgeBucket = (iso: string | null | undefined): string => {
+    if (!iso) return 'Never';
+    const days = (Date.now() - new Date(iso).getTime()) / 86_400_000;
+    if (!Number.isFinite(days) || days < 0) return 'Never';
+    if (days <= 3)  return '0-3 days';
+    if (days <= 7)  return '4-7 days';
+    if (days <= 14) return '8-14 days';
+    if (days <= 30) return '15-30 days';
+    return '30+ days';
+  };
+  const OUTREACH_AGE_OPTIONS = ['Never', '0-3 days', '4-7 days', '8-14 days', '15-30 days', '30+ days'];
+  const OUTREACH_STATUS_OPTIONS = ['Never', 'Cold', 'Replied', 'Booked', 'Dead'];
+
   const presencePasses = (val: any, filter: Set<string>): boolean => {
     if (filter.size === 0 || filter.size === 2) return true;
     const has = !!(val && String(val).trim());
@@ -1233,6 +1407,19 @@ const DesktopMarketingNewJobs: React.FC = () => {
       if (!presencePasses(c.phone_cell, filterPhoneCellPresence)) return false;
       if (!presencePasses(getLinkedin(c), filterLinkedInPresence)) return false;
       if (filterConfidence.size > 0 && !filterConfidence.has(String(c.confidence_score ?? 0))) return false;
+      // Outreach status — 'Never' is the synthetic key for null status.
+      if (filterOutreachStatus.size > 0) {
+        const statusKey = c.outreach_status || 'Never';
+        if (!filterOutreachStatus.has(statusKey)) return false;
+      }
+      if (filterOutreachAge.size > 0) {
+        if (!filterOutreachAge.has(outreachAgeBucket(c.last_outreach_at))) return false;
+      }
+      // "What's new since last visit" — applies if the toggle is on.
+      if (newSinceLastVisit) {
+        const t = c.created_at ? new Date(c.created_at).getTime() : 0;
+        if (!t || t <= previousVisitRef.current) return false;
+      }
       // "Any phone" cross-column check: filter option labels map to
       // presence semantics — Has data = any of the 3 phones populated,
       // No data = all 3 empty.
@@ -1281,6 +1468,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
       filterContactSource, filterDateAdded, filterEmailPresence,
       filterPhoneWorkPresence, filterPhoneHomePresence, filterPhoneCellPresence,
       filterLinkedInPresence, filterAnyPhonePresence, filterConfidence,
+      filterOutreachStatus, filterOutreachAge, newSinceLastVisit,
       contactPriorityByCompany]);
 
   // Options shown in the Confidence column's filter popover. Stringified
@@ -2082,6 +2270,89 @@ const DesktopMarketingNewJobs: React.FC = () => {
           {/* CONTACTS TAB */}
           <TabsContent value="contacts" className="flex-1 mt-0">
             <div className="bg-white rounded-xl border shadow-sm">
+              {/* Recruiter quick-bar: freshness indicator, "new since last
+                  visit" toggle, saved views dropdown. Only shown on
+                  Contacts since this is where the daily workflow lives. */}
+              <div className="px-4 py-2 border-b bg-gray-50/50 flex items-center gap-3 flex-wrap text-xs">
+                <span className="text-gray-500">
+                  {lastUpdatedAt
+                    ? `Updated ${formatAgo(Date.now() - lastUpdatedAt)}`
+                    : 'Loading…'}
+                </span>
+                <button
+                  onClick={() => loadData({ force: true })}
+                  disabled={loading}
+                  className="text-[#911406] hover:underline disabled:opacity-50 inline-flex items-center gap-1"
+                  title="Refetch jobs / companies / contacts now"
+                >
+                  <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+                  Refresh
+                </button>
+                <span className="text-gray-300">·</span>
+                {(() => {
+                  const newCount = contacts.filter(c => {
+                    const t = c.created_at ? new Date(c.created_at).getTime() : 0;
+                    return t && t > previousVisitRef.current;
+                  }).length;
+                  if (previousVisitRef.current === 0) return (
+                    <span className="text-gray-400 italic">First visit — everything is new.</span>
+                  );
+                  return (
+                    <button
+                      onClick={() => setNewSinceLastVisit(v => !v)}
+                      className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-xs ${
+                        newSinceLastVisit
+                          ? 'bg-emerald-100 border-emerald-300 text-emerald-800'
+                          : 'bg-white border-gray-200 text-gray-600 hover:bg-emerald-50 hover:border-emerald-200'
+                      }`}
+                      title={`${newCount} contact${newCount === 1 ? '' : 's'} added since your last visit`}
+                    >
+                      <Sparkles className="w-3 h-3" />
+                      {newSinceLastVisit ? `Showing ${newCount} new` : `New since last visit (${newCount})`}
+                    </button>
+                  );
+                })()}
+                <span className="text-gray-300">·</span>
+                <Popover open={savedViewsOpen} onOpenChange={setSavedViewsOpen}>
+                  <PopoverTrigger asChild>
+                    <button className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-200 bg-white text-gray-700 hover:border-gray-300">
+                      <Bookmark className="w-3 h-3" />
+                      {activeSavedViewId
+                        ? (savedViews.find(v => v.id === activeSavedViewId)?.name || 'Saved view')
+                        : `Saved views (${savedViews.length})`}
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="start" className="w-72 p-0">
+                    <div className="px-3 py-2 border-b bg-gray-50 flex items-center justify-between">
+                      <span className="text-[11px] uppercase tracking-wider text-gray-500 font-semibold">Saved views</span>
+                      <button onClick={saveCurrentView} className="text-[11px] text-[#911406] hover:underline inline-flex items-center gap-0.5">
+                        <BookmarkPlus className="w-3 h-3" />
+                        Save current
+                      </button>
+                    </div>
+                    <div className="max-h-72 overflow-y-auto">
+                      {savedViews.length === 0 && (
+                        <p className="text-xs text-gray-500 italic px-3 py-4">
+                          No saved views yet. Set up your filters and click "Save current" to keep this combo around.
+                        </p>
+                      )}
+                      {savedViews.map(v => (
+                        <div key={v.id} className={`flex items-center justify-between px-3 py-2 border-t hover:bg-gray-50 ${activeSavedViewId === v.id ? 'bg-amber-50/40' : ''}`}>
+                          <button onClick={() => applySavedView(v)} className="flex-1 text-left text-sm text-gray-800 truncate" title={v.name}>
+                            {v.name}
+                          </button>
+                          <button
+                            onClick={() => deleteSavedView(v.id)}
+                            className="text-[10px] text-red-500 hover:text-red-700 hover:underline ml-2"
+                          >
+                            delete
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              </div>
               {/* Toolbar */}
               <div className="p-4 border-b flex items-center gap-3 flex-wrap">
                 <div className="relative flex-1 min-w-[200px]">
@@ -2414,6 +2685,32 @@ const DesktopMarketingNewJobs: React.FC = () => {
                       <MultiSelectColumnHeader<ContactSortField> field="created_at" label="Date / Time Added" filterValues={filterDateAdded} filterOptions={uniqueContactDates} onFilterChange={setFilterDateAdded} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by date added" />
                       <MultiSelectColumnHeader<ContactSortField> field="linkedin_url" label="LinkedIn URL" filterValues={filterLinkedInPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterLinkedInPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by LinkedIn presence" />
                       <MultiSelectColumnHeader<ContactSortField> field="confidence_score" label="Confidence" filterValues={filterConfidence} filterOptions={CONFIDENCE_OPTIONS} onFilterChange={setFilterConfidence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by confidence score" />
+                      {/* Outreach status — multi-select bucket filter. Not
+                          sortable (would need a ContactSortField); recruiters
+                          filter on this far more than they sort by it. */}
+                      <MultiSelectColumnHeader<ContactSortField>
+                        field={'created_at' as ContactSortField}
+                        label="Outreach"
+                        filterValues={filterOutreachStatus}
+                        filterOptions={OUTREACH_STATUS_OPTIONS}
+                        onFilterChange={setFilterOutreachStatus}
+                        sortField={contactSortField}
+                        sortDir={contactSortDir}
+                        onSort={() => {/* not sortable */}}
+                        filterPanelLabel="Filter by outreach status"
+                      />
+                      {/* Last touch — bucketed days-since filter. */}
+                      <MultiSelectColumnHeader<ContactSortField>
+                        field={'created_at' as ContactSortField}
+                        label="Last Touch"
+                        filterValues={filterOutreachAge}
+                        filterOptions={OUTREACH_AGE_OPTIONS}
+                        onFilterChange={setFilterOutreachAge}
+                        sortField={contactSortField}
+                        sortDir={contactSortDir}
+                        onSort={() => {/* not sortable */}}
+                        filterPanelLabel="Filter by days since last outreach"
+                      />
                       <th className="text-center px-3 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider w-[120px]">
                         <input
                           type="checkbox"
@@ -2452,9 +2749,9 @@ const DesktopMarketingNewJobs: React.FC = () => {
                   </thead>
                   <tbody>
                     {loading ? (
-                      <tr><td colSpan={14} className="text-center py-12"><Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400" /></td></tr>
+                      <tr><td colSpan={16} className="text-center py-12"><Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400" /></td></tr>
                     ) : filteredContacts.length === 0 ? (
-                      <tr><td colSpan={14} className="text-center py-12 text-gray-500">No contacts found. Run the tracker or import data to add contacts.</td></tr>
+                      <tr><td colSpan={16} className="text-center py-12 text-gray-500">No contacts found. Run the tracker or import data to add contacts.</td></tr>
                     ) : filteredContacts.map((c, idx) => {
                       // Derive LinkedIn URL: prefer linkedin_url field, then check source_url for LinkedIn links
                       const linkedinUrl = c.linkedin_url || 
@@ -2593,12 +2890,52 @@ const DesktopMarketingNewJobs: React.FC = () => {
                               );
                             })()}
                           </td>
-                          {/* Per-row Edit + Enrich buttons + selection
-                              checkbox. stopPropagation so interacting
-                              with any of them doesn't toggle the detail
-                              panel via the row's onClick. */}
+                          {/* Outreach status — popover-based editor */}
+                          <td className="px-3 py-2.5 border-r border-gray-100 text-center" onClick={e => e.stopPropagation()}>
+                            <OutreachStatusCell
+                              contactId={c.id}
+                              status={(c.outreach_status as OutreachStatus) ?? null}
+                              lastOutreachAt={c.last_outreach_at}
+                              onUpdated={(status, ts) => {
+                                setContacts(prev => prev.map(row => row.id === c.id ? { ...row, outreach_status: status, last_outreach_at: ts } : row));
+                              }}
+                            />
+                          </td>
+                          {/* Last touch — relative time, ages out red as days pass */}
+                          <td className="px-3 py-2.5 border-r border-gray-100 text-xs tabular-nums" onClick={e => e.stopPropagation()}>
+                            {c.last_outreach_at ? (
+                              (() => {
+                                const days = Math.floor((Date.now() - new Date(c.last_outreach_at).getTime()) / 86_400_000);
+                                const tone =
+                                  days <= 3  ? 'text-emerald-700' :
+                                  days <= 7  ? 'text-emerald-600' :
+                                  days <= 14 ? 'text-amber-600' :
+                                  days <= 30 ? 'text-orange-600' :
+                                               'text-red-600';
+                                return (
+                                  <span className={`${tone} font-medium`} title={new Date(c.last_outreach_at).toLocaleString()}>
+                                    {days === 0 ? 'today' : `${days}d ago`}
+                                  </span>
+                                );
+                              })()
+                            ) : (
+                              <span className="text-gray-300 italic">never</span>
+                            )}
+                          </td>
+                          {/* Per-row Copy + Edit + Enrich buttons + selection
+                              checkbox. stopPropagation so interacting with
+                              any of them doesn't toggle the detail panel
+                              via the row's onClick. */}
                           <td className="px-3 py-2.5 text-center" onClick={e => e.stopPropagation()}>
                             <div className="flex items-center justify-center gap-1.5">
+                              <button
+                                onClick={() => copyContactPack(c)}
+                                className="p-1 rounded hover:bg-amber-50 text-amber-700 transition-colors"
+                                title="Copy contact pack (name, title, company, email, phone, LinkedIn)"
+                                aria-label="Copy contact pack"
+                              >
+                                <Copy className="w-3.5 h-3.5" />
+                              </button>
                               <button
                                 onClick={() => openEditContact(c)}
                                 className="p-1 rounded hover:bg-blue-50 text-blue-600 transition-colors"
