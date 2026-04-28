@@ -176,6 +176,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
   // values via .has() checks below. Key names mirror Tracker columns:
   // company_type, city, state, source, created_at (plus job_title /
   // job_type / company_name for overlap).
+  const [filterPriorityBucket, setFilterPriorityBucket] = useState<Set<string>>(new Set());
   const [filterCompanyType, setFilterCompanyType] = useState<Set<string>>(new Set());
   const [filterJobType, setFilterJobType] = useState<Set<string>>(new Set());
   const [filterJobTitle, setFilterJobTitle] = useState<Set<string>>(new Set());
@@ -276,6 +277,24 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
     return Array.from(set).sort();
   }, [enrichedJobs]);
 
+  // Priority bucket key for the filter dropdown. Matches the Tracker's
+  // helper: "90-100" for the top, "X0-X9" for the rest, '' for nulls.
+  const priorityBucketOf = (score: unknown): string => {
+    if (typeof score !== 'number' || !Number.isFinite(score)) return '';
+    if (score >= 90) return '90-100';
+    const lo = Math.max(0, Math.floor(score / 10) * 10);
+    return `${lo}-${lo + 9}`;
+  };
+
+  const uniquePriorityBuckets = useMemo(() => {
+    const set = new Set<string>();
+    enrichedJobs.forEach(j => {
+      const k = priorityBucketOf(j._priorityScore);
+      if (k) set.add(k);
+    });
+    return Array.from(set).sort((a, b) => parseInt(b.split('-')[0], 10) - parseInt(a.split('-')[0], 10));
+  }, [enrichedJobs]);
+
   const uniqueCompanyTypes = useMemo(() => {
     const set = new Set<string>();
     enrichedJobs.forEach(j => { if (j._companyType) set.add(j._companyType); });
@@ -339,6 +358,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
           sourceLabel(j).toLowerCase().includes(s);
         if (!matchesSearch) return false;
       }
+      if (filterPriorityBucket.size > 0 && !filterPriorityBucket.has(priorityBucketOf(j._priorityScore))) return false;
       if (filterCompanyType.size > 0 && !filterCompanyType.has(j._companyType || '')) return false;
       if (filterJobTitle.size > 0 && !filterJobTitle.has(j.job_title || '')) return false;
       if (filterJobType.size > 0 && !filterJobType.has(j._matchedJobType || '')) return false;
@@ -348,7 +368,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       if (filterSource.size > 0 && !filterSource.has(sourceLabel(j))) return false;
       return true;
     });
-  }, [baseJobs, searchTerm, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource, filterHighPriority, showBlocked]);
+  }, [baseJobs, searchTerm, filterPriorityBucket, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource, filterHighPriority, showBlocked]);
 
 
   // Sort
@@ -776,9 +796,10 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
 
   // Active filter count — counts each column that has at least one value
   // selected (not the total number of selected values across columns).
-  const activeFilterCount = [filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource].filter(s => s.size > 0).length;
+  const activeFilterCount = [filterPriorityBucket, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource].filter(s => s.size > 0).length;
 
   const clearAllFilters = () => {
+    setFilterPriorityBucket(new Set());
     setFilterCompanyType(new Set());
     setFilterJobType(new Set());
     setFilterJobTitle(new Set());
@@ -1044,12 +1065,17 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                   score added as the leftmost data column.
                   Priority | Job Title | Job Type | Company | Company Type | City | State | Source | Date Found.
                   High-priority star is rendered inline on the Job Title cell. */}
-              <th className="text-center px-2 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[80px]">
-                <button onClick={() => handleSort('priority_score')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
-                  Priority
-                  <SortIcon field="priority_score" />
-                </button>
-              </th>
+              <MultiSelectColumnHeader<SortField>
+                field="priority_score"
+                label="Priority"
+                filterValues={filterPriorityBucket}
+                filterOptions={uniquePriorityBuckets}
+                onFilterChange={setFilterPriorityBucket}
+                sortField={sortField}
+                sortDir={sortDir}
+                onSort={handleSort}
+                filterPanelLabel="Filter by priority bucket"
+              />
               <MultiSelectColumnHeader<SortField> field="job_title" label="Job Title" filterValues={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <MultiSelectColumnHeader<SortField> field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={uniqueJobTypes} onFilterChange={setFilterJobType} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <MultiSelectColumnHeader<SortField> field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} sortField={sortField} sortDir={sortDir} onSort={handleSort} />

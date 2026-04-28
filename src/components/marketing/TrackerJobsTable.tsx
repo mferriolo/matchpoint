@@ -90,9 +90,9 @@ type SortKey =
   | 'created_at';
 type SortDir = 'asc' | 'desc';
 
-type FilterKind = 'text' | 'select-job-type' | 'select-company-type' | 'select-run' | 'none';
+type FilterKind = 'text' | 'select-job-type' | 'select-company-type' | 'select-run' | 'select-priority-bucket' | 'none';
 const COLUMNS: Array<{ key: SortKey; label: string; className?: string; filter: FilterKind }> = [
-  { key: 'priority_score', label: 'Priority',  className: 'w-[6%]',  filter: 'none' },
+  { key: 'priority_score', label: 'Priority',  className: 'w-[6%]',  filter: 'select-priority-bucket' },
   { key: 'job_title',    label: 'Job Title',    className: 'w-[16%]', filter: 'text' },
   { key: 'job_type',     label: 'Job Type',     className: 'w-[10%]', filter: 'select-job-type' },
   { key: 'company_name', label: 'Company',      className: 'w-[13%]', filter: 'text' },
@@ -103,6 +103,18 @@ const COLUMNS: Array<{ key: SortKey; label: string; className?: string; filter: 
   { key: 'date_posted',  label: 'Date Posted',  className: 'w-[11%]', filter: 'none' },
   { key: 'created_at',   label: 'Date Found',   className: 'w-[13%]', filter: 'select-run' },
 ];
+
+/**
+ * Bucket a 0–100 priority score into a 10-point band keyed off the tens
+ * digit. Returns '' for null/undefined so unfiltered rows don't get
+ * lumped into the 0–9 bucket. Top bucket is "90–100" (inclusive of 100).
+ */
+function priorityBucketKey(score: unknown): string {
+  if (typeof score !== 'number' || !Number.isFinite(score)) return '';
+  if (score >= 90) return '90-100';
+  const lo = Math.max(0, Math.floor(score / 10) * 10);
+  return `${lo}-${lo + 9}`;
+}
 
 // Cleaner label from the tracker's internal source tags.
 export function sourceLabel(j: TrackerJobsTableRow): string {
@@ -243,6 +255,31 @@ export function TrackerJobsTable({
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [jobs, matchedTypes]);
 
+  // Defined here (above the useMemo that needs it) to avoid the TDZ
+  // since useMemo's compute runs synchronously during render.
+  const effectivePriorityForRow = (j: TrackerJobsTableRow): number => {
+    if (typeof j.priority_score === 'number') return j.priority_score;
+    return priorityScore({
+      datePosted: j.date_posted,
+      lastSeenAt: (j as any).last_seen_at,
+      createdAt: j.created_at,
+      jobTitle: j.job_title,
+      companyType: j._companyType,
+    }).total;
+  };
+
+  // Buckets actually present in the current dataset, sorted hottest-first
+  // so the dropdown shows 90-100 above 80-89.
+  const priorityBucketOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const j of jobs) {
+      const k = priorityBucketKey(effectivePriorityForRow(j));
+      if (k) set.add(k);
+    }
+    return Array.from(set).sort((a, b) => parseInt(b.split('-')[0], 10) - parseInt(a.split('-')[0], 10));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobs]);
+
   const companyTypeOptions = useMemo(() => {
     const set = new Set<string>();
     for (const j of jobs) {
@@ -294,6 +331,7 @@ export function TrackerJobsTable({
           if (col.filter === 'select-job-type') rowVal = matchedTypes.get(j.id) || '';
           else if (col.filter === 'select-company-type') rowVal = j._companyType || '';
           else if (col.filter === 'select-run') rowVal = String(j.tracker_run_id || '');
+          else if (col.filter === 'select-priority-bucket') rowVal = priorityBucketKey(effectivePriorityForRow(j));
           if (!selected.includes(rowVal)) return false;
         }
       }
@@ -306,16 +344,7 @@ export function TrackerJobsTable({
   // compute so freshly-inserted rows (where the SQL trigger hasn't fired
   // yet, e.g. during a Tracker run that hasn't called recompute) still
   // sort sensibly instead of bottoming out at null.
-  const effectivePriority = (j: TrackerJobsTableRow): number => {
-    if (typeof j.priority_score === 'number') return j.priority_score;
-    return priorityScore({
-      datePosted: j.date_posted,
-      lastSeenAt: (j as any).last_seen_at,
-      createdAt: j.created_at,
-      jobTitle: j.job_title,
-      companyType: j._companyType,
-    }).total;
-  };
+  const effectivePriority = effectivePriorityForRow;
 
   const sorted = useMemo(() => {
     const arr = [...filtered];
@@ -425,6 +454,14 @@ export function TrackerJobsTable({
                       value={getText(col.key)}
                       onChange={e => setTextFilter(col.key, e.target.value)}
                       className="h-7 text-xs"
+                    />
+                  )}
+                  {col.filter === 'select-priority-bucket' && (
+                    <MultiSelectFilter
+                      label={col.label}
+                      options={priorityBucketOptions.map(o => ({ value: o, label: o }))}
+                      values={getMulti(col.key)}
+                      onChange={next => setMultiFilter(col.key, next)}
                     />
                   )}
                   {col.filter === 'select-job-type' && (
