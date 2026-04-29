@@ -118,6 +118,9 @@ const DesktopMarketingNewJobs: React.FC = () => {
     previousVisitRef.current = consumeContactsLastVisit();
   }
   const [newSinceLastVisit, setNewSinceLastVisit] = useState(false);
+  // Snoozed contacts default to hidden so the Contacts list reflects who's
+  // actually actionable today; toggle to bring them back into view.
+  const [showSnoozed, setShowSnoozed] = useState(false);
 
   // ── Caching / freshness ─────────────────────────────────────────────
   // loadData skips refetches within FRESHNESS_MS unless force=true. A
@@ -321,6 +324,100 @@ const DesktopMarketingNewJobs: React.FC = () => {
   };
 
   const handleEnrichSelectedContacts = () => enrichContactsById(Array.from(selectedContactIds));
+
+  // ── Bulk outreach actions ───────────────────────────────────────────
+  // Each handler chunks ids ~500/req for the same PostgREST URL-length
+  // reason as the delete path above. Optimistically updates the local
+  // contacts list so the UI reflects the change immediately without
+  // waiting on a full reload — loadData() still runs to reconcile.
+  const updateContactsBulk = async (
+    ids: string[],
+    patch: Record<string, any>,
+    successTitle: string,
+  ) => {
+    if (ids.length === 0) return;
+    try {
+      const batchSize = 500;
+      for (let i = 0; i < ids.length; i += batchSize) {
+        const batch = ids.slice(i, i + batchSize);
+        const { error } = await supabase
+          .from('marketing_contacts')
+          .update({ ...patch, updated_at: new Date().toISOString() })
+          .in('id', batch);
+        if (error) throw error;
+      }
+      // Optimistic local merge.
+      setContacts(prev => prev.map(c => (ids.includes(c.id) ? { ...c, ...patch } : c)));
+      toast({ title: successTitle });
+      clearContactSelection();
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Update failed', description: err.message || String(err), variant: 'destructive' });
+    }
+  };
+
+  /** Stamp last_outreach_at=now on all selected. Sets outreach_status to 'Cold'
+   *  for rows that are currently NULL, but does NOT overwrite an existing
+   *  status (so a Booked contact stays Booked). */
+  const handleBulkMarkContacted = async () => {
+    const ids = Array.from(selectedContactIds);
+    if (ids.length === 0) return;
+    const now = new Date().toISOString();
+    // Two separate updates: first the timestamp on everyone, then the
+    // status on rows that need a default. Keeps the SQL simple and avoids
+    // a CASE expression / RPC.
+    try {
+      const batchSize = 500;
+      for (let i = 0; i < ids.length; i += batchSize) {
+        const batch = ids.slice(i, i + batchSize);
+        const { error } = await supabase
+          .from('marketing_contacts')
+          .update({ last_outreach_at: now, updated_at: now })
+          .in('id', batch);
+        if (error) throw error;
+      }
+      const needsDefault = contacts.filter(c => ids.includes(c.id) && !c.outreach_status).map(c => c.id);
+      for (let i = 0; i < needsDefault.length; i += batchSize) {
+        const batch = needsDefault.slice(i, i + batchSize);
+        if (batch.length === 0) continue;
+        const { error } = await supabase
+          .from('marketing_contacts')
+          .update({ outreach_status: 'Cold', updated_at: now })
+          .in('id', batch);
+        if (error) throw error;
+      }
+      setContacts(prev => prev.map(c => {
+        if (!ids.includes(c.id)) return c;
+        return { ...c, last_outreach_at: now, outreach_status: c.outreach_status || 'Cold' };
+      }));
+      toast({ title: `Marked ${ids.length} contact${ids.length === 1 ? '' : 's'} contacted` });
+      clearContactSelection();
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Mark contacted failed', description: err.message || String(err), variant: 'destructive' });
+    }
+  };
+
+  const handleBulkSetStatus = async (status: OutreachStatus) => {
+    const ids = Array.from(selectedContactIds);
+    if (ids.length === 0) return;
+    if (status === null) {
+      await updateContactsBulk(ids, { outreach_status: null, last_outreach_at: null }, `Cleared status on ${ids.length}`);
+    } else {
+      await updateContactsBulk(ids, { outreach_status: status, last_outreach_at: new Date().toISOString() }, `Set ${ids.length} to ${status}`);
+    }
+  };
+
+  const handleBulkSnooze = async (days: number | null) => {
+    const ids = Array.from(selectedContactIds);
+    if (ids.length === 0) return;
+    if (days === null) {
+      await updateContactsBulk(ids, { snoozed_until: null }, `Unsnoozed ${ids.length}`);
+    } else {
+      const until = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+      await updateContactsBulk(ids, { snoozed_until: until }, `Snoozed ${ids.length} for ${days}d`);
+    }
+  };
 
   const handleDeleteSelectedContacts = async () => {
     if (selectedContactIds.size === 0) return;
@@ -1441,6 +1538,12 @@ const DesktopMarketingNewJobs: React.FC = () => {
         const t = c.created_at ? new Date(c.created_at).getTime() : 0;
         if (!t || t <= previousVisitRef.current) return false;
       }
+      // Hide actively snoozed contacts unless the toggle is on. Past
+      // snooze timestamps are treated as expired (i.e. visible again).
+      if (!showSnoozed && c.snoozed_until) {
+        const until = new Date(c.snoozed_until).getTime();
+        if (Number.isFinite(until) && until > Date.now()) return false;
+      }
       // "Any phone" cross-column check: filter option labels map to
       // presence semantics — Has data = any of the 3 phones populated,
       // No data = all 3 empty.
@@ -1489,7 +1592,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
       filterContactSource, filterDateAdded, filterEmailPresence,
       filterPhoneWorkPresence, filterPhoneHomePresence, filterPhoneCellPresence,
       filterLinkedInPresence, filterAnyPhonePresence, filterConfidence,
-      filterOutreachStatus, filterOutreachAge, newSinceLastVisit,
+      filterOutreachStatus, filterOutreachAge, newSinceLastVisit, showSnoozed,
       contactPriorityByCompany]);
 
   // Options shown in the Confidence column's filter popover. Stringified
@@ -2334,6 +2437,29 @@ const DesktopMarketingNewJobs: React.FC = () => {
                   );
                 })()}
                 <span className="text-gray-300">·</span>
+                {(() => {
+                  const snoozedCount = contacts.filter(c => {
+                    if (!c.snoozed_until) return false;
+                    const t = new Date(c.snoozed_until).getTime();
+                    return Number.isFinite(t) && t > Date.now();
+                  }).length;
+                  if (snoozedCount === 0 && !showSnoozed) return null;
+                  return (
+                    <button
+                      onClick={() => setShowSnoozed(v => !v)}
+                      className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-xs ${
+                        showSnoozed
+                          ? 'bg-amber-100 border-amber-300 text-amber-800'
+                          : 'bg-white border-gray-200 text-gray-600 hover:bg-amber-50 hover:border-amber-200'
+                      }`}
+                      title={`${snoozedCount} contact${snoozedCount === 1 ? '' : 's'} currently snoozed`}
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      {showSnoozed ? `Showing snoozed (${snoozedCount})` : `Hidden: snoozed (${snoozedCount})`}
+                    </button>
+                  );
+                })()}
+                <span className="text-gray-300">·</span>
                 <Popover open={savedViewsOpen} onOpenChange={setSavedViewsOpen}>
                   <PopoverTrigger asChild>
                     <button className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-200 bg-white text-gray-700 hover:border-gray-300">
@@ -2489,6 +2615,84 @@ const DesktopMarketingNewJobs: React.FC = () => {
                       <Zap className="w-4 h-4 mr-1.5" />
                       Enrich {selectedContactIds.size}
                     </Button>
+                    <Button
+                      onClick={handleBulkMarkContacted}
+                      className="bg-blue-700 hover:bg-blue-800 text-white"
+                      title="Stamp last_outreach_at = now for all selected (sets status to Cold for any that have no status yet)"
+                    >
+                      <Phone className="w-4 h-4 mr-1.5" />
+                      Mark contacted
+                    </Button>
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          className="text-purple-700 border-purple-300 hover:bg-purple-50"
+                          title="Set outreach status for all selected contacts"
+                        >
+                          <CheckCircle className="w-4 h-4 mr-1.5" />
+                          Set status
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent align="end" className="w-52 p-0">
+                        <div className="px-3 py-2 border-b bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500 font-semibold">
+                          Set status on {selectedContactIds.size}
+                        </div>
+                        {(['Cold', 'Replied', 'Booked', 'Dead'] as const).map(opt => (
+                          <button
+                            key={opt}
+                            onClick={() => handleBulkSetStatus(opt)}
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
+                          >
+                            {opt}
+                          </button>
+                        ))}
+                        <button
+                          onClick={() => handleBulkSetStatus(null)}
+                          className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 border-t"
+                        >
+                          Clear status & timestamp
+                        </button>
+                      </PopoverContent>
+                    </Popover>
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          className="text-amber-700 border-amber-300 hover:bg-amber-50"
+                          title="Hide selected contacts from the default view until a future date"
+                        >
+                          <RotateCcw className="w-4 h-4 mr-1.5" />
+                          Snooze
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent align="end" className="w-52 p-0">
+                        <div className="px-3 py-2 border-b bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500 font-semibold">
+                          Snooze {selectedContactIds.size}
+                        </div>
+                        {[
+                          { label: '1 day',   days: 1 },
+                          { label: '3 days',  days: 3 },
+                          { label: '1 week',  days: 7 },
+                          { label: '2 weeks', days: 14 },
+                          { label: '1 month', days: 30 },
+                        ].map(opt => (
+                          <button
+                            key={opt.days}
+                            onClick={() => handleBulkSnooze(opt.days)}
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                        <button
+                          onClick={() => handleBulkSnooze(null)}
+                          className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 border-t"
+                        >
+                          Unsnooze
+                        </button>
+                      </PopoverContent>
+                    </Popover>
                     <Button
                       variant="outline"
                       onClick={() => handleExportContacts('selected')}
