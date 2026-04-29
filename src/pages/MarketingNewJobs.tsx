@@ -31,8 +31,8 @@ import MobileMarketing from '@/components/mobile/MobileMarketing';
 import JobPriorityBadge from '@/components/marketing/JobPriorityBadge';
 import { priorityScore } from '@/lib/jobPriorityScore';
 import OutreachStatusCell, { OutreachStatus } from '@/components/marketing/OutreachStatusCell';
-import { loadSavedViews, writeSavedViews, consumeContactsLastVisit, SavedContactsView } from '@/lib/marketingPrefs';
-import { Sparkles, BookmarkPlus, Bookmark } from 'lucide-react';
+import { loadSavedViews, writeSavedViews, consumeContactsLastVisit, SavedContactsView, loadVisibleCols, writeVisibleCols, DEFAULT_VISIBLE_COLS, ContactColumnKey } from '@/lib/marketingPrefs';
+import { Sparkles, BookmarkPlus, Bookmark, Columns3, Sun, Clock, MessageSquareReply } from 'lucide-react';
 
 /** Compact "12s ago" / "3m ago" / "1h ago" formatter for the freshness indicator. */
 function formatAgo(ms: number): string {
@@ -138,6 +138,56 @@ const DesktopMarketingNewJobs: React.FC = () => {
   const [savedViews, setSavedViews] = useState<SavedContactsView[]>(() => loadSavedViews());
   const [savedViewsOpen, setSavedViewsOpen] = useState(false);
   const [activeSavedViewId, setActiveSavedViewId] = useState<string | null>(null);
+
+  // ── Column visibility (Contacts tab) ────────────────────────────────
+  // Default set hides 6 columns the recruiter rarely scans (Phone Home/Cell,
+  // Source, Date Added, LinkedIn, Confidence) so the table fits without
+  // horizontal scroll. Toggleable via the "Columns" button; persisted.
+  const [visibleCols, setVisibleCols] = useState<Set<ContactColumnKey>>(() => new Set(loadVisibleCols()));
+  const [columnPickerOpen, setColumnPickerOpen] = useState(false);
+  const isColVisible = (k: ContactColumnKey) => visibleCols.has(k);
+  const toggleColVisible = (k: ContactColumnKey) => {
+    setVisibleCols(prev => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k); else next.add(k);
+      writeVisibleCols(Array.from(next));
+      return next;
+    });
+  };
+  const resetColsToDefault = () => {
+    const next = new Set<ContactColumnKey>(DEFAULT_VISIBLE_COLS);
+    setVisibleCols(next);
+    writeVisibleCols(Array.from(next));
+  };
+
+  // ── Today presets ───────────────────────────────────────────────────
+  // Three one-click filters that answer "who should I call today?". Each
+  // sets the outreach status + age filters and clears anything else that
+  // would shrink the result. Identified by the `activeTodayPreset` so the
+  // card can show as selected.
+  type TodayPreset = 'never' | 'cold-7' | 'replied-pending';
+  const [activeTodayPreset, setActiveTodayPreset] = useState<TodayPreset | null>(null);
+  const applyTodayPreset = (preset: TodayPreset) => {
+    if (activeTodayPreset === preset) {
+      // Toggle off: clear the outreach filters.
+      setFilterOutreachStatus(new Set());
+      setFilterOutreachAge(new Set());
+      setActiveTodayPreset(null);
+      return;
+    }
+    if (preset === 'never') {
+      setFilterOutreachStatus(new Set(['Never']));
+      setFilterOutreachAge(new Set());
+    } else if (preset === 'cold-7') {
+      setFilterOutreachStatus(new Set(['Cold']));
+      setFilterOutreachAge(new Set(['8-14 days', '15-30 days', '30+ days']));
+    } else if (preset === 'replied-pending') {
+      setFilterOutreachStatus(new Set(['Replied']));
+      setFilterOutreachAge(new Set());
+    }
+    setActiveTodayPreset(preset);
+    setActiveSavedViewId(null);
+  };
 
   /** Snapshot all Contacts-tab filters into a JSON-safe shape. */
   const captureContactsViewFilters = (): Record<string, string[]> => ({
@@ -2535,6 +2585,56 @@ const DesktopMarketingNewJobs: React.FC = () => {
                   <Download className="w-4 h-4 mr-2" />
                   Export {selectedContactIds.size > 0 ? `${selectedContactIds.size} Selected` : `${filteredContacts.length} Visible`}
                 </Button>
+                {/* Column visibility picker. Lets the recruiter hide the
+                    six "secondary" columns (LinkedIn, source, dates, etc.)
+                    so the table fits without horizontal scroll. */}
+                <Popover open={columnPickerOpen} onOpenChange={setColumnPickerOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className="text-gray-700 border-gray-300 hover:bg-gray-50"
+                      title="Show or hide table columns"
+                    >
+                      <Columns3 className="w-4 h-4 mr-2" />
+                      Columns ({visibleCols.size})
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-60 p-0">
+                    <div className="px-3 py-2 border-b bg-gray-50 flex items-center justify-between">
+                      <span className="text-[11px] uppercase tracking-wider text-gray-500 font-semibold">Columns</span>
+                      <button onClick={resetColsToDefault} className="text-[11px] text-[#911406] hover:underline">Reset</button>
+                    </div>
+                    <div className="max-h-72 overflow-y-auto py-1">
+                      {([
+                        { k: 'priority',    label: 'Priority' },
+                        { k: 'first_name',  label: 'First name' },
+                        { k: 'last_name',   label: 'Last name' },
+                        { k: 'company',     label: 'Company' },
+                        { k: 'title',       label: 'Title' },
+                        { k: 'email',       label: 'Email' },
+                        { k: 'phone_work',  label: 'Phone (Work)' },
+                        { k: 'phone_home',  label: 'Phone (Home)' },
+                        { k: 'phone_cell',  label: 'Phone (Cell)' },
+                        { k: 'outreach',    label: 'Outreach status' },
+                        { k: 'last_touch',  label: 'Last touch' },
+                        { k: 'source',      label: 'Source' },
+                        { k: 'created_at',  label: 'Date added' },
+                        { k: 'linkedin',    label: 'LinkedIn' },
+                        { k: 'confidence',  label: 'Confidence' },
+                      ] as { k: ContactColumnKey; label: string }[]).map(({ k, label }) => (
+                        <label key={k} className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={isColVisible(k)}
+                            onChange={() => toggleColVisible(k)}
+                            className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406]/30"
+                          />
+                          {label}
+                        </label>
+                      ))}
+                    </div>
+                  </PopoverContent>
+                </Popover>
                 <Button
                   variant="outline"
                   onClick={() => setShowWipeContactsConfirm(true)}
@@ -2667,6 +2767,164 @@ const DesktopMarketingNewJobs: React.FC = () => {
                 </div>
               )}
 
+              {/* Today view — three preset cards that pre-apply outreach
+                  filters for the highest-frequency recruiter triage:
+                  "never contacted", "cold and stale", "replied but not
+                  yet booked". Cards toggle off if clicked while active. */}
+              {(() => {
+                const presetCounts = {
+                  never: contacts.filter(c => !c.outreach_status && !c.last_outreach_at).length,
+                  coldStale: contacts.filter(c => {
+                    if (c.outreach_status !== 'Cold') return false;
+                    if (!c.last_outreach_at) return true;
+                    const days = (Date.now() - new Date(c.last_outreach_at).getTime()) / 86_400_000;
+                    return days > 7;
+                  }).length,
+                  repliedPending: contacts.filter(c => c.outreach_status === 'Replied').length,
+                };
+                const Card = ({
+                  preset, title, subtitle, count, icon: Icon, accent,
+                }: {
+                  preset: TodayPreset; title: string; subtitle: string; count: number;
+                  icon: React.ComponentType<{ className?: string }>; accent: string;
+                }) => {
+                  const active = activeTodayPreset === preset;
+                  return (
+                    <button
+                      onClick={() => applyTodayPreset(preset)}
+                      className={`flex-1 min-w-[200px] text-left p-3 rounded-lg border transition-colors ${
+                        active
+                          ? `${accent} border-current ring-2 ring-current/20`
+                          : 'bg-white border-gray-200 hover:border-gray-300'
+                      }`}
+                      title={active ? 'Click to clear this preset' : title}
+                    >
+                      <div className="flex items-start gap-2.5">
+                        <div className={`p-1.5 rounded-md ${active ? 'bg-white/40' : 'bg-gray-50'}`}>
+                          <Icon className={`w-4 h-4 ${active ? '' : 'text-gray-500'}`} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-baseline gap-2">
+                            <span className="text-2xl font-bold tabular-nums">{count}</span>
+                            <span className="text-xs font-medium uppercase tracking-wide opacity-80">{title}</span>
+                          </div>
+                          <p className="text-[11px] mt-0.5 opacity-70 truncate">{subtitle}</p>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                };
+                return (
+                  <div className="px-4 py-3 border-b bg-gray-50/50 flex items-center gap-3 flex-wrap">
+                    <span className="text-[11px] uppercase tracking-wider font-semibold text-gray-500 mr-1">Today</span>
+                    <Card
+                      preset="never"
+                      title="Never contacted"
+                      subtitle="Top of the call list"
+                      count={presetCounts.never}
+                      icon={Sun}
+                      accent="bg-blue-50 text-blue-800"
+                    />
+                    <Card
+                      preset="cold-7"
+                      title="Cold &gt; 7 days"
+                      subtitle="Stale outreach — re-engage"
+                      count={presetCounts.coldStale}
+                      icon={Clock}
+                      accent="bg-amber-50 text-amber-800"
+                    />
+                    <Card
+                      preset="replied-pending"
+                      title="Replied, not booked"
+                      subtitle="Move to a meeting"
+                      count={presetCounts.repliedPending}
+                      icon={MessageSquareReply}
+                      accent="bg-purple-50 text-purple-800"
+                    />
+                  </div>
+                );
+              })()}
+
+              {/* Active-filter chip row. Renders one chip per active filter
+                  Set or non-trivial flag, with an inline X to clear just
+                  that filter. Hidden when nothing is filtered so the
+                  toolbar doesn't grow unnecessarily. */}
+              {(() => {
+                type Chip = { key: string; label: string; clear: () => void };
+                const chips: Chip[] = [];
+                const setChip = <T extends string>(setName: string, set: Set<T>, setSetter: (s: Set<T>) => void) => {
+                  if (set.size === 0) return;
+                  chips.push({
+                    key: setName,
+                    label: `${setName}: ${Array.from(set).slice(0, 3).join(', ')}${set.size > 3 ? ` +${set.size - 3}` : ''}`,
+                    clear: () => setSetter(new Set<T>()),
+                  });
+                };
+                setChip('First name', filterFirstName, setFilterFirstName as any);
+                setChip('Last name', filterLastName, setFilterLastName as any);
+                setChip('Company', filterContactCompany, setFilterContactCompany as any);
+                setChip('Title', filterContactTitle, setFilterContactTitle as any);
+                setChip('Source', filterContactSource, setFilterContactSource as any);
+                setChip('Date added', filterDateAdded, setFilterDateAdded as any);
+                setChip('Email', filterEmailPresence, setFilterEmailPresence as any);
+                setChip('Phone (work)', filterPhoneWorkPresence, setFilterPhoneWorkPresence as any);
+                setChip('Phone (home)', filterPhoneHomePresence, setFilterPhoneHomePresence as any);
+                setChip('Phone (cell)', filterPhoneCellPresence, setFilterPhoneCellPresence as any);
+                setChip('Any phone', filterAnyPhonePresence, setFilterAnyPhonePresence as any);
+                setChip('LinkedIn', filterLinkedInPresence, setFilterLinkedInPresence as any);
+                setChip('Confidence', filterConfidence, setFilterConfidence as any);
+                setChip('Outreach', filterOutreachStatus, setFilterOutreachStatus as any);
+                setChip('Last touch', filterOutreachAge, setFilterOutreachAge as any);
+                if (newSinceLastVisit) {
+                  chips.push({ key: 'newSinceLastVisit', label: 'New since last visit', clear: () => setNewSinceLastVisit(false) });
+                }
+                if (searchContacts) {
+                  chips.push({ key: 'search', label: `Search: "${searchContacts}"`, clear: () => setSearchContacts('') });
+                }
+                if (chips.length === 0) return null;
+                return (
+                  <div className="px-4 py-2 border-b bg-white flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] uppercase tracking-wider font-semibold text-gray-400 mr-1">Filters</span>
+                    {chips.map(c => (
+                      <button
+                        key={c.key}
+                        onClick={() => { c.clear(); setActiveTodayPreset(null); }}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-full bg-amber-50 text-amber-900 border border-amber-200 hover:bg-amber-100"
+                        title="Click to clear this filter"
+                      >
+                        {c.label}
+                        <X className="w-3 h-3" />
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => {
+                        setFilterFirstName(new Set());
+                        setFilterLastName(new Set());
+                        setFilterContactCompany(new Set());
+                        setFilterContactTitle(new Set());
+                        setFilterContactSource(new Set());
+                        setFilterDateAdded(new Set());
+                        setFilterEmailPresence(new Set());
+                        setFilterPhoneWorkPresence(new Set());
+                        setFilterPhoneHomePresence(new Set());
+                        setFilterPhoneCellPresence(new Set());
+                        setFilterLinkedInPresence(new Set());
+                        setFilterAnyPhonePresence(new Set());
+                        setFilterConfidence(new Set());
+                        setFilterOutreachStatus(new Set());
+                        setFilterOutreachAge(new Set());
+                        setNewSinceLastVisit(false);
+                        setSearchContacts('');
+                        setActiveTodayPreset(null);
+                      }}
+                      className="ml-1 text-[11px] text-gray-500 hover:text-[#911406] underline"
+                    >
+                      Clear all
+                    </button>
+                  </div>
+                );
+              })()}
+
               {/* Live progress panel — visible while a find-contacts run
                   is in flight. Polls contact_runs every 2s. */}
               {contactRunIsActive && contactRun && (
@@ -2742,27 +3000,29 @@ const DesktopMarketingNewJobs: React.FC = () => {
                       {/* Priority — heat-gradient badge, derived from the
                           hottest open job at the contact's company.
                           Sortable by clicking the header. */}
-                      <th className="text-center px-2 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider w-[80px]">
-                        <button
-                          type="button"
-                          onClick={() => handleContactSort('priority_score')}
-                          className="inline-flex items-center justify-center hover:text-[#911406] transition-colors"
-                          title="Sort by priority"
-                        >
-                          Priority
-                          {contactSortField !== 'priority_score'
-                            ? <ArrowUpDown className="w-3 h-3 ml-1 opacity-40 flex-shrink-0" />
-                            : contactSortDir === 'asc'
-                              ? <ArrowUp className="w-3 h-3 ml-1 text-[#911406] flex-shrink-0" />
-                              : <ArrowDown className="w-3 h-3 ml-1 text-[#911406] flex-shrink-0" />}
-                        </button>
-                      </th>
-                      <MultiSelectColumnHeader<ContactSortField> field="first_name" label="First Name" filterValues={filterFirstName} filterOptions={uniqueContactFirstNames} onFilterChange={setFilterFirstName} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
-                      <MultiSelectColumnHeader<ContactSortField> field="last_name" label="Last Name" filterValues={filterLastName} filterOptions={uniqueContactLastNames} onFilterChange={setFilterLastName} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
-                      <MultiSelectColumnHeader<ContactSortField> field="company_name" label="Company" filterValues={filterContactCompany} filterOptions={uniqueContactCompanies} onFilterChange={setFilterContactCompany} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
-                      <MultiSelectColumnHeader<ContactSortField> field="title" label="Title" filterValues={filterContactTitle} filterOptions={uniqueContactTitles} onFilterChange={setFilterContactTitle} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
-                      <MultiSelectColumnHeader<ContactSortField> field="email" label="Email" filterValues={filterEmailPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterEmailPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Email presence" />
-                      <MultiSelectColumnHeader<ContactSortField>
+                      {isColVisible('priority') && (
+                        <th className="text-center px-2 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider w-[80px]">
+                          <button
+                            type="button"
+                            onClick={() => handleContactSort('priority_score')}
+                            className="inline-flex items-center justify-center hover:text-[#911406] transition-colors"
+                            title="Sort by priority"
+                          >
+                            Priority
+                            {contactSortField !== 'priority_score'
+                              ? <ArrowUpDown className="w-3 h-3 ml-1 opacity-40 flex-shrink-0" />
+                              : contactSortDir === 'asc'
+                                ? <ArrowUp className="w-3 h-3 ml-1 text-[#911406] flex-shrink-0" />
+                                : <ArrowDown className="w-3 h-3 ml-1 text-[#911406] flex-shrink-0" />}
+                          </button>
+                        </th>
+                      )}
+                      {isColVisible('first_name') && <MultiSelectColumnHeader<ContactSortField> field="first_name" label="First Name" filterValues={filterFirstName} filterOptions={uniqueContactFirstNames} onFilterChange={setFilterFirstName} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />}
+                      {isColVisible('last_name') && <MultiSelectColumnHeader<ContactSortField> field="last_name" label="Last Name" filterValues={filterLastName} filterOptions={uniqueContactLastNames} onFilterChange={setFilterLastName} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />}
+                      {isColVisible('company') && <MultiSelectColumnHeader<ContactSortField> field="company_name" label="Company" filterValues={filterContactCompany} filterOptions={uniqueContactCompanies} onFilterChange={setFilterContactCompany} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />}
+                      {isColVisible('title') && <MultiSelectColumnHeader<ContactSortField> field="title" label="Title" filterValues={filterContactTitle} filterOptions={uniqueContactTitles} onFilterChange={setFilterContactTitle} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />}
+                      {isColVisible('email') && <MultiSelectColumnHeader<ContactSortField> field="email" label="Email" filterValues={filterEmailPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterEmailPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Email presence" />}
+                      {isColVisible('phone_work') && <MultiSelectColumnHeader<ContactSortField>
                         field="phone_work"
                         label="Phone (Work)"
                         filterValues={filterPhoneWorkPresence}
@@ -2843,17 +3103,17 @@ const DesktopMarketingNewJobs: React.FC = () => {
                             </PopoverContent>
                           </Popover>
                         }
-                      />
-                      <MultiSelectColumnHeader<ContactSortField> field="phone_home" label="Phone (Home)" filterValues={filterPhoneHomePresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterPhoneHomePresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Home Phone presence" />
-                      <MultiSelectColumnHeader<ContactSortField> field="phone_cell" label="Phone (Cell)" filterValues={filterPhoneCellPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterPhoneCellPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Cell Phone presence" />
-                      <MultiSelectColumnHeader<ContactSortField> field="source" label="Source" filterValues={filterContactSource} filterOptions={uniqueContactSourceValues} onFilterChange={setFilterContactSource} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />
-                      <MultiSelectColumnHeader<ContactSortField> field="created_at" label="Date / Time Added" filterValues={filterDateAdded} filterOptions={uniqueContactDates} onFilterChange={setFilterDateAdded} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by date added" />
-                      <MultiSelectColumnHeader<ContactSortField> field="linkedin_url" label="LinkedIn URL" filterValues={filterLinkedInPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterLinkedInPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by LinkedIn presence" />
-                      <MultiSelectColumnHeader<ContactSortField> field="confidence_score" label="Confidence" filterValues={filterConfidence} filterOptions={CONFIDENCE_OPTIONS} onFilterChange={setFilterConfidence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by confidence score" />
+                      />}
+                      {isColVisible('phone_home') && <MultiSelectColumnHeader<ContactSortField> field="phone_home" label="Phone (Home)" filterValues={filterPhoneHomePresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterPhoneHomePresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Home Phone presence" />}
+                      {isColVisible('phone_cell') && <MultiSelectColumnHeader<ContactSortField> field="phone_cell" label="Phone (Cell)" filterValues={filterPhoneCellPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterPhoneCellPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by Cell Phone presence" />}
+                      {isColVisible('source') && <MultiSelectColumnHeader<ContactSortField> field="source" label="Source" filterValues={filterContactSource} filterOptions={uniqueContactSourceValues} onFilterChange={setFilterContactSource} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} />}
+                      {isColVisible('created_at') && <MultiSelectColumnHeader<ContactSortField> field="created_at" label="Date / Time Added" filterValues={filterDateAdded} filterOptions={uniqueContactDates} onFilterChange={setFilterDateAdded} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by date added" />}
+                      {isColVisible('linkedin') && <MultiSelectColumnHeader<ContactSortField> field="linkedin_url" label="LinkedIn URL" filterValues={filterLinkedInPresence} filterOptions={PRESENCE_OPTIONS} onFilterChange={setFilterLinkedInPresence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by LinkedIn presence" />}
+                      {isColVisible('confidence') && <MultiSelectColumnHeader<ContactSortField> field="confidence_score" label="Confidence" filterValues={filterConfidence} filterOptions={CONFIDENCE_OPTIONS} onFilterChange={setFilterConfidence} sortField={contactSortField} sortDir={contactSortDir} onSort={handleContactSort} filterPanelLabel="Filter by confidence score" />}
                       {/* Outreach status — multi-select bucket filter. Not
                           sortable (would need a ContactSortField); recruiters
                           filter on this far more than they sort by it. */}
-                      <MultiSelectColumnHeader<ContactSortField>
+                      {isColVisible('outreach') && <MultiSelectColumnHeader<ContactSortField>
                         field={'created_at' as ContactSortField}
                         label="Outreach"
                         filterValues={filterOutreachStatus}
@@ -2863,9 +3123,9 @@ const DesktopMarketingNewJobs: React.FC = () => {
                         sortDir={contactSortDir}
                         onSort={() => {/* not sortable */}}
                         filterPanelLabel="Filter by outreach status"
-                      />
+                      />}
                       {/* Last touch — bucketed days-since filter. */}
-                      <MultiSelectColumnHeader<ContactSortField>
+                      {isColVisible('last_touch') && <MultiSelectColumnHeader<ContactSortField>
                         field={'created_at' as ContactSortField}
                         label="Last Touch"
                         filterValues={filterOutreachAge}
@@ -2875,7 +3135,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
                         sortDir={contactSortDir}
                         onSort={() => {/* not sortable */}}
                         filterPanelLabel="Filter by days since last outreach"
-                      />
+                      />}
                       <th className="text-center px-3 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wider w-[120px]">
                         <input
                           type="checkbox"
@@ -2914,9 +3174,9 @@ const DesktopMarketingNewJobs: React.FC = () => {
                   </thead>
                   <tbody>
                     {loading ? (
-                      <tr><td colSpan={16} className="text-center py-12"><Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400" /></td></tr>
+                      <tr><td colSpan={visibleCols.size + 1} className="text-center py-12"><Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400" /></td></tr>
                     ) : filteredContacts.length === 0 ? (
-                      <tr><td colSpan={16} className="text-center py-12 text-gray-500">No contacts found. Run the tracker or import data to add contacts.</td></tr>
+                      <tr><td colSpan={visibleCols.size + 1} className="text-center py-12 text-gray-500">No contacts match the current filters. Clear filters above or click a Today preset.</td></tr>
                     ) : filteredContacts.map((c, idx) => {
                       // Derive LinkedIn URL: prefer linkedin_url field, then check source_url for LinkedIn links
                       const linkedinUrl = c.linkedin_url || 
@@ -2932,161 +3192,175 @@ const DesktopMarketingNewJobs: React.FC = () => {
                           onClick={() => setSelectedContact(selectedContact?.id === c.id ? null : c)}
                         >
                           {/* Priority (heat-gradient badge) */}
-                          <td className="px-2 py-2.5 border-r border-gray-100 text-center">
-                            <JobPriorityBadge
-                              score={cPriority}
-                              title={cPriority !== null ? `Top open-job priority at this company: ${Math.round(cPriority)}/100` : undefined}
-                            />
-                          </td>
-                          {/* First Name */}
-                          <td className="px-4 py-2.5 border-r border-gray-100 text-gray-900 font-medium">
-                            {c.first_name || <span className="text-gray-300">—</span>}
-                          </td>
-                          {/* Last Name */}
-                          <td className="px-4 py-2.5 border-r border-gray-100 text-gray-900 font-medium">
-                            {c.last_name || <span className="text-gray-300">—</span>}
-                          </td>
-                          {/* Company */}
-                          <td className="px-4 py-2.5 border-r border-gray-100 text-gray-900 font-medium text-sm">
-                            {c.company_name || <span className="text-gray-300">—</span>}
-                          </td>
-                          {/* Title */}
-                          <td className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm">
-                            {c.title || <span className="text-gray-300">—</span>}
-                          </td>
-                          {/* Email */}
-                          <td className="px-4 py-2.5 border-r border-gray-100">
-                            {c.email ? (
-                              <a
-                                href={`mailto:${c.email}`}
-                                className="text-blue-600 hover:underline text-sm"
-                                onClick={e => e.stopPropagation()}
-                              >
-                                {c.email}
-                              </a>
-                            ) : (
-                              <span className="text-gray-300">—</span>
-                            )}
-                          </td>
-                          {/* Phone (Work) */}
-                          <td className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm">
-                            {c.phone_work || <span className="text-gray-300">—</span>}
-                          </td>
-                          {/* Phone (Home) */}
-                          <td className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm">
-                            {c.phone_home || <span className="text-gray-300">—</span>}
-                          </td>
-                          {/* Phone (Cell) */}
-                          <td className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm">
-                            {c.phone_cell || <span className="text-gray-300">—</span>}
-                          </td>
-                          {/* Source */}
-                          <td className="px-4 py-2.5 border-r border-gray-100 text-sm">
-                            {c.source ? (
-                              <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${sourceBadge(c.source)}`}>
-                                {sourceIcon(c.source)}
-                                {c.source === 'Crelate ATS' ? 'Crelate' : c.source?.includes('Sweep') ? 'AI Sweep' : c.source?.includes('AI') ? 'AI' : c.source || ''}
-                              </span>
-                            ) : (
-                              <span className="text-gray-300">—</span>
-                            )}
-                          </td>
-                          {/* Date / Time Added — from marketing_contacts.created_at.
-                              Rendered in the viewer's local timezone; hovering
-                              reveals the full ISO timestamp. */}
-                          <td
-                            className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm tabular-nums"
-                            title={c.created_at || ''}
-                          >
-                            {c.created_at ? (
-                              (() => {
-                                const d = new Date(c.created_at);
+                          {isColVisible('priority') && (
+                            <td className="px-2 py-2.5 border-r border-gray-100 text-center">
+                              <JobPriorityBadge
+                                score={cPriority}
+                                title={cPriority !== null ? `Top open-job priority at this company: ${Math.round(cPriority)}/100` : undefined}
+                              />
+                            </td>
+                          )}
+                          {isColVisible('first_name') && (
+                            <td className="px-4 py-2.5 border-r border-gray-100 text-gray-900 font-medium">
+                              {c.first_name || <span className="text-gray-300">—</span>}
+                            </td>
+                          )}
+                          {isColVisible('last_name') && (
+                            <td className="px-4 py-2.5 border-r border-gray-100 text-gray-900 font-medium">
+                              {c.last_name || <span className="text-gray-300">—</span>}
+                            </td>
+                          )}
+                          {isColVisible('company') && (
+                            <td className="px-4 py-2.5 border-r border-gray-100 text-gray-900 font-medium text-sm">
+                              {c.company_name || <span className="text-gray-300">—</span>}
+                            </td>
+                          )}
+                          {isColVisible('title') && (
+                            <td className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm">
+                              {c.title || <span className="text-gray-300">—</span>}
+                            </td>
+                          )}
+                          {isColVisible('email') && (
+                            <td className="px-4 py-2.5 border-r border-gray-100">
+                              {c.email ? (
+                                <a
+                                  href={`mailto:${c.email}`}
+                                  className="text-blue-600 hover:underline text-sm"
+                                  onClick={e => e.stopPropagation()}
+                                >
+                                  {c.email}
+                                </a>
+                              ) : (
+                                <span className="text-gray-300">—</span>
+                              )}
+                            </td>
+                          )}
+                          {isColVisible('phone_work') && (
+                            <td className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm">
+                              {c.phone_work || <span className="text-gray-300">—</span>}
+                            </td>
+                          )}
+                          {isColVisible('phone_home') && (
+                            <td className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm">
+                              {c.phone_home || <span className="text-gray-300">—</span>}
+                            </td>
+                          )}
+                          {isColVisible('phone_cell') && (
+                            <td className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm">
+                              {c.phone_cell || <span className="text-gray-300">—</span>}
+                            </td>
+                          )}
+                          {isColVisible('source') && (
+                            <td className="px-4 py-2.5 border-r border-gray-100 text-sm">
+                              {c.source ? (
+                                <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${sourceBadge(c.source)}`}>
+                                  {sourceIcon(c.source)}
+                                  {c.source === 'Crelate ATS' ? 'Crelate' : c.source?.includes('Sweep') ? 'AI Sweep' : c.source?.includes('AI') ? 'AI' : c.source || ''}
+                                </span>
+                              ) : (
+                                <span className="text-gray-300">—</span>
+                              )}
+                            </td>
+                          )}
+                          {isColVisible('created_at') && (
+                            <td
+                              className="px-4 py-2.5 border-r border-gray-100 text-gray-700 text-sm tabular-nums"
+                              title={c.created_at || ''}
+                            >
+                              {c.created_at ? (
+                                (() => {
+                                  const d = new Date(c.created_at);
+                                  return (
+                                    <span>
+                                      <span className="font-medium text-gray-800">{d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</span>
+                                      <span className="text-gray-500 ml-1.5">{d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</span>
+                                    </span>
+                                  );
+                                })()
+                              ) : (
+                                <span className="text-gray-300">—</span>
+                              )}
+                            </td>
+                          )}
+                          {isColVisible('linkedin') && (
+                            <td className="px-4 py-2.5 border-r border-gray-100 text-sm" onClick={e => e.stopPropagation()}>
+                              {linkedinUrl ? (
+                                <a
+                                  href={linkedinUrl.startsWith('http') ? linkedinUrl : `https://${linkedinUrl}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-md bg-sky-50 text-sky-700 hover:bg-sky-100 border border-sky-200 transition-colors font-medium"
+                                  title={`View LinkedIn profile`}
+                                >
+                                  <Linkedin className="w-3 h-3" />
+                                  Profile
+                                </a>
+                              ) : (
+                                <span className="text-gray-300">—</span>
+                              )}
+                            </td>
+                          )}
+                          {isColVisible('confidence') && (
+                            <td className="px-3 py-2.5 border-r border-gray-100" onClick={e => e.stopPropagation()}>
+                              {(() => {
+                                const score = Number(c.confidence_score ?? 0);
+                                const barColor =
+                                  score >= 5 ? 'bg-emerald-600' :
+                                  score >= 4 ? 'bg-emerald-500' :
+                                  score >= 3 ? 'bg-amber-500' :
+                                  score >= 2 ? 'bg-orange-500' :
+                                  score >= 1 ? 'bg-red-400' : 'bg-red-600';
+                                const pillColor =
+                                  score >= 4 ? 'bg-emerald-50 text-emerald-800 border-emerald-200' :
+                                  score >= 2 ? 'bg-amber-50 text-amber-800 border-amber-200' :
+                                                  'bg-red-50 text-red-800 border-red-200';
                                 return (
-                                  <span>
-                                    <span className="font-medium text-gray-800">{d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</span>
-                                    <span className="text-gray-500 ml-1.5">{d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</span>
-                                  </span>
-                                );
-                              })()
-                            ) : (
-                              <span className="text-gray-300">—</span>
-                            )}
-                          </td>
-                          {/* LinkedIn URL */}
-                          <td className="px-4 py-2.5 border-r border-gray-100 text-sm" onClick={e => e.stopPropagation()}>
-                            {linkedinUrl ? (
-                              <a
-                                href={linkedinUrl.startsWith('http') ? linkedinUrl : `https://${linkedinUrl}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-md bg-sky-50 text-sky-700 hover:bg-sky-100 border border-sky-200 transition-colors font-medium"
-                                title={`View LinkedIn profile`}
-                              >
-                                <Linkedin className="w-3 h-3" />
-                                Profile
-                              </a>
-                            ) : (
-                              <span className="text-gray-300">—</span>
-                            )}
-                          </td>
-                          {/* Confidence (0-5). Bar widens + recolors with score. */}
-                          <td className="px-3 py-2.5 border-r border-gray-100" onClick={e => e.stopPropagation()}>
-                            {(() => {
-                              const score = Number(c.confidence_score ?? 0);
-                              const barColor =
-                                score >= 5 ? 'bg-emerald-600' :
-                                score >= 4 ? 'bg-emerald-500' :
-                                score >= 3 ? 'bg-amber-500' :
-                                score >= 2 ? 'bg-orange-500' :
-                                score >= 1 ? 'bg-red-400' : 'bg-red-600';
-                              const pillColor =
-                                score >= 4 ? 'bg-emerald-50 text-emerald-800 border-emerald-200' :
-                                score >= 2 ? 'bg-amber-50 text-amber-800 border-amber-200' :
-                                                'bg-red-50 text-red-800 border-red-200';
-                              return (
-                                <div className="flex items-center gap-2" title={`Confidence ${score}/5`}>
-                                  <span className={`inline-flex items-center justify-center tabular-nums text-xs font-semibold px-1.5 py-0.5 rounded border ${pillColor}`} style={{ minWidth: 26 }}>
-                                    {score}
-                                  </span>
-                                  <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden" style={{ minWidth: 50 }}>
-                                    <div className={`h-full ${barColor}`} style={{ width: `${(score / 5) * 100}%` }} />
+                                  <div className="flex items-center gap-2" title={`Confidence ${score}/5`}>
+                                    <span className={`inline-flex items-center justify-center tabular-nums text-xs font-semibold px-1.5 py-0.5 rounded border ${pillColor}`} style={{ minWidth: 26 }}>
+                                      {score}
+                                    </span>
+                                    <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden" style={{ minWidth: 50 }}>
+                                      <div className={`h-full ${barColor}`} style={{ width: `${(score / 5) * 100}%` }} />
+                                    </div>
                                   </div>
-                                </div>
-                              );
-                            })()}
-                          </td>
-                          {/* Outreach status — popover-based editor */}
-                          <td className="px-3 py-2.5 border-r border-gray-100 text-center" onClick={e => e.stopPropagation()}>
-                            <OutreachStatusCell
-                              contactId={c.id}
-                              status={(c.outreach_status as OutreachStatus) ?? null}
-                              lastOutreachAt={c.last_outreach_at}
-                              onUpdated={(status, ts) => {
-                                setContacts(prev => prev.map(row => row.id === c.id ? { ...row, outreach_status: status, last_outreach_at: ts } : row));
-                              }}
-                            />
-                          </td>
-                          {/* Last touch — relative time, ages out red as days pass */}
-                          <td className="px-3 py-2.5 border-r border-gray-100 text-xs tabular-nums" onClick={e => e.stopPropagation()}>
-                            {c.last_outreach_at ? (
-                              (() => {
-                                const days = Math.floor((Date.now() - new Date(c.last_outreach_at).getTime()) / 86_400_000);
-                                const tone =
-                                  days <= 3  ? 'text-emerald-700' :
-                                  days <= 7  ? 'text-emerald-600' :
-                                  days <= 14 ? 'text-amber-600' :
-                                  days <= 30 ? 'text-orange-600' :
-                                               'text-red-600';
-                                return (
-                                  <span className={`${tone} font-medium`} title={new Date(c.last_outreach_at).toLocaleString()}>
-                                    {days === 0 ? 'today' : `${days}d ago`}
-                                  </span>
                                 );
-                              })()
-                            ) : (
-                              <span className="text-gray-300 italic">never</span>
-                            )}
-                          </td>
+                              })()}
+                            </td>
+                          )}
+                          {isColVisible('outreach') && (
+                            <td className="px-3 py-2.5 border-r border-gray-100 text-center" onClick={e => e.stopPropagation()}>
+                              <OutreachStatusCell
+                                contactId={c.id}
+                                status={(c.outreach_status as OutreachStatus) ?? null}
+                                lastOutreachAt={c.last_outreach_at}
+                                onUpdated={(status, ts) => {
+                                  setContacts(prev => prev.map(row => row.id === c.id ? { ...row, outreach_status: status, last_outreach_at: ts } : row));
+                                }}
+                              />
+                            </td>
+                          )}
+                          {isColVisible('last_touch') && (
+                            <td className="px-3 py-2.5 border-r border-gray-100 text-xs tabular-nums" onClick={e => e.stopPropagation()}>
+                              {c.last_outreach_at ? (
+                                (() => {
+                                  const days = Math.floor((Date.now() - new Date(c.last_outreach_at).getTime()) / 86_400_000);
+                                  const tone =
+                                    days <= 3  ? 'text-emerald-700' :
+                                    days <= 7  ? 'text-emerald-600' :
+                                    days <= 14 ? 'text-amber-600' :
+                                    days <= 30 ? 'text-orange-600' :
+                                                 'text-red-600';
+                                  return (
+                                    <span className={`${tone} font-medium`} title={new Date(c.last_outreach_at).toLocaleString()}>
+                                      {days === 0 ? 'today' : `${days}d ago`}
+                                    </span>
+                                  );
+                                })()
+                              ) : (
+                                <span className="text-gray-300 italic">never</span>
+                              )}
+                            </td>
+                          )}
                           {/* Per-row Copy + Edit + Enrich buttons + selection
                               checkbox. stopPropagation so interacting with
                               any of them doesn't toggle the detail panel

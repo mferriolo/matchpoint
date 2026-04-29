@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
-import { Building2, Users, Briefcase, Search, Star, Ban, RefreshCw, Phone, Mail, Linkedin, MapPin, ExternalLink, ChevronRight, X, Check, MessageSquare, Calendar as CalendarIcon, CheckCircle } from 'lucide-react';
+import { Building2, Users, Briefcase, Search, Star, Ban, RefreshCw, Phone, Mail, Linkedin, MapPin, ExternalLink, ChevronRight, X, Check, MessageSquare, Calendar as CalendarIcon, CheckCircle, Download, Monitor } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { useToast } from '@/hooks/use-toast';
+import { exportContactsToXlsx } from '@/utils/xlsxExport';
 import MobileShell from './MobileShell';
 
 type OutreachStatus = 'Cold' | 'Replied' | 'Booked' | 'Dead' | null;
@@ -42,6 +43,11 @@ const MobileMarketing: React.FC = () => {
   // mode; tap toggles after that. A sticky bottom bar shows quick actions.
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // Outreach-status chip filter at the top of the contacts list. Single-
+  // select for simplicity (the desktop multi-select doesn't help much on a
+  // 4-option chip strip); 'never' is the synthetic null-status bucket.
+  type StatusChip = 'never' | 'Cold' | 'Replied' | 'Booked';
+  const [statusChip, setStatusChip] = useState<StatusChip | null>(null);
 
   const exitSelectMode = useCallback(() => {
     setSelectMode(false);
@@ -171,10 +177,29 @@ const MobileMarketing: React.FC = () => {
 
   const filteredContacts = useMemo(() => {
     const s = search.toLowerCase();
-    return contacts.filter(c =>
-      !s || `${c.first_name || ''} ${c.last_name || ''} ${c.company_name || ''} ${c.title || ''} ${c.email || ''}`.toLowerCase().includes(s)
-    );
-  }, [contacts, search]);
+    return contacts.filter(c => {
+      if (s && !`${c.first_name || ''} ${c.last_name || ''} ${c.company_name || ''} ${c.title || ''} ${c.email || ''}`.toLowerCase().includes(s)) return false;
+      if (statusChip) {
+        if (statusChip === 'never') {
+          if (c.outreach_status || c.last_outreach_at) return false;
+        } else if (c.outreach_status !== statusChip) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [contacts, search, statusChip]);
+
+  const exportVisibleContacts = () => {
+    const which = selectedIds.size > 0 ? contacts.filter(c => selectedIds.has(c.id)) : filteredContacts;
+    if (which.length === 0) {
+      toast({ title: 'Nothing to export', description: 'Adjust filters or select contacts first.' });
+      return;
+    }
+    const decorated = which.map(c => ({ ...c, _priorityScore: null }));
+    exportContactsToXlsx(decorated, selectedIds.size > 0 ? `Contacts (selected ${decorated.length})` : `Contacts (${decorated.length})`);
+    toast({ title: `Exported ${decorated.length} contact${decorated.length === 1 ? '' : 's'}` });
+  };
 
   const counts = { jobs: filteredJobs.length, companies: filteredCompanies.length, contacts: filteredContacts.length };
 
@@ -208,16 +233,75 @@ const MobileMarketing: React.FC = () => {
       </div>
 
       {/* Search */}
-      <div className="p-3 bg-white border-b border-gray-200">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-          <Input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder={`Search ${tab}…`}
-            className="pl-9 h-10 text-sm"
-          />
+      <div className="p-3 bg-white border-b border-gray-200 space-y-2">
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <Input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder={`Search ${tab}…`}
+              className="pl-9 h-10 text-sm"
+            />
+          </div>
+          {tab === 'contacts' && (
+            <button
+              onClick={exportVisibleContacts}
+              className="inline-flex items-center justify-center gap-1 h-10 px-3 rounded-md bg-emerald-600 text-white text-xs font-medium active:bg-emerald-700"
+              title={selectedIds.size > 0 ? `Export ${selectedIds.size} selected` : `Export ${filteredContacts.length} visible`}
+              aria-label="Export contacts to spreadsheet"
+            >
+              <Download className="w-4 h-4" />
+              Export
+            </button>
+          )}
         </div>
+
+        {/* Outreach status chips — Contacts tab only. Single-select; tap
+            again to clear. Chips show counts so the recruiter sees scope
+            before tapping. */}
+        {tab === 'contacts' && (() => {
+          const counts = {
+            never: contacts.filter(c => !c.outreach_status && !c.last_outreach_at).length,
+            Cold:    contacts.filter(c => c.outreach_status === 'Cold').length,
+            Replied: contacts.filter(c => c.outreach_status === 'Replied').length,
+            Booked:  contacts.filter(c => c.outreach_status === 'Booked').length,
+          };
+          const items: { key: StatusChip; label: string; tone: string }[] = [
+            { key: 'never',   label: 'Not contacted', tone: 'border-blue-300 text-blue-800 bg-blue-50' },
+            { key: 'Cold',    label: 'Cold',          tone: 'border-blue-200 text-blue-700 bg-blue-50' },
+            { key: 'Replied', label: 'Replied',       tone: 'border-purple-300 text-purple-800 bg-purple-50' },
+            { key: 'Booked',  label: 'Booked',        tone: 'border-emerald-300 text-emerald-800 bg-emerald-50' },
+          ];
+          return (
+            <div className="flex items-center gap-1.5 overflow-x-auto -mx-3 px-3 pb-0.5">
+              {items.map(({ key, label, tone }) => {
+                const active = statusChip === key;
+                const count = counts[key];
+                return (
+                  <button
+                    key={key}
+                    onClick={() => setStatusChip(active ? null : key)}
+                    className={`flex-shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-xs font-medium border min-h-[32px] ${
+                      active ? 'bg-[#911406] text-white border-[#911406]' : tone
+                    }`}
+                  >
+                    {label}
+                    <span className={`text-[10px] tabular-nums ${active ? 'opacity-90' : 'opacity-70'}`}>{count}</span>
+                  </button>
+                );
+              })}
+              {statusChip && (
+                <button
+                  onClick={() => setStatusChip(null)}
+                  className="flex-shrink-0 text-xs text-gray-500 px-2 underline"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* List */}
@@ -525,9 +609,18 @@ const DetailSheet: React.FC<{ detail: { kind: SubTab; row: any }; onClose: () =>
         {kind === 'jobs' && <JobDetail job={row} />}
         {kind === 'companies' && <CompanyDetail co={row} />}
         {kind === 'contacts' && <ContactDetail ct={row} />}
-        <p className="text-[11px] text-gray-400 italic pt-4 text-center">
-          Editing and merging are available on the desktop site.
-        </p>
+        {/* Deep link out to the desktop view — same path, just relies on
+            the user's desktop browser to render the full UI. The window
+            check is paranoia for SSR; we always have window in a Vite app. */}
+        <a
+          href={typeof window !== 'undefined' ? `${window.location.origin}/marketing` : '/marketing'}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-4 flex items-center justify-center gap-2 py-2.5 rounded-md border border-gray-200 bg-white text-[#911406] text-sm font-medium active:bg-gray-50"
+        >
+          <Monitor className="w-4 h-4" />
+          Open on desktop for editing &amp; merging
+        </a>
       </div>
     </div>
   );
