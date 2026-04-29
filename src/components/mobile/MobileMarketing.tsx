@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
-import { Building2, Users, Briefcase, Search, Star, Ban, RefreshCw, Phone, Mail, Linkedin, MapPin, ExternalLink, ChevronRight, X, Check, MessageSquare, Calendar as CalendarIcon, RotateCcw, CheckCircle, Clock } from 'lucide-react';
+import { Building2, Users, Briefcase, Search, Star, Ban, RefreshCw, Phone, Mail, Linkedin, MapPin, ExternalLink, ChevronRight, X, Check, MessageSquare, Calendar as CalendarIcon, CheckCircle } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -42,7 +42,6 @@ const MobileMarketing: React.FC = () => {
   // mode; tap toggles after that. A sticky bottom bar shows quick actions.
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [showSnoozed, setShowSnoozed] = useState(false);
 
   const exitSelectMode = useCallback(() => {
     setSelectMode(false);
@@ -129,15 +128,6 @@ const MobileMarketing: React.FC = () => {
     }
   };
 
-  const snoozeBulk = (days: number | null) => {
-    const ids = Array.from(selectedIds);
-    if (days === null) {
-      bulkPatch(ids, { snoozed_until: null }, `Unsnoozed ${ids.length}`);
-    } else {
-      const until = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
-      bulkPatch(ids, { snoozed_until: until }, `Snoozed ${ids.length} for ${days}d`);
-    }
-  };
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -181,21 +171,10 @@ const MobileMarketing: React.FC = () => {
 
   const filteredContacts = useMemo(() => {
     const s = search.toLowerCase();
-    return contacts.filter(c => {
-      if (s && !`${c.first_name || ''} ${c.last_name || ''} ${c.company_name || ''} ${c.title || ''} ${c.email || ''}`.toLowerCase().includes(s)) return false;
-      if (!showSnoozed && c.snoozed_until) {
-        const t = new Date(c.snoozed_until).getTime();
-        if (Number.isFinite(t) && t > Date.now()) return false;
-      }
-      return true;
-    });
-  }, [contacts, search, showSnoozed]);
-
-  const snoozedCount = useMemo(() => contacts.filter(c => {
-    if (!c.snoozed_until) return false;
-    const t = new Date(c.snoozed_until).getTime();
-    return Number.isFinite(t) && t > Date.now();
-  }).length, [contacts]);
+    return contacts.filter(c =>
+      !s || `${c.first_name || ''} ${c.last_name || ''} ${c.company_name || ''} ${c.title || ''} ${c.email || ''}`.toLowerCase().includes(s)
+    );
+  }, [contacts, search]);
 
   const counts = { jobs: filteredJobs.length, companies: filteredCompanies.length, contacts: filteredContacts.length };
 
@@ -272,24 +251,8 @@ const MobileMarketing: React.FC = () => {
               if (s === null) patchContact(c.id, { outreach_status: null, last_outreach_at: null }, 'Cleared');
               else patchContact(c.id, { outreach_status: s, last_outreach_at: new Date().toISOString() }, `Set to ${s}`);
             }}
-            onSnooze={(days) => {
-              if (days === null) patchContact(c.id, { snoozed_until: null }, 'Unsnoozed');
-              else {
-                const until = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
-                patchContact(c.id, { snoozed_until: until }, `Snoozed ${days}d`);
-              }
-            }}
           />
         ))}
-        {!loading && tab === 'contacts' && snoozedCount > 0 && (
-          <button
-            onClick={() => setShowSnoozed(v => !v)}
-            className="w-full py-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md flex items-center justify-center gap-1"
-          >
-            <RotateCcw className="w-3 h-3" />
-            {showSnoozed ? `Hide ${snoozedCount} snoozed` : `Show ${snoozedCount} snoozed`}
-          </button>
-        )}
         {!loading && (
           (tab === 'jobs' && filteredJobs.length === 0) ||
           (tab === 'companies' && filteredCompanies.length === 0) ||
@@ -315,7 +278,7 @@ const MobileMarketing: React.FC = () => {
               <X className="w-4 h-4" />
             </button>
           </div>
-          <div className="grid grid-cols-3 gap-1 p-2">
+          <div className="grid grid-cols-2 gap-1 p-2">
             <button
               onClick={markContactedBulk}
               disabled={selectedIds.size === 0}
@@ -349,40 +312,6 @@ const MobileMarketing: React.FC = () => {
                   className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 border-t"
                 >
                   Clear status
-                </button>
-              </PopoverContent>
-            </Popover>
-            <Popover>
-              <PopoverTrigger asChild>
-                <button
-                  disabled={selectedIds.size === 0}
-                  className="flex flex-col items-center justify-center gap-0.5 py-3 rounded-md bg-amber-600 text-white text-xs font-medium disabled:opacity-40 active:bg-amber-700"
-                >
-                  <Clock className="w-5 h-5" />
-                  Snooze
-                </button>
-              </PopoverTrigger>
-              <PopoverContent align="center" side="top" className="w-44 p-0">
-                {[
-                  { label: '1 day',   days: 1 },
-                  { label: '3 days',  days: 3 },
-                  { label: '1 week',  days: 7 },
-                  { label: '2 weeks', days: 14 },
-                  { label: '1 month', days: 30 },
-                ].map(opt => (
-                  <button
-                    key={opt.days}
-                    onClick={() => snoozeBulk(opt.days)}
-                    className="w-full text-left px-3 py-2.5 text-sm hover:bg-gray-50"
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-                <button
-                  onClick={() => snoozeBulk(null)}
-                  className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 border-t"
-                >
-                  Unsnooze
                 </button>
               </PopoverContent>
             </Popover>
@@ -457,17 +386,15 @@ interface ContactCardProps {
   onLongPress: () => void;
   onMarkContacted: () => void;
   onSetStatus: (s: OutreachStatus) => void;
-  onSnooze: (days: number | null) => void;
 }
 
 const ContactCard: React.FC<ContactCardProps> = ({
-  ct, selectMode, isSelected, onTap, onLongPress, onMarkContacted, onSetStatus, onSnooze,
+  ct, selectMode, isSelected, onTap, onLongPress, onMarkContacted, onSetStatus,
 }) => {
   const name = [ct.first_name, ct.middle_name, ct.last_name].filter(Boolean).join(' ') || '(unnamed)';
   const fullName = ct.suffix ? `${name}, ${ct.suffix}` : name;
   const status: OutreachStatus = ct.outreach_status || null;
   const StatusIcon = status ? STATUS_META[status].icon : null;
-  const isSnoozed = ct.snoozed_until && new Date(ct.snoozed_until).getTime() > Date.now();
 
   // Long-press detection: 500ms touch hold without movement triggers
   // selectMode. We avoid native contextmenu to let scroll keep working.
@@ -496,7 +423,7 @@ const ContactCard: React.FC<ContactCardProps> = ({
     <div
       className={`w-full p-3 bg-white rounded-lg border shadow-sm transition-colors ${
         isSelected ? 'border-[#911406] bg-amber-50/40' : 'border-gray-200 active:bg-gray-50'
-      } ${isSnoozed ? 'opacity-60' : ''}`}
+      }`}
       onTouchStart={startPress}
       onTouchEnd={cancelPress}
       onTouchMove={cancelPress}
@@ -525,12 +452,6 @@ const ContactCard: React.FC<ContactCardProps> = ({
               {ct.last_outreach_at && (
                 <span className="text-[10px] text-gray-500">
                   · {Math.max(0, Math.floor((Date.now() - new Date(ct.last_outreach_at).getTime()) / 86400000))}d ago
-                </span>
-              )}
-              {isSnoozed && (
-                <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded border text-amber-700 bg-amber-50 border-amber-200">
-                  <Clock className="w-3 h-3" />
-                  Snoozed
                 </span>
               )}
             </div>
@@ -575,41 +496,6 @@ const ContactCard: React.FC<ContactCardProps> = ({
               >
                 Clear
               </button>
-            </PopoverContent>
-          </Popover>
-          <Popover>
-            <PopoverTrigger asChild>
-              <button
-                onClick={(e) => e.stopPropagation()}
-                className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded text-[11px] font-medium text-amber-700 bg-amber-50 active:bg-amber-100"
-              >
-                <Clock className="w-3.5 h-3.5" />
-                Snooze
-              </button>
-            </PopoverTrigger>
-            <PopoverContent align="center" className="w-40 p-0" onClick={(e) => e.stopPropagation()}>
-              {[
-                { label: '1 day',   days: 1 },
-                { label: '3 days',  days: 3 },
-                { label: '1 week',  days: 7 },
-                { label: '2 weeks', days: 14 },
-              ].map(opt => (
-                <button
-                  key={opt.days}
-                  onClick={() => onSnooze(opt.days)}
-                  className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
-                >
-                  {opt.label}
-                </button>
-              ))}
-              {isSnoozed && (
-                <button
-                  onClick={() => onSnooze(null)}
-                  className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 border-t"
-                >
-                  Unsnooze
-                </button>
-              )}
             </PopoverContent>
           </Popover>
         </div>

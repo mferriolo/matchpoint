@@ -118,9 +118,6 @@ const DesktopMarketingNewJobs: React.FC = () => {
     previousVisitRef.current = consumeContactsLastVisit();
   }
   const [newSinceLastVisit, setNewSinceLastVisit] = useState(false);
-  // Snoozed contacts default to hidden so the Contacts list reflects who's
-  // actually actionable today; toggle to bring them back into view.
-  const [showSnoozed, setShowSnoozed] = useState(false);
 
   // ── Caching / freshness ─────────────────────────────────────────────
   // loadData skips refetches within FRESHNESS_MS unless force=true. A
@@ -405,17 +402,6 @@ const DesktopMarketingNewJobs: React.FC = () => {
       await updateContactsBulk(ids, { outreach_status: null, last_outreach_at: null }, `Cleared status on ${ids.length}`);
     } else {
       await updateContactsBulk(ids, { outreach_status: status, last_outreach_at: new Date().toISOString() }, `Set ${ids.length} to ${status}`);
-    }
-  };
-
-  const handleBulkSnooze = async (days: number | null) => {
-    const ids = Array.from(selectedContactIds);
-    if (ids.length === 0) return;
-    if (days === null) {
-      await updateContactsBulk(ids, { snoozed_until: null }, `Unsnoozed ${ids.length}`);
-    } else {
-      const until = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
-      await updateContactsBulk(ids, { snoozed_until: until }, `Snoozed ${ids.length} for ${days}d`);
     }
   };
 
@@ -1538,12 +1524,6 @@ const DesktopMarketingNewJobs: React.FC = () => {
         const t = c.created_at ? new Date(c.created_at).getTime() : 0;
         if (!t || t <= previousVisitRef.current) return false;
       }
-      // Hide actively snoozed contacts unless the toggle is on. Past
-      // snooze timestamps are treated as expired (i.e. visible again).
-      if (!showSnoozed && c.snoozed_until) {
-        const until = new Date(c.snoozed_until).getTime();
-        if (Number.isFinite(until) && until > Date.now()) return false;
-      }
       // "Any phone" cross-column check: filter option labels map to
       // presence semantics — Has data = any of the 3 phones populated,
       // No data = all 3 empty.
@@ -1592,7 +1572,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
       filterContactSource, filterDateAdded, filterEmailPresence,
       filterPhoneWorkPresence, filterPhoneHomePresence, filterPhoneCellPresence,
       filterLinkedInPresence, filterAnyPhonePresence, filterConfidence,
-      filterOutreachStatus, filterOutreachAge, newSinceLastVisit, showSnoozed,
+      filterOutreachStatus, filterOutreachAge, newSinceLastVisit,
       contactPriorityByCompany]);
 
   // Options shown in the Confidence column's filter popover. Stringified
@@ -2437,29 +2417,6 @@ const DesktopMarketingNewJobs: React.FC = () => {
                   );
                 })()}
                 <span className="text-gray-300">·</span>
-                {(() => {
-                  const snoozedCount = contacts.filter(c => {
-                    if (!c.snoozed_until) return false;
-                    const t = new Date(c.snoozed_until).getTime();
-                    return Number.isFinite(t) && t > Date.now();
-                  }).length;
-                  if (snoozedCount === 0 && !showSnoozed) return null;
-                  return (
-                    <button
-                      onClick={() => setShowSnoozed(v => !v)}
-                      className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-xs ${
-                        showSnoozed
-                          ? 'bg-amber-100 border-amber-300 text-amber-800'
-                          : 'bg-white border-gray-200 text-gray-600 hover:bg-amber-50 hover:border-amber-200'
-                      }`}
-                      title={`${snoozedCount} contact${snoozedCount === 1 ? '' : 's'} currently snoozed`}
-                    >
-                      <RotateCcw className="w-3 h-3" />
-                      {showSnoozed ? `Showing snoozed (${snoozedCount})` : `Hidden: snoozed (${snoozedCount})`}
-                    </button>
-                  );
-                })()}
-                <span className="text-gray-300">·</span>
                 <Popover open={savedViewsOpen} onOpenChange={setSavedViewsOpen}>
                   <PopoverTrigger asChild>
                     <button className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-200 bg-white text-gray-700 hover:border-gray-300">
@@ -2652,44 +2609,6 @@ const DesktopMarketingNewJobs: React.FC = () => {
                           className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 border-t"
                         >
                           Clear status & timestamp
-                        </button>
-                      </PopoverContent>
-                    </Popover>
-                    <Popover>
-                      <PopoverTrigger asChild>
-                        <Button
-                          variant="outline"
-                          className="text-amber-700 border-amber-300 hover:bg-amber-50"
-                          title="Hide selected contacts from the default view until a future date"
-                        >
-                          <RotateCcw className="w-4 h-4 mr-1.5" />
-                          Snooze
-                        </Button>
-                      </PopoverTrigger>
-                      <PopoverContent align="end" className="w-52 p-0">
-                        <div className="px-3 py-2 border-b bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500 font-semibold">
-                          Snooze {selectedContactIds.size}
-                        </div>
-                        {[
-                          { label: '1 day',   days: 1 },
-                          { label: '3 days',  days: 3 },
-                          { label: '1 week',  days: 7 },
-                          { label: '2 weeks', days: 14 },
-                          { label: '1 month', days: 30 },
-                        ].map(opt => (
-                          <button
-                            key={opt.days}
-                            onClick={() => handleBulkSnooze(opt.days)}
-                            className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
-                          >
-                            {opt.label}
-                          </button>
-                        ))}
-                        <button
-                          onClick={() => handleBulkSnooze(null)}
-                          className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 border-t"
-                        >
-                          Unsnooze
                         </button>
                       </PopoverContent>
                     </Popover>
