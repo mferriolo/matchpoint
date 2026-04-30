@@ -1143,6 +1143,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                 return (
                   <tr
                     key={j.id}
+                    data-mp-job-id={j.id}
                     className={`border-b transition-colors ${isMoving ? 'opacity-50' : ''} ${blocked ? 'bg-gray-100 opacity-60' : isSelected ? 'bg-amber-50 hover:bg-amber-100/50' : (
                       priority ? 'bg-amber-50/70 hover:bg-amber-100/70' :
                       subTab === 'open'

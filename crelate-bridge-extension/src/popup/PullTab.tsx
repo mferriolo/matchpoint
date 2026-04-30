@@ -43,16 +43,30 @@ export default function PullTab({ entity }: { entity: EntityType }) {
     });
   }, [entity]);
 
+  // Tiny dispatch helpers per entity so we don't repeat the cascade.
+  const searchFnFor  = (e: EntityType) => e === 'contact' ? bridgeApi.searchCrelateContacts
+                                        : e === 'company' ? bridgeApi.searchCrelateCompanies
+                                        : bridgeApi.searchCrelateJobs;
+  const previewFnFor = (e: EntityType) => e === 'contact' ? bridgeApi.pullContactPreview
+                                        : e === 'company' ? bridgeApi.pullCompanyPreview
+                                        : bridgeApi.pullJobPreview;
+  const pullFnFor    = (e: EntityType) => e === 'contact' ? bridgeApi.pullContact
+                                        : e === 'company' ? bridgeApi.pullCompany
+                                        : bridgeApi.pullJob;
+
   // Debounced Crelate search.
   useEffect(() => {
     if (selectedCrId) return;
     if (query.trim().length < 2) { setResults([]); return; }
     setSearching(true);
     const t = setTimeout(async () => {
-      const r = entity === 'contact'
-        ? await bridgeApi.searchCrelateContacts(query.trim())
-        : await bridgeApi.searchCrelateCompanies(query.trim());
-      if (r.success) setResults(entity === 'contact' ? (r.contacts || []) : (r.companies || []));
+      const r = await searchFnFor(entity)(query.trim());
+      if (r.success) {
+        const items = entity === 'contact' ? r.contacts
+                    : entity === 'company' ? r.companies
+                    : r.jobs;
+        setResults(items || []);
+      }
       setSearching(false);
     }, 300);
     return () => clearTimeout(t);
@@ -61,8 +75,7 @@ export default function PullTab({ entity }: { entity: EntityType }) {
   // Preview when single-record drilling in.
   useEffect(() => {
     if (!selectedCrId) { setPreview(null); setChoices({}); setOutcome(null); return; }
-    const fn = entity === 'contact' ? bridgeApi.pullContactPreview : bridgeApi.pullCompanyPreview;
-    fn(selectedCrId).then(r => {
+    previewFnFor(entity)(selectedCrId).then(r => {
       if (r.success) {
         setPreview({ status: r.status, crelate_id: r.crelate_id, crelate: r.crelate, mp: r.mp, diff: r.diff });
         const seed: Record<string, FieldChoice> = {};
@@ -74,39 +87,34 @@ export default function PullTab({ entity }: { entity: EntityType }) {
     });
   }, [selectedCrId, entity]);
 
-  // Single-record pull with field-level resolution.
   const doPull = async () => {
     if (!selectedCrId) return;
     setPulling(true); setOutcome(null);
-    const fn = entity === 'contact' ? bridgeApi.pullContact : bridgeApi.pullCompany;
-    const r = await fn(selectedCrId, choices);
+    const r = await pullFnFor(entity)(selectedCrId, choices);
     setPulling(false);
     if (r.success) {
       setOutcome({ ok: true, msg: `${r.action === 'create' ? 'Created in MatchPoint' : 'Updated MatchPoint'} (${r.mp_id?.slice(0, 8)}…)` });
-      const previewFn = entity === 'contact' ? bridgeApi.pullContactPreview : bridgeApi.pullCompanyPreview;
-      const after = await previewFn(selectedCrId);
+      const after = await previewFnFor(entity)(selectedCrId);
       if (after.success) setPreview({ status: after.status, crelate_id: after.crelate_id, crelate: after.crelate, mp: after.mp, diff: after.diff });
     } else {
       setOutcome({ ok: false, msg: r.error || 'Pull failed' });
     }
   };
 
-  // Bulk pull: loop the single-record action over every selected crelate
-  // id. No field_choices → bridge defaults to "any non-empty Crelate
-  // value overwrites MP" (the pull_* contract).
   const doBulkPull = async () => {
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return;
-    const fn = entity === 'contact' ? bridgeApi.pullContact : bridgeApi.pullCompany;
+    const fn = pullFnFor(entity);
+    const nameOf = (row: any): string => entity === 'contact'
+      ? ([row.first_name, row.last_name].filter(Boolean).join(' ') || '(unnamed)')
+      : entity === 'company'
+        ? (row.company_name || '(unnamed)')
+        : (row.job_title ? `${row.job_title}${row.company_name ? ' · ' + row.company_name : ''}` : '(untitled)');
     setBulk({ done: 0, total: ids.length, results: [], running: true });
     for (let i = 0; i < ids.length; i++) {
       const cid = ids[i];
       const row = results.find(r => r.crelate_id === cid);
-      const name = row
-        ? (entity === 'contact'
-            ? ([row.first_name, row.last_name].filter(Boolean).join(' ') || '(unnamed)')
-            : (row.company_name || '(unnamed)'))
-        : cid.slice(0, 8);
+      const name = row ? nameOf(row) : cid.slice(0, 8);
       const r = await fn(cid);
       const result: BulkRowResult = {
         crelate_id: cid, name, ok: !!r.success, action: r.action,
@@ -185,7 +193,9 @@ export default function PullTab({ entity }: { entity: EntityType }) {
               autoFocus
               placeholder={entity === 'contact'
                 ? 'Search Crelate contacts by name or email…'
-                : 'Search Crelate companies by name…'}
+                : entity === 'company'
+                  ? 'Search Crelate companies by name…'
+                  : 'Search Crelate jobs by title or company…'}
               value={query}
               onChange={e => setQuery(e.target.value)}
             />
@@ -239,8 +249,10 @@ export default function PullTab({ entity }: { entity: EntityType }) {
           <div className="detail">
             {entity === 'contact' ? (
               <h2>{[preview.crelate.first_name, preview.crelate.last_name].filter(Boolean).join(' ') || '(unnamed)'}</h2>
-            ) : (
+            ) : entity === 'company' ? (
               <h2>{preview.crelate.company_name || '(unnamed)'}</h2>
+            ) : (
+              <h2>{preview.crelate.job_title || '(untitled)'}</h2>
             )}
             <div className="sub">
               From Crelate ({selectedCrId.slice(0, 8)}…)
@@ -305,7 +317,7 @@ function CrelateResultRow({
     <div className={`row ${checked ? 'selected' : ''}`}>
       <input type="checkbox" className="check" checked={checked} onChange={onToggle} aria-label="Select for bulk pull" />
       <button className="body" onClick={onPick}>
-        {entity === 'contact' ? (
+        {entity === 'contact' && (
           <>
             <div className="name">{[row.first_name, row.last_name].filter(Boolean).join(' ') || '(unnamed)'}</div>
             <div className="meta">
@@ -313,10 +325,17 @@ function CrelateResultRow({
               {row.email && <> · {row.email}</>}
             </div>
           </>
-        ) : (
+        )}
+        {entity === 'company' && (
           <>
             <div className="name">{row.company_name || '(unnamed)'}</div>
             <div className="meta">{row.website || '—'}</div>
+          </>
+        )}
+        {entity === 'job' && (
+          <>
+            <div className="name">{row.job_title || '(untitled)'}</div>
+            <div className="meta">{row.company_name || '—'}</div>
           </>
         )}
       </button>

@@ -12,15 +12,18 @@
 
 const CONTACT_RE = /\/main2\/contact\/([0-9a-f-]{36})/i;
 const COMPANY_RE = /\/main2\/(?:company|account)\/([0-9a-f-]{36})/i;
+const JOB_RE     = /\/main2\/(?:job|opportunity|jobs)\/([0-9a-f-]{36})/i;
 const BUTTON_ID = 'crelate-bridge-push-btn';
 
-type Detected = { entity: 'contact' | 'company'; id: string } | null;
+type Detected = { entity: 'contact' | 'company' | 'job'; id: string } | null;
 
 function detect(): Detected {
   const c = location.href.match(CONTACT_RE);
   if (c) return { entity: 'contact', id: c[1] };
   const co = location.href.match(COMPANY_RE);
   if (co) return { entity: 'company', id: co[1] };
+  const j = location.href.match(JOB_RE);
+  if (j) return { entity: 'job', id: j[1] };
   return null;
 }
 

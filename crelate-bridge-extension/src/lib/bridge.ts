@@ -40,28 +40,36 @@ export const bridgeApi = {
   // Push side: search MatchPoint, dedupe-check, push.
   searchMpContacts:  (query: string) => bridge('search_mp_contacts', { query }),
   searchMpCompanies: (query: string) => bridge('search_mp_companies', { query }),
+  searchMpJobs:      (query: string) => bridge('search_mp_jobs', { query }),
   dedupeContact: (mp_id: string) => bridge('dedupe_check_contact', { mp_id }),
   dedupeCompany: (mp_id: string) => bridge('dedupe_check_company', { mp_id }),
+  dedupeJob:     (mp_id: string) => bridge('dedupe_check_job', { mp_id }),
   pushContact: (mp_id: string, field_choices?: Record<string, any>) =>
     bridge('push_contact', { mp_id, field_choices }),
   pushCompany: (mp_id: string, field_choices?: Record<string, any>) =>
     bridge('push_company', { mp_id, field_choices }),
+  pushJob:     (mp_id: string, field_choices?: Record<string, any>) =>
+    bridge('push_job', { mp_id, field_choices }),
 
   // Pull side: search Crelate, preview vs MP, pull.
   searchCrelateContacts:  (query: string) => bridge('search_crelate_contacts', { query }),
   searchCrelateCompanies: (query: string) => bridge('search_crelate_companies', { query }),
+  searchCrelateJobs:      (query: string) => bridge('search_crelate_jobs', { query }),
   pullContactPreview: (crelate_id: string) => bridge('pull_contact_preview', { crelate_id }),
   pullCompanyPreview: (crelate_id: string) => bridge('pull_company_preview', { crelate_id }),
+  pullJobPreview:     (crelate_id: string) => bridge('pull_job_preview', { crelate_id }),
   pullContact: (crelate_id: string, field_choices?: Record<string, any>) =>
     bridge('pull_contact', { crelate_id, field_choices }),
   pullCompany: (crelate_id: string, field_choices?: Record<string, any>) =>
     bridge('pull_company', { crelate_id, field_choices }),
+  pullJob:     (crelate_id: string, field_choices?: Record<string, any>) =>
+    bridge('pull_job', { crelate_id, field_choices }),
 
   history: (opts: { limit?: number; entity_type?: string; direction?: string } = {}) =>
     bridge('list_history', opts),
 
   // Used by the "Read visible from MatchPoint page" flow.
-  getMpRecordsByIds: (entity: 'contact' | 'company', ids: string[]) =>
+  getMpRecordsByIds: (entity: 'contact' | 'company' | 'job', ids: string[]) =>
     bridge('get_mp_records_by_ids', { entity, ids }),
 };
 
@@ -76,7 +84,7 @@ export const bridgeApi = {
 //   { ids: [], url, matched: false } — active tab isn't a /marketing page
 //   null — no active tab / api unavailable
 export async function getVisibleMpIds(
-  entity: 'contact' | 'company'
+  entity: 'contact' | 'company' | 'job'
 ): Promise<{ ids: string[]; url: string; matched: boolean } | null> {
   if (!chrome?.tabs) return null;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -88,7 +96,9 @@ export async function getVisibleMpIds(
   }
 
   try {
-    const attr = entity === 'contact' ? 'data-mp-contact-id' : 'data-mp-company-id';
+    const attr = entity === 'contact' ? 'data-mp-contact-id'
+               : entity === 'company' ? 'data-mp-company-id'
+               : 'data-mp-job-id';
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       // The function runs in the page context, so it can't reference

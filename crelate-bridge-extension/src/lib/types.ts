@@ -50,7 +50,7 @@ export interface CompanyDiff {
   crelate_empty: string[];
 }
 
-export type EntityType = 'contact' | 'company';
+export type EntityType = 'contact' | 'company' | 'job';
 
 // Fields shown in the per-entity panels and used by the conflict picker.
 // Keep this in sync with the diff* helpers in extension-bridge/index.ts.
@@ -73,5 +73,14 @@ export const ENTITY_FIELDS: Record<EntityType, { key: string; label: string }[]>
     { key: 'company_phone', label: 'Phone' },
     { key: 'location',      label: 'Location' },
     { key: 'notes',         label: 'Notes' },
+  ],
+  job: [
+    { key: 'job_title',        label: 'Title' },
+    { key: 'company_name',     label: 'Company' },
+    { key: 'location',         label: 'Location' },
+    { key: 'description',      label: 'Description' },
+    { key: 'job_url',          label: 'URL' },
+    { key: 'website_job_desc', label: 'Job desc URL' },
+    { key: 'salary_range',     label: 'Salary' },
   ],
 };

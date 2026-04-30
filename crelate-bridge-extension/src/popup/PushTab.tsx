@@ -75,15 +75,12 @@ export default function PushTab({ entity }: { entity: EntityType }) {
         return;
       }
       const recs: any[] = r.records || [];
-      // Tag each row with its linked status for the result row to render.
-      const enriched = recs.map(rec => ({
-        ...rec,
-        // PushTab's existing ResultRow checks crelate_id / crelate_contact_id;
-        // mirror linked_crelate_id into the field that matches the entity.
-        ...(entity === 'contact'
-          ? { crelate_contact_id: rec.linked_crelate_id }
-          : { crelate_id: rec.linked_crelate_id }),
-      }));
+      // Mirror linked_crelate_id into the entity-shaped field so the
+      // ResultRow's "linked" badge shows up.
+      const enriched = recs.map(rec => entity === 'contact'
+        ? { ...rec, crelate_contact_id: rec.linked_crelate_id }
+        : { ...rec, crelate_id: rec.linked_crelate_id }
+      );
       setResults(enriched);
       setQuery('');
       // Pre-select only the unlinked rows — the most useful default.
@@ -104,18 +101,32 @@ export default function PushTab({ entity }: { entity: EntityType }) {
     const t = setTimeout(async () => {
       const r = entity === 'contact'
         ? await bridgeApi.searchMpContacts(query.trim())
-        : await bridgeApi.searchMpCompanies(query.trim());
-      if (r.success) setResults(entity === 'contact' ? (r.contacts || []) : (r.companies || []));
+        : entity === 'company'
+          ? await bridgeApi.searchMpCompanies(query.trim())
+          : await bridgeApi.searchMpJobs(query.trim());
+      if (r.success) {
+        const items = entity === 'contact' ? r.contacts
+                    : entity === 'company' ? r.companies
+                    : r.jobs;
+        setResults(items || []);
+      }
       setSearching(false);
     }, 300);
     return () => clearTimeout(t);
   }, [query, entity]);
 
+  // Tiny dispatch helpers so each entity-typed call lives in one place.
+  const dedupeFnFor = (e: EntityType) => e === 'contact' ? bridgeApi.dedupeContact
+                                       : e === 'company' ? bridgeApi.dedupeCompany
+                                       : bridgeApi.dedupeJob;
+  const pushFnFor   = (e: EntityType) => e === 'contact' ? bridgeApi.pushContact
+                                       : e === 'company' ? bridgeApi.pushCompany
+                                       : bridgeApi.pushJob;
+
   // Run dedupe-check whenever a single-detail row is selected.
   useEffect(() => {
     if (!selected) { setDedupe(null); setChoices({}); setOutcome(null); return; }
-    const fn = entity === 'contact' ? bridgeApi.dedupeContact : bridgeApi.dedupeCompany;
-    fn(selected.id).then(r => {
+    dedupeFnFor(entity)(selected.id).then(r => {
       if (r.success) {
         setDedupe({ status: r.status, crelate_id: r.crelate_id, crelate: r.crelate, diff: r.diff, mp: r.mp });
         const seed: Record<string, FieldChoice> = {};
@@ -129,13 +140,11 @@ export default function PushTab({ entity }: { entity: EntityType }) {
   const doPush = async () => {
     if (!selected) return;
     setPushing(true); setOutcome(null);
-    const fn = entity === 'contact' ? bridgeApi.pushContact : bridgeApi.pushCompany;
-    const r = await fn(selected.id, choices);
+    const r = await pushFnFor(entity)(selected.id, choices);
     setPushing(false);
     if (r.success) {
       setOutcome({ ok: true, msg: `${r.action === 'create' ? 'Created' : r.action === 'update' ? 'Updated' : 'Linked'} in Crelate (${r.crelate_id?.slice(0, 8)}…)` });
-      const dedupeFn = entity === 'contact' ? bridgeApi.dedupeContact : bridgeApi.dedupeCompany;
-      const after = await dedupeFn(selected.id);
+      const after = await dedupeFnFor(entity)(selected.id);
       if (after.success) setDedupe({ status: after.status, crelate_id: after.crelate_id, crelate: after.crelate, diff: after.diff, mp: after.mp });
     } else {
       setOutcome({ ok: false, msg: r.error || 'Push failed' });
@@ -149,16 +158,17 @@ export default function PushTab({ entity }: { entity: EntityType }) {
   const doBulkPush = async () => {
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return;
-    const fn = entity === 'contact' ? bridgeApi.pushContact : bridgeApi.pushCompany;
+    const fn = pushFnFor(entity);
+    const nameOf = (row: any): string => entity === 'contact'
+      ? ([row.first_name, row.last_name].filter(Boolean).join(' ') || '(unnamed)')
+      : entity === 'company'
+        ? (row.company_name || '(unnamed)')
+        : (row.job_title ? `${row.job_title}${row.company_name ? ' · ' + row.company_name : ''}` : '(untitled)');
     setBulk({ done: 0, total: ids.length, results: [], running: true });
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i];
       const row = results.find(r => r.id === id);
-      const name = row
-        ? (entity === 'contact'
-            ? ([row.first_name, row.last_name].filter(Boolean).join(' ') || '(unnamed)')
-            : (row.company_name || '(unnamed)'))
-        : id.slice(0, 8);
+      const name = row ? nameOf(row) : id.slice(0, 8);
       const r = await fn(id);
       const result: BulkRowResult = {
         id, name, ok: !!r.success, action: r.action,
@@ -264,7 +274,9 @@ export default function PushTab({ entity }: { entity: EntityType }) {
         <input
           placeholder={entity === 'contact'
             ? 'Search MatchPoint contacts by name, email, or company…'
-            : 'Search MatchPoint companies by name…'}
+            : entity === 'company'
+              ? 'Search MatchPoint companies by name…'
+              : 'Search MatchPoint jobs by title or company…'}
           value={query}
           onChange={e => { setQuery(e.target.value); if (fromPage) setFromPage(null); }}
         />
@@ -281,7 +293,7 @@ export default function PushTab({ entity }: { entity: EntityType }) {
           onClick={readFromPage}
           disabled={reading}
         >
-          {reading ? <><span className="spin">↻</span> reading…</> : `📄 Read ${entity === 'contact' ? 'Contacts' : 'Companies'} from MatchPoint page`}
+          {reading ? <><span className="spin">↻</span> reading…</> : `📄 Read ${entity === 'contact' ? 'Contacts' : entity === 'company' ? 'Companies' : 'Jobs'} from MatchPoint page`}
         </button>
         {fromPage && (
           <span style={{ fontSize: 11, color: '#6b7280' }}>
@@ -341,13 +353,17 @@ export default function PushTab({ entity }: { entity: EntityType }) {
           <div className="detail">
             {entity === 'contact' ? (
               <h2>{[selected.first_name, selected.last_name].filter(Boolean).join(' ') || '(unnamed)'}</h2>
-            ) : (
+            ) : entity === 'company' ? (
               <h2>{selected.company_name || '(unnamed)'}</h2>
+            ) : (
+              <h2>{selected.job_title || '(untitled)'}</h2>
             )}
             <div className="sub">
               {entity === 'contact'
                 ? ([selected.title, selected.company_name].filter(Boolean).join(' · ') || '—')
-                : ([selected.website, selected.location].filter(Boolean).join(' · ') || '—')}
+                : entity === 'company'
+                  ? ([selected.website, selected.location].filter(Boolean).join(' · ') || '—')
+                  : ([selected.company_name, selected.location].filter(Boolean).join(' · ') || '—')}
               {dedupe?.status === 'linked' && <span className="badge badge-linked">linked to Crelate</span>}
               {dedupe?.status === 'conflict' && <span className="badge badge-conflict">conflict — needs resolution</span>}
               {dedupe?.status === 'match' && <span className="badge badge-conflict">match found in Crelate</span>}
@@ -417,7 +433,7 @@ function ResultRow({
         aria-label="Select for bulk push"
       />
       <button className="body" onClick={onPick}>
-        {entity === 'contact' ? (
+        {entity === 'contact' && (
           <>
             <div className="name">
               {[row.first_name, row.last_name].filter(Boolean).join(' ') || '(unnamed)'}
@@ -428,13 +444,23 @@ function ResultRow({
               {row.email && <> · {row.email}</>}
             </div>
           </>
-        ) : (
+        )}
+        {entity === 'company' && (
           <>
             <div className="name">
               {row.company_name || '(unnamed)'}
               {linked && <span className="badge badge-linked">linked</span>}
             </div>
             <div className="meta">{[row.website, row.location].filter(Boolean).join(' · ') || '—'}</div>
+          </>
+        )}
+        {entity === 'job' && (
+          <>
+            <div className="name">
+              {row.job_title || '(untitled)'}
+              {linked && <span className="badge badge-linked">linked</span>}
+            </div>
+            <div className="meta">{[row.company_name, row.location || row.city].filter(Boolean).join(' · ') || '—'}</div>
           </>
         )}
       </button>
