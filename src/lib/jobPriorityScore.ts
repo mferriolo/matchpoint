@@ -61,6 +61,17 @@ export function categoryScore(companyType: string | null | undefined): number {
   return 60;
 }
 
+/** Penalty applied when the job title indicates per-diem or locum-tenens
+ *  work. These roles are deprioritized for this workflow; matches the
+ *  SQL-side modifier in the priority migration. */
+function perDiemLocumsPenalty(jobTitle: string | null | undefined): number {
+  const t = (jobTitle || '').toLowerCase();
+  if (!t) return 0;
+  if (t.includes('per diem') || t.includes('per-diem') || t.includes('perdiem')) return 15;
+  if (/\blocums?\b/.test(t)) return 15;
+  return 0;
+}
+
 export function priorityScore(args: {
   /** Authoritative posting date — what the source site shows. Preferred
    *  over lastSeenAt and createdAt because users can correct it manually
@@ -76,8 +87,11 @@ export function priorityScore(args: {
   const recency  = recencyScore(args.datePosted ?? args.lastSeenAt ?? args.createdAt);
   const role     = roleScore(args.jobTitle);
   const category = categoryScore(args.companyType);
+  const base     = (recency + role + category) / 3;
+  const penalty  = perDiemLocumsPenalty(args.jobTitle);
+  const total    = Math.max(0, base - penalty);
   return {
-    total: Math.round(((recency + role + category) / 3) * 100) / 100,
+    total: Math.round(total * 100) / 100,
     recency,
     role,
     category,

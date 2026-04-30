@@ -270,8 +270,20 @@ Deno.serve(async (req) => {
       if (error) return R({ success: false, error: error.message });
       if (!jobs || jobs.length === 0) return R({ success: true, message: 'No jobs need scraping', scraped: 0 });
 
+      // Definitive "this URL is dead" signals that warrant auto-closing
+      // the job. We're conservative — 403 / 429 / timeouts / generic
+      // extraction failures are NOT auto-closed because they're often
+      // transient or anti-bot blocks. Only HTTP 404 / 410 / 451 and
+      // outright network failures (DNS, connection refused) qualify.
+      const isDeadLink = (err: string | undefined): boolean => {
+        if (!err) return false;
+        if (/HTTP 404|HTTP 410|HTTP 451/.test(err)) return true;
+        if (/fetch failed|getaddrinfo|ENOTFOUND|ECONNREFUSED|connection refused|NetworkError|name not resolved/i.test(err)) return true;
+        return false;
+      };
+
       const results: any[] = [];
-      let scraped = 0, failed = 0, skipped = 0;
+      let scraped = 0, failed = 0, skipped = 0, closed = 0;
 
       for (const job of jobs) {
         if (Date.now() - st > 50000) {
@@ -302,6 +314,25 @@ Deno.serve(async (req) => {
             scraped++;
             results.push({ id: job.id, title: job.job_title, company: job.company_name, status: 'success', method, descLength: text.length, preview: text.substring(0, 200) });
           }
+        } else if (isDeadLink(fetchErr)) {
+          // Auto-close: mark the job as Closed with a reason that
+          // makes it clear it was the scraper, not the user.
+          const now = new Date().toISOString();
+          await supabase.from('marketing_jobs').update({
+            is_closed: true,
+            status: 'Closed',
+            closed_at: now,
+            closed_reason: `Auto-closed by scraper — ${fetchErr}`,
+            url_status: 'dead',
+            url_check_result: fetchErr,
+            last_url_check: now,
+            updated_at: now,
+          }).eq('id', job.id);
+          closed++;
+          results.push({
+            id: job.id, title: job.job_title, url,
+            status: 'closed', reason: fetchErr,
+          });
         } else {
           failed++;
           results.push({ id: job.id, title: job.job_title, url, status: 'error', reason: fetchErr || `Extraction failed` });
@@ -310,7 +341,7 @@ Deno.serve(async (req) => {
 
       return R({
         success: true,
-        summary: { total: jobs.length, scraped, failed, skipped },
+        summary: { total: jobs.length, scraped, failed, skipped, closed },
         results,
         ms: `${Date.now() - st}`
       });

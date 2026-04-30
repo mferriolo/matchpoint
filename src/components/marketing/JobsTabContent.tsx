@@ -560,7 +560,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
     // size: most jobs scrape in 2-5s, so a batch finishes in under
     // ~90s of wall time but each Crelate/edge call is small.
     const BATCH = 25;
-    let scraped = 0, failed = 0, skipped = 0;
+    let scraped = 0, failed = 0, skipped = 0, closed = 0;
     let firstSuccess: any = null;
     let lastError: string | null = null;
 
@@ -582,6 +582,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
             scraped += summary.scraped || 0;
             failed  += summary.failed  || 0;
             skipped += summary.skipped || 0;
+            closed  += summary.closed  || 0;
             if (!firstSuccess) {
               const successes = (data?.results || []).filter((r: any) => r.status === 'success');
               if (successes.length > 0) firstSuccess = successes[0];
@@ -608,11 +609,12 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
         setViewingJobId(firstSuccess.id);
       } else {
         const parts = [`${scraped} scraped`, `${failed} failed`, `${skipped} skipped`];
-        if (lastError) parts.push(`(last error: ${lastError.slice(0, 60)})`);
+        if (closed > 0)    parts.push(`${closed} auto-closed (dead link)`);
+        if (lastError)     parts.push(`(last error: ${lastError.slice(0, 60)})`);
         toast({
-          title: scraped > 0 ? 'Scrape complete' : 'Scrape finished with errors',
+          title: scraped > 0 ? 'Scrape complete' : closed > 0 ? 'Scrape complete (jobs closed)' : 'Scrape finished with errors',
           description: parts.join(' · '),
-          variant: scraped === 0 && failed > 0 ? 'destructive' : undefined,
+          variant: scraped === 0 && closed === 0 && failed > 0 ? 'destructive' : undefined,
         });
       }
       clearSelection();
