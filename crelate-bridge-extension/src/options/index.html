@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Crelate-Bridge Settings</title>
+    <link rel="stylesheet" href="../popup/popup.css" />
+    <style>body { width: 600px; }</style>
+  </head>
+  <body>
+    <div class="shell">
+      <header><h1>Crelate-Bridge Settings</h1><span class="ver">v0.1</span></header>
+      <main>
+        <div class="detail">
+          <h2>Server-side configuration</h2>
+          <p style="font-size:12px;color:#6b7280;margin-top:4px">
+            The Crelate API key lives in Supabase secrets, not the extension. To rotate it,
+            update <code>CRELATE_API_KEY</code> in the Supabase dashboard
+            (Project Settings → Edge Function Secrets) and redeploy the
+            <code>extension-bridge</code> function.
+          </p>
+        </div>
+        <div class="detail">
+          <h2>Conflict policy</h2>
+          <p style="font-size:12px;color:#6b7280;margin-top:4px">
+            <strong>Always-ask (path C).</strong> Any field-level divergence opens a
+            side-by-side picker. There's no auto-merge — you click the winner per field.
+          </p>
+        </div>
+        <div class="detail">
+          <h2>Endpoints</h2>
+          <p style="font-size:12px;color:#6b7280;margin-top:4px">
+            Bridge: <code>https://nrnmzvenwjqsnegxyaxz.supabase.co/functions/v1/extension-bridge</code><br />
+            Crelate: <code>https://app.crelate.com/api3</code>
+          </p>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "Crelate ⇄ MatchPoint Bridge",
+  "version": "0.1.0",
+  "description": "Two-way sync between MatchPoint and Crelate ATS — push, pull, and resolve conflicts.",
+  "icons": {
+    "16": "public/icons/icon-16.png",
+    "48": "public/icons/icon-48.png",
+    "128": "public/icons/icon-128.png"
+  },
+  "action": {
+    "default_popup": "src/popup/index.html",
+    "default_title": "Crelate ⇄ MatchPoint Bridge"
+  },
+  "options_page": "src/options/index.html",
+  "background": {
+    "service_worker": "src/background.ts",
+    "type": "module"
+  },
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://nrnmzvenwjqsnegxyaxz.supabase.co/*",
+    "https://app.crelate.com/*",
+    "https://matchpoint-nu-dun.vercel.app/*",
+    "http://localhost:5173/*",
+    "http://localhost:8080/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://app.crelate.com/*"],
+      "js": ["src/content/crelate.ts"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://matchpoint-nu-dun.vercel.app/marketing*",
+        "http://localhost:5173/marketing*",
+        "http://localhost:8080/marketing*"
+      ],
+      "js": ["src/content/matchpoint.ts"],
+      "run_at": "document_idle"
+    }
+  ]
+}
