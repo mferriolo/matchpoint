@@ -10,6 +10,9 @@ type DedupeResult = {
   mp: any;
 };
 
+type BulkRowResult = { id: string; name: string; ok: boolean; action?: string; msg?: string };
+type BulkProgress = { done: number; total: number; results: BulkRowResult[]; running: boolean };
+
 export default function PushTab({ entity }: { entity: EntityType }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<any[]>([]);
@@ -19,13 +22,20 @@ export default function PushTab({ entity }: { entity: EntityType }) {
   const [pushing, setPushing] = useState(false);
   const [outcome, setOutcome] = useState<{ ok: boolean; msg: string } | null>(null);
   const [choices, setChoices] = useState<Record<string, FieldChoice>>({});
+  // Bulk-mode state. selectedIds is the multi-select set; bulk progress
+  // is the running outcome of a "Push N" operation. Defaulting to MP-wins
+  // for any conflicts encountered during bulk (the user can flip individual
+  // contacts to single-record mode later if they want the picker).
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulk, setBulk] = useState<BulkProgress | null>(null);
 
-  // Reset everything when the user flips entity type.
+  // Reset when entity flips.
   useEffect(() => {
-    setQuery(''); setResults([]); setSelected(null); setDedupe(null); setOutcome(null); setChoices({});
+    setQuery(''); setResults([]); setSelected(null); setDedupe(null);
+    setOutcome(null); setChoices({}); setSelectedIds(new Set()); setBulk(null);
   }, [entity]);
 
-  // Debounced search against MatchPoint.
+  // Debounced search.
   useEffect(() => {
     if (query.trim().length < 2) { setResults([]); return; }
     setSearching(true);
@@ -39,7 +49,7 @@ export default function PushTab({ entity }: { entity: EntityType }) {
     return () => clearTimeout(t);
   }, [query, entity]);
 
-  // Run dedupe check on selection.
+  // Run dedupe-check whenever a single-detail row is selected.
   useEffect(() => {
     if (!selected) { setDedupe(null); setChoices({}); setOutcome(null); return; }
     const fn = entity === 'contact' ? bridgeApi.dedupeContact : bridgeApi.dedupeCompany;
@@ -53,10 +63,10 @@ export default function PushTab({ entity }: { entity: EntityType }) {
     });
   }, [selected, entity]);
 
+  // ── Single-record push (with field-level conflict resolution) ─────
   const doPush = async () => {
     if (!selected) return;
-    setPushing(true);
-    setOutcome(null);
+    setPushing(true); setOutcome(null);
     const fn = entity === 'contact' ? bridgeApi.pushContact : bridgeApi.pushCompany;
     const r = await fn(selected.id, choices);
     setPushing(false);
@@ -70,7 +80,92 @@ export default function PushTab({ entity }: { entity: EntityType }) {
     }
   };
 
+  // ── Bulk push: loop the single-record action over every selected id.
+  // No field_choices passed → defaults to MP-wins for any conflict (the
+  // bridge's contract: omitted fields use MP values). Throttling is
+  // built into the edge function (400ms between Crelate calls).
+  const doBulkPush = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const fn = entity === 'contact' ? bridgeApi.pushContact : bridgeApi.pushCompany;
+    setBulk({ done: 0, total: ids.length, results: [], running: true });
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i];
+      const row = results.find(r => r.id === id);
+      const name = row
+        ? (entity === 'contact'
+            ? ([row.first_name, row.last_name].filter(Boolean).join(' ') || '(unnamed)')
+            : (row.company_name || '(unnamed)'))
+        : id.slice(0, 8);
+      const r = await fn(id);
+      const result: BulkRowResult = {
+        id, name, ok: !!r.success, action: r.action,
+        msg: r.error || r.message || '',
+      };
+      setBulk(prev => prev ? { ...prev, done: i + 1, results: [...prev.results, result] } : null);
+    }
+    setBulk(prev => prev ? { ...prev, running: false } : null);
+    setSelectedIds(new Set());
+  };
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const toggleSelectAll = () => {
+    setSelectedIds(prev => {
+      if (prev.size === results.length) return new Set();
+      return new Set(results.map(r => r.id));
+    });
+  };
+
   const setChoice = (field: string, choice: FieldChoice) => setChoices(prev => ({ ...prev, [field]: choice }));
+
+  // ── Bulk progress / summary view ─────────────────────────────────
+  if (bulk) {
+    const okCount   = bulk.results.filter(r => r.ok && r.action !== 'skip').length;
+    const skipCount = bulk.results.filter(r => r.ok && r.action === 'skip').length;
+    const errCount  = bulk.results.filter(r => !r.ok).length;
+    const pct = bulk.total > 0 ? Math.round((bulk.done / bulk.total) * 100) : 0;
+    return (
+      <>
+        <div className="bulk-progress">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <strong>{bulk.running ? 'Pushing…' : 'Pushed'} {bulk.done}/{bulk.total}</strong>
+            {!bulk.running && (
+              <button className="btn btn-secondary" style={{ flex: 'none', padding: '4px 10px' }} onClick={() => { setBulk(null); }}>
+                Done
+              </button>
+            )}
+          </div>
+          <div className="bar"><div style={{ width: `${pct}%` }} /></div>
+          <div className="results-summary">
+            <span className="ok">{okCount} pushed</span>
+            <span className="skip">{skipCount} skipped (already linked)</span>
+            <span className="err">{errCount} errors</span>
+          </div>
+        </div>
+        <div className="list">
+          {bulk.results.map((r, idx) => (
+            <div key={`${r.id}-${idx}`} className="row" style={{ cursor: 'default' }}>
+              <div className="body" style={{ cursor: 'default' }}>
+                <div className="name" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>{r.name}</span>
+                  {r.ok
+                    ? <span className={`badge ${r.action === 'skip' ? 'badge-conflict' : 'badge-linked'}`}>{r.action}</span>
+                    : <span className="badge" style={{ background: '#fee2e2', color: '#991b1b' }}>error</span>}
+                </div>
+                {r.msg && !r.ok && <div className="meta" style={{ color: '#991b1b' }}>{r.msg}</div>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
@@ -85,14 +180,42 @@ export default function PushTab({ entity }: { entity: EntityType }) {
         />
       </div>
 
+      {!selected && selectedIds.size > 0 && (
+        <div className="bulk-bar">
+          <span>{selectedIds.size} selected (defaults: MP wins on conflict)</span>
+          <div className="controls">
+            <button className="ghost" onClick={() => setSelectedIds(new Set())}>Clear</button>
+            <button onClick={doBulkPush}>Push {selectedIds.size}</button>
+          </div>
+        </div>
+      )}
+
       {!selected && (
         <>
           {searching && <div className="placeholder"><span className="spin">↻</span> searching…</div>}
-          {!searching && query.length < 2 && <div className="placeholder">Type 2+ characters to search.</div>}
+          {!searching && query.length < 2 && <div className="placeholder">Type 2+ characters. Use checkboxes to push multiple.</div>}
           {!searching && query.length >= 2 && results.length === 0 && <div className="placeholder">No matches.</div>}
+          {!searching && results.length > 0 && (
+            <div style={{ marginBottom: 6, display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#6b7280' }}>
+              <button
+                onClick={toggleSelectAll}
+                style={{ background: 'none', border: 'none', color: '#911406', cursor: 'pointer', padding: 0, fontSize: 11, fontFamily: 'inherit' }}
+              >
+                {selectedIds.size === results.length ? 'Clear all' : `Select all ${results.length}`}
+              </button>
+              <span>Click row name for single-record (with conflict picker)</span>
+            </div>
+          )}
           <div className="list">
             {results.map(r => (
-              <ResultRow key={r.id} entity={entity} row={r} onPick={() => setSelected(r)} />
+              <ResultRow
+                key={r.id}
+                entity={entity}
+                row={r}
+                checked={selectedIds.has(r.id)}
+                onToggle={() => toggleSelect(r.id)}
+                onPick={() => setSelected(r)}
+              />
             ))}
           </div>
         </>
@@ -165,30 +288,44 @@ export default function PushTab({ entity }: { entity: EntityType }) {
   );
 }
 
-function ResultRow({ entity, row, onPick }: { entity: EntityType; row: any; onPick: () => void }) {
+function ResultRow({
+  entity, row, checked, onToggle, onPick,
+}: {
+  entity: EntityType; row: any; checked: boolean; onToggle: () => void; onPick: () => void;
+}) {
   const linked = !!row.crelate_id || !!row.crelate_contact_id;
-  if (entity === 'contact') {
-    return (
-      <button className="row" onClick={onPick}>
-        <div className="name">
-          {[row.first_name, row.last_name].filter(Boolean).join(' ') || '(unnamed)'}
-          {linked && <span className="badge badge-linked">linked</span>}
-        </div>
-        <div className="meta">
-          {[row.title, row.company_name].filter(Boolean).join(' · ') || '—'}
-          {row.email && <> · {row.email}</>}
-        </div>
-      </button>
-    );
-  }
   return (
-    <button className="row" onClick={onPick}>
-      <div className="name">
-        {row.company_name || '(unnamed)'}
-        {linked && <span className="badge badge-linked">linked</span>}
-      </div>
-      <div className="meta">{[row.website, row.location].filter(Boolean).join(' · ') || '—'}</div>
-    </button>
+    <div className={`row ${checked ? 'selected' : ''}`}>
+      <input
+        type="checkbox"
+        className="check"
+        checked={checked}
+        onChange={onToggle}
+        aria-label="Select for bulk push"
+      />
+      <button className="body" onClick={onPick}>
+        {entity === 'contact' ? (
+          <>
+            <div className="name">
+              {[row.first_name, row.last_name].filter(Boolean).join(' ') || '(unnamed)'}
+              {linked && <span className="badge badge-linked">linked</span>}
+            </div>
+            <div className="meta">
+              {[row.title, row.company_name].filter(Boolean).join(' · ') || '—'}
+              {row.email && <> · {row.email}</>}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="name">
+              {row.company_name || '(unnamed)'}
+              {linked && <span className="badge badge-linked">linked</span>}
+            </div>
+            <div className="meta">{[row.website, row.location].filter(Boolean).join(' · ') || '—'}</div>
+          </>
+        )}
+      </button>
+    </div>
   );
 }
 
