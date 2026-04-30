@@ -41,6 +41,14 @@ const sb = createClient(SU, SK);
 const CB = "https://app.crelate.com/api3";
 const DL = 400; // ms between Crelate calls — same as push-to-crelate
 
+// Crelate tenant-scoped constants required when creating a Job entity.
+// Same defaults as the existing push-to-crelate function; user's secrets
+// override if they've customized.
+const CR_OPP_TYPE_ID = Deno.env.get('CRELATE_OPPORTUNITY_TYPE_ID')
+  || '91835d38-fcfd-4128-10d3-f959ef60dc08';
+const CR_SALES_STATUS_ID = Deno.env.get('CRELATE_SALES_WORKFLOW_STATUS_ID')
+  || '05bdf87b-cdde-48d2-bfe7-aa6a0126d947';
+
 const W = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const UI = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (v: any) => typeof v === 'string' && UI.test(v);
@@ -1217,35 +1225,124 @@ Deno.serve(async (req) => {
       const linkedId: string | null = link?.crelate_id || mp.crelate_id || null;
 
       if (!linkedId) {
-        // Delegate create to push-to-crelate. It writes mp.crelate_id on
-        // success, so we read it back and mirror into crelate_links.
-        try {
-          const { data: pushRes, error } = await sb.functions.invoke('push-to-crelate', {
-            body: { action: 'push_jobs', records: [mp] },
-          });
-          if (error) {
-            await logSync({ entity_type: 'job', direction: 'push', action: 'error', mp_id, error_message: error.message, actor });
-            return R({ success: false, error: error.message }, 500);
-          }
-          const result = (pushRes?.results || [])[0];
-          if (result?.status === 'success' && result.crelateId) {
-            await upsertLink('job', mp_id, result.crelateId, 'push');
-            await logSync({ entity_type: 'job', direction: 'push', action: 'create', mp_id, crelate_id: result.crelateId, fields_changed: { delegated: true }, actor });
-            return R({ success: true, action: 'create', crelate_id: result.crelateId, message: result.message });
-          }
-          if (result?.status === 'skipped' && result.crelateId) {
-            await upsertLink('job', mp_id, result.crelateId, 'push');
-            await logSync({ entity_type: 'job', direction: 'push', action: 'skip', mp_id, crelate_id: result.crelateId, error_message: 'duplicate already linked', actor });
-            return R({ success: true, action: 'skip', crelate_id: result.crelateId, message: result.message });
-          }
-          const errMsg = result?.message || pushRes?.error || 'push-to-crelate returned no result';
-          await logSync({ entity_type: 'job', direction: 'push', action: 'error', mp_id, error_message: errMsg, actor });
-          return R({ success: false, error: errMsg }, 500);
-        } catch (e) {
-          const msg = (e as Error).message;
-          await logSync({ entity_type: 'job', direction: 'push', action: 'error', mp_id, error_message: msg, actor });
-          return R({ success: false, error: msg }, 500);
+        // Inline POST /jobs. Earlier versions delegated to push-to-crelate
+        // for its title-resolution machinery, but supabase.functions.invoke
+        // swallows the inner response body on non-2xx and wraps it as
+        // "Edge Function returned a non-2xx status code", which is useless
+        // for debugging. Inlining lets us surface Crelate's actual error.
+        //
+        // Title-id resolution is dropped — Crelate accepts jobs without a
+        // JobTitleId; the user can categorise them in Crelate later.
+        // Company resolution: prefer the link table, then the
+        // marketing_companies.crelate_id column, then a Crelate search.
+        const title = (mp.job_title || '').trim();
+        const company = (mp.company_name || '').trim();
+        if (!title) {
+          await logSync({ entity_type: 'job', direction: 'push', action: 'error', mp_id, error_message: 'job_title required', actor });
+          return R({ success: false, error: 'job_title is required to push a job' }, 400);
         }
+
+        let companyCrelateId: string | null = null;
+        if (company) {
+          const { data: mpCo } = await sb.from('marketing_companies')
+            .select('id, crelate_id').ilike('company_name', company).limit(1).maybeSingle();
+          if (mpCo?.crelate_id && isUuid(mpCo.crelate_id)) {
+            companyCrelateId = mpCo.crelate_id;
+          } else if (mpCo?.id) {
+            const { data: cLink } = await sb.from('crelate_links').select('crelate_id')
+              .eq('entity_type', 'company').eq('mp_id', mpCo.id).maybeSingle();
+            if (cLink?.crelate_id) companyCrelateId = cLink.crelate_id;
+          }
+          if (!companyCrelateId) {
+            const found = await findCrelateCompany(company);
+            if (found?.Id) companyCrelateId = found.Id;
+          }
+        }
+
+        const dn = company ? `${title} - ${company}` : title;
+        const ent: any = {
+          Name: dn,
+          NumberOfOpenings: 1,
+          IsLead: true,
+          OpportunityTypeId: { Id: CR_OPP_TYPE_ID },
+          SalesWorkflowItemStatusId: { Id: CR_SALES_STATUS_ID },
+        };
+        if (mp.description) ent.Description = String(mp.description).slice(0, 10000);
+        const jobUrl = mp.website_job_desc || mp.job_url;
+        if (jobUrl) ent.Websites_Other = { Value: jobUrl, IsPrimary: true };
+        if (mp.salary_range) ent.PortalCompensation = mp.salary_range;
+        const ci = mp.city || '';
+        const sa = mp.state || '';
+        if (ci || sa) ent.Locations_Business = { City: ci, State: sa, IsPrimary: true };
+        else ent.Locations_Business = { City: 'Various', State: '', IsPrimary: true };
+        if (companyCrelateId) ent.AccountId = { Id: companyCrelateId };
+
+        const res = await crelatePost('/jobs', ent);
+        await W(DL);
+
+        if (res.ok) {
+          const cid = extractId(res.data);
+          if (cid) {
+            await sb.from('marketing_jobs').update({ crelate_id: cid, updated_at: new Date().toISOString() }).eq('id', mp_id);
+            await upsertLink('job', mp_id, cid, 'push');
+            await logSync({
+              entity_type: 'job', direction: 'push', action: 'create',
+              mp_id, crelate_id: cid,
+              fields_changed: { name: dn, account: companyCrelateId || null },
+              error_message: companyCrelateId ? null : 'Created without AccountId — company not found in Crelate',
+              actor,
+            });
+            return R({
+              success: true, action: 'create', crelate_id: cid,
+              message: companyCrelateId
+                ? undefined
+                : `Created in Crelate, but company "${company}" wasn't matched — push the company first to link them.`,
+            });
+          }
+          await logSync({ entity_type: 'job', direction: 'push', action: 'error', mp_id, error_message: 'POST OK but no Crelate id returned', actor });
+          return R({ success: false, error: 'Crelate returned 2xx but no id' }, 500);
+        }
+
+        // 409 → parse the duplicate id from the error message + link.
+        if (res.status === 409) {
+          let dupId = extractDupIdFromError(res.err);
+          if (!dupId) {
+            const ex = await findCrelateJob(title, company);
+            if (ex?.Id) dupId = ex.Id;
+          }
+          if (dupId && isUuid(dupId)) {
+            await sb.from('marketing_jobs').update({ crelate_id: dupId, updated_at: new Date().toISOString() }).eq('id', mp_id);
+            await upsertLink('job', mp_id, dupId, 'push');
+            const cr = await crelateGet(`/jobs/${dupId}`);
+            await W(DL);
+            if (cr?.Data) {
+              const mapped = crelateToMpJob(cr.Data);
+              const diff = diffJob(mp, mapped);
+              if (diff.conflicts.length > 0) {
+                await logSync({
+                  entity_type: 'job', direction: 'push', action: 'conflict',
+                  mp_id, crelate_id: dupId,
+                  fields_changed: diff.conflicts,
+                  error_message: '409 duplicate, conflicts pending resolution',
+                  actor,
+                });
+                return R({
+                  success: true,
+                  action: 'conflict',
+                  crelate_id: dupId,
+                  mp_id, diff, crelate: mapped, mp,
+                  message: 'Linked to an existing Crelate job — fields differ. Resolve to merge.',
+                });
+              }
+            }
+            await logSync({ entity_type: 'job', direction: 'push', action: 'skip', mp_id, crelate_id: dupId, error_message: '409 → linked existing (no field diff)', actor });
+            return R({ success: true, action: 'skip', crelate_id: dupId, message: 'Linked to existing Crelate job (no changes needed).' });
+          }
+        }
+
+        const errMsg = res.err || `Crelate POST /jobs failed (status ${res.status || '?'})`;
+        await logSync({ entity_type: 'job', direction: 'push', action: 'error', mp_id, error_message: errMsg, actor });
+        return R({ success: false, error: errMsg, status: res.status }, 500);
       }
 
       // Update — PATCH directly with the safe shallow set (description /
