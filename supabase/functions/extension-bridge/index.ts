@@ -149,6 +149,36 @@ const extractDupIdFromError = (err: string | undefined | null): string | null =>
   return m ? m[0] : null;
 };
 
+// Probe whether a Crelate entity at the given path still exists. Used
+// to detect stale links — if a recruiter deletes the Crelate-side
+// record but the MP-side still has crelate_id populated, our PATCH
+// would 404 with "record not found". Clearing the link in that case
+// lets the next push fall through to the create branch.
+async function crelateExistsAt(path: string): Promise<boolean> {
+  const r = await crelateGet(path);
+  return !!r?.Data;
+}
+
+async function clearStaleLink(
+  entity_type: 'contact' | 'company' | 'job',
+  mp_id: string,
+  crelate_id: string,
+  actor: string,
+) {
+  const table = entity_type === 'contact' ? 'marketing_contacts'
+              : entity_type === 'company' ? 'marketing_companies'
+              : 'marketing_jobs';
+  const idCol = entity_type === 'contact' ? 'crelate_contact_id' : 'crelate_id';
+  await sb.from(table).update({ [idCol]: null }).eq('id', mp_id);
+  await sb.from('crelate_links').delete().eq('entity_type', entity_type).eq('mp_id', mp_id);
+  await logSync({
+    entity_type, direction: 'push', action: 'skip',
+    mp_id, crelate_id,
+    error_message: 'stale link cleared — Crelate-side record no longer exists; will recreate',
+    actor,
+  });
+}
+
 // ── Sync log + linking ──────────────────────────────────────────────
 async function logSync(entry: {
   entity_type: 'contact' | 'company' | 'job';
@@ -442,22 +472,69 @@ async function loadAllJobTitles(): Promise<void> {
   console.log(`[bridge] loaded ${out.length} job titles into cache`);
 }
 
+// Strip job-board noise so "*** Urgently hiring | Gastroenterology
+// Physician ***" reduces to "Gastroenterology Physician" and matches
+// the Crelate jobtitle cache.
+function simplifyTitle(t: string): string {
+  if (!t) return '';
+  return t
+    // Asterisk decorations
+    .replace(/\*+/g, ' ')
+    // Common job-board prefixes
+    .replace(/\b(urgently hiring|now hiring|hiring|immediate(?:ly)? hiring|featured|new posting|sponsored)\b\s*[:|\-—–]?\s*/gi, ' ')
+    // Recruiter-flavour postfixes
+    .replace(/\b(remote|hybrid|onsite|on[\-\s]site|telework|in[\-\s]?office)\b/gi, ' ')
+    // Employment type words
+    .replace(/\b(full[\s-]?time|part[\s-]?time|prn|per\s+diem|temp(?:orary)?|contract|travel|locum|locums)\b/gi, ' ')
+    // Shift indicators
+    .replace(/\b(day shift|night shift|evening shift|rotating|weekends?)\b/gi, ' ')
+    // Trailing " - Company Name" suffix
+    .replace(/\s*[-–—]\s*[A-Z][a-zA-Z\s,&.]+$/, '')
+    // Trailing ", ST" state abbreviation
+    .replace(/,?\s+[A-Z]{2}\s*$/, '')
+    // Parenthetical clutter
+    .replace(/\s*\([^)]*\)\s*/g, ' ')
+    // Trailing pipe content "Title | Company"
+    .replace(/\s*\|.*$/, '')
+    // Leading pipe content "Brand | Title"
+    .replace(/^[^|]*\|\s*/, '')
+    // Stray punctuation
+    .replace(/^[\s\-–—:|]+|[\s\-–—:|]+$/g, '')
+    // Collapse whitespace
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 async function resolveJobTitleId(title: string): Promise<{ id: string; title: string } | null> {
   if (!title) return null;
   await loadAllJobTitles();
-  const target = norm(title);
-  if (!target) return null;
-  // Exact match first.
-  for (const t of jobTitlesCache) {
-    if (t.titleNorm === target) return { id: t.id, title: t.title };
-  }
-  // Loose match — substring with min-50%-overlap so "Medical Director"
-  // matches "Medical Director - South Broward" but "Director" doesn't
-  // hijack "Senior Director of Engineering".
-  for (const t of jobTitlesCache) {
-    if (!t.titleNorm.includes(target) && !target.includes(t.titleNorm)) continue;
-    const ratio = Math.min(t.titleNorm.length, target.length) / Math.max(t.titleNorm.length, target.length);
-    if (ratio >= 0.5) return { id: t.id, title: t.title };
+  const tryMatch = (q: string): { id: string; title: string } | null => {
+    const target = norm(q);
+    if (!target) return null;
+    // Exact normalized match wins.
+    for (const t of jobTitlesCache) {
+      if (t.titleNorm === target) return { id: t.id, title: t.title };
+    }
+    // Loose match — substring with min-50%-overlap so "Medical Director"
+    // matches "Medical Director - South Broward" but "Director" doesn't
+    // hijack "Senior Director of Engineering".
+    for (const t of jobTitlesCache) {
+      if (!t.titleNorm.includes(target) && !target.includes(t.titleNorm)) continue;
+      const ratio = Math.min(t.titleNorm.length, target.length) / Math.max(t.titleNorm.length, target.length);
+      if (ratio >= 0.5) return { id: t.id, title: t.title };
+    }
+    return null;
+  };
+
+  // 1. Try the raw title first.
+  const direct = tryMatch(title);
+  if (direct) return direct;
+  // 2. Try a simplified version — strips "Urgently hiring", asterisks,
+  //    parentheticals, trailing company name, etc.
+  const simple = simplifyTitle(title);
+  if (simple && simple.toLowerCase() !== title.toLowerCase()) {
+    const m = tryMatch(simple);
+    if (m) return m;
   }
   return null;
 }
@@ -751,7 +828,13 @@ Deno.serve(async (req) => {
 
       const { data: link } = await sb.from('crelate_links')
         .select('crelate_id').eq('entity_type', 'contact').eq('mp_id', mp_id).maybeSingle();
-      const linkedId: string | null = link?.crelate_id || mp.crelate_contact_id || null;
+      let linkedId: string | null = link?.crelate_id || mp.crelate_contact_id || null;
+
+      if (linkedId && !(await crelateExistsAt(`/contacts/${linkedId}`))) {
+        await W(DL);
+        await clearStaleLink('contact', mp_id, linkedId, actor);
+        linkedId = null;
+      }
 
       // Build the resolved MP record using the user's per-field choices
       // when present. For fields the user picked 'crelate', we don't
@@ -1072,7 +1155,13 @@ Deno.serve(async (req) => {
 
       const { data: link } = await sb.from('crelate_links')
         .select('crelate_id').eq('entity_type', 'company').eq('mp_id', mp_id).maybeSingle();
-      const linkedId: string | null = link?.crelate_id || mp.crelate_id || null;
+      let linkedId: string | null = link?.crelate_id || mp.crelate_id || null;
+
+      if (linkedId && !(await crelateExistsAt(`/companies/${linkedId}`))) {
+        await W(DL);
+        await clearStaleLink('company', mp_id, linkedId, actor);
+        linkedId = null;
+      }
 
       const merged = { ...mp };
       if (choices) {
@@ -1423,7 +1512,13 @@ Deno.serve(async (req) => {
 
       const { data: link } = await sb.from('crelate_links')
         .select('crelate_id').eq('entity_type', 'job').eq('mp_id', mp_id).maybeSingle();
-      const linkedId: string | null = link?.crelate_id || mp.crelate_id || null;
+      let linkedId: string | null = link?.crelate_id || mp.crelate_id || null;
+
+      if (linkedId && !(await crelateExistsAt(`/jobs/${linkedId}`))) {
+        await W(DL);
+        await clearStaleLink('job', mp_id, linkedId, actor);
+        linkedId = null;
+      }
 
       if (!linkedId) {
         // Inline POST /jobs. Earlier versions delegated to push-to-crelate
