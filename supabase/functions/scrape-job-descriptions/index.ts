@@ -21,16 +21,33 @@ function decodeEntities(s: string): string {
 }
 
 function htmlToText(html: string): string {
-  let text = html.replace(/<script[\s\S]*?<\/script>/gi, '');
-  text = text.replace(/<style[\s\S]*?<\/style>/gi, '');
-  text = text.replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
-  text = text.replace(/<\/(p|div|h[1-6]|li|tr)>/gi, '\n');
-  text = text.replace(/<br\s*\/?>/gi, '\n');
-  text = text.replace(/<li[^>]*>/gi, '\n- ');
-  text = text.replace(/<[^>]+>/g, ' ');
-  text = decodeEntities(text);
+  // Decode-then-strip in a small loop so HTML-entity-encoded tags
+  // (`&lt;p style="..."&gt;`, common in JSON-LD descriptions) get
+  // converted back to real `<p>` first, then stripped on the next pass.
+  // Without the loop, a single decode-after-strip leaves raw markup in
+  // the output. Three passes covers double-encoded payloads (Workday +
+  // SmartRecruiters do this) and stops early once stable.
+  let text = html;
+  for (let i = 0; i < 3; i++) {
+    const before = text;
+    text = decodeEntities(text);
+    text = text.replace(/<script[\s\S]*?<\/script>/gi, '');
+    text = text.replace(/<style[\s\S]*?<\/style>/gi, '');
+    text = text.replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
+    text = text.replace(/<!--[\s\S]*?-->/g, '');
+    text = text.replace(/<\/(p|div|h[1-6]|li|tr|section|article)>/gi, '\n');
+    text = text.replace(/<br\s*\/?>/gi, '\n');
+    text = text.replace(/<li[^>]*>/gi, '\n- ');
+    // Strict tag pattern — only matches well-formed tags, so stray "<"
+    // in body text isn't accidentally consumed.
+    text = text.replace(/<\/?[a-zA-Z][^<>]*>/g, ' ');
+    if (text === before) break;
+  }
+  // Collapse zero-width and non-printing whitespace artifacts.
+  text = text.replace(/ /g, ' ').replace(/[​-‍﻿]/g, '');
   text = text.replace(/[ \t]+/g, ' ');
-  text = text.replace(/\n\s*\n/g, '\n\n');
+  text = text.replace(/\n[ \t]+/g, '\n');
+  text = text.replace(/\n{3,}/g, '\n\n');
   return text.trim();
 }
 
