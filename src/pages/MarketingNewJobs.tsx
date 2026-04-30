@@ -569,8 +569,6 @@ const DesktopMarketingNewJobs: React.FC = () => {
   const [showPushToCrelate, setShowPushToCrelate] = useState(false);
   const [showMissingTitles, setShowMissingTitles] = useState(false);
   const [showTitleMapping, setShowTitleMapping] = useState(false);
-  const [scrapingDescs, setScrapingDescs] = useState(false);
-  const [scrapeResult, setScrapeResult] = useState<any>(null);
 
   // Contact enrichment state. The find-contacts edge function runs in
   // the background via EdgeRuntime.waitUntil — the HTTP call returns
@@ -1113,26 +1111,6 @@ const DesktopMarketingNewJobs: React.FC = () => {
   }, [toast, loadData]);
 
   // Company sort handler
-  const handleScrapeDescriptions = async () => {
-    setScrapingDescs(true);
-    setScrapeResult(null);
-    try {
-      const { data, error } = await supabase.functions.invoke('scrape-job-descriptions', {
-        body: { action: 'scrape', limit: 50 }
-      });
-      if (error) throw error;
-      setScrapeResult(data);
-      toast({
-        title: 'Scraping complete',
-        description: `${data?.summary?.scraped || 0} descriptions scraped, ${data?.summary?.failed || 0} failed`,
-      });
-    } catch (e: any) {
-      toast({ title: 'Scrape failed', description: e.message, variant: 'destructive' });
-    } finally {
-      setScrapingDescs(false);
-    }
-  };
-
   const handleCompanySort = (field: typeof companySortField) => {
     if (companySortField === field) {
       setCompanySortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -1700,18 +1678,6 @@ const DesktopMarketingNewJobs: React.FC = () => {
             title="Push companies, contacts, and jobs to Crelate ATS"
           >
             <Send className="w-4 h-4" /> Push to Crelate
-          </Button>
-
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleScrapeDescriptions}
-            disabled={scrapingDescs}
-            className="gap-1.5 text-emerald-700 border-emerald-300 hover:bg-emerald-50"
-            title="Scrape job descriptions from job listing URLs"
-          >
-            {scrapingDescs ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
-            {scrapingDescs ? 'Scraping...' : 'Scrape Descriptions'}
           </Button>
 
           <Button

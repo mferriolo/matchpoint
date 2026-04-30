@@ -537,6 +537,35 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
     }
   }, [selectedIds, toast, onRefresh, clearSelection]);
 
+  // ── Bulk: scrape descriptions for the selected jobs only ──────────
+  // The scrape-job-descriptions edge function already accepts a
+  // `jobIds` array — earlier the toolbar Scrape Descriptions button
+  // didn't pass one, so it ran a full database scan (limit=50). Here
+  // we wire the visible-row selection in directly.
+  const [scrapingSelected, setScrapingSelected] = useState(false);
+  const handleBulkScrapeDescriptions = useCallback(async () => {
+    if (selectedIds.size === 0) return;
+    const ids = Array.from(selectedIds);
+    setScrapingSelected(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('scrape-job-descriptions', {
+        body: { action: 'scrape', jobIds: ids, limit: ids.length },
+      });
+      if (error) throw error;
+      const summary = data?.summary || {};
+      toast({
+        title: 'Scrape complete',
+        description: `${summary.scraped || 0} scraped · ${summary.failed || 0} failed · ${summary.skipped || 0} skipped`,
+      });
+      clearSelection();
+      onRefresh();
+    } catch (err: any) {
+      toast({ title: 'Scrape failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setScrapingSelected(false);
+    }
+  }, [selectedIds, toast, onRefresh, clearSelection]);
+
   const handleSaveJobType = useCallback(async (id: string, newType: string) => {
     try {
       const { error } = await supabase.from('marketing_jobs')
@@ -949,6 +978,16 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
             {selectedIds.size} selected
           </span>
           <div className="ml-auto flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={handleBulkScrapeDescriptions}
+              disabled={scrapingSelected}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-emerald-200 bg-white hover:bg-emerald-50 text-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Scrape job descriptions for selected jobs only"
+            >
+              {scrapingSelected ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileText className="w-3.5 h-3.5" />}
+              {scrapingSelected ? 'Scraping…' : `Scrape Descriptions (${selectedIds.size})`}
+            </button>
             <button
               type="button"
               onClick={() => handleBulkBlock(true)}
