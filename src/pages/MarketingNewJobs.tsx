@@ -565,10 +565,8 @@ const DesktopMarketingNewJobs: React.FC = () => {
   const [selectedContact, setSelectedContact] = useState<any>(null);
   const [activeTab, setActiveTab] = useState('tracker');
   const [showImportTool, setShowImportTool] = useState(false);
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [showCleanup, setShowCleanup] = useState(false);
   const [showPushToCrelate, setShowPushToCrelate] = useState(false);
-  const [clearing, setClearing] = useState(false);
   const [showMissingTitles, setShowMissingTitles] = useState(false);
   const [showTitleMapping, setShowTitleMapping] = useState(false);
   const [scrapingDescs, setScrapingDescs] = useState(false);
@@ -1038,32 +1036,6 @@ const DesktopMarketingNewJobs: React.FC = () => {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
-
-  const handleClearAllData = async () => {
-    setClearing(true);
-    try {
-      // Delete in order: contacts, jobs, then companies (due to foreign keys)
-      const { error: e1 } = await supabase.from('marketing_contacts').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-      if (e1) console.warn('Error clearing contacts:', e1.message);
-      
-      const { error: e2 } = await supabase.from('marketing_jobs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-      if (e2) console.warn('Error clearing jobs:', e2.message);
-      
-      const { error: e3 } = await supabase.from('marketing_companies').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-      if (e3) console.warn('Error clearing companies:', e3.message);
-
-      const { error: e4 } = await supabase.from('tracker_runs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-      if (e4) console.warn('Error clearing tracker runs:', e4.message);
-
-      toast({ title: 'All Data Cleared', description: 'All companies, jobs, contacts, and tracker history have been deleted.' });
-      setShowClearConfirm(false);
-      await loadData();
-    } catch (err: any) {
-      toast({ title: 'Error', description: err.message, variant: 'destructive' });
-    } finally {
-      setClearing(false);
-    }
-  };
 
   const handleExportMaster = () => {
     try {
@@ -1749,14 +1721,6 @@ const DesktopMarketingNewJobs: React.FC = () => {
             className="gap-1.5 text-emerald-700 border-emerald-300 hover:bg-emerald-50"
           >
             <Upload className="w-4 h-4" /> Import Data
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowClearConfirm(true)}
-            className="gap-1.5 text-red-600 border-red-300 hover:bg-red-50"
-          >
-            <Trash2 className="w-4 h-4" /> Clear All
           </Button>
           <div className="h-6 w-px bg-gray-200" />
           <Button variant="outline" size="sm" onClick={() => navigate('/admin')} className="text-gray-600 hover:text-blue-700 gap-1.5">
@@ -4492,60 +4456,6 @@ const DesktopMarketingNewJobs: React.FC = () => {
           onComplete={loadData}
           onClose={() => setShowImportTool(false)}
         />
-      )}
-
-      {/* Clear All Data Confirmation Dialog */}
-      {showClearConfirm && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
-            <div className="p-6">
-              <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4">
-                <Trash2 className="w-6 h-6 text-red-600" />
-              </div>
-              <h3 className="text-lg font-bold text-gray-900 text-center mb-2">Clear All Data?</h3>
-              <p className="text-sm text-gray-500 text-center mb-1">
-                This will permanently delete:
-              </p>
-              <div className="bg-red-50 border border-red-200 rounded-lg p-3 my-4 space-y-1">
-                <p className="text-sm text-red-800 flex items-center gap-2">
-                  <Briefcase className="w-4 h-4 flex-shrink-0" />
-                  <strong>{jobs.length}</strong> jobs
-                </p>
-                <p className="text-sm text-red-800 flex items-center gap-2">
-                  <Building2 className="w-4 h-4 flex-shrink-0" />
-                  <strong>{companies.length}</strong> companies
-                </p>
-                <p className="text-sm text-red-800 flex items-center gap-2">
-                  <Users className="w-4 h-4 flex-shrink-0" />
-                  <strong>{contacts.length}</strong> contacts
-                </p>
-                <p className="text-sm text-red-800 flex items-center gap-2">
-                  <Database className="w-4 h-4 flex-shrink-0" />
-                  All tracker run history
-                </p>
-              </div>
-              <p className="text-xs text-red-600 text-center font-medium">
-                This action cannot be undone. Export your data first if you need a backup.
-              </p>
-            </div>
-            <div className="border-t bg-gray-50 px-6 py-4 flex items-center justify-end gap-3">
-              <Button variant="outline" onClick={() => setShowClearConfirm(false)} disabled={clearing}>
-                Cancel
-              </Button>
-              <Button
-                onClick={handleClearAllData}
-                disabled={clearing}
-                className="bg-red-600 hover:bg-red-700 text-white gap-2"
-              >
-                {clearing ? (
-                  <><Loader2 className="w-4 h-4 animate-spin" /> Clearing...</>
-                ) : (
-                  <><Trash2 className="w-4 h-4" /> Yes, Clear Everything</>
-                )}
-              </Button>
-            </div>
-          </div>
-        </div>
       )}
 
       {/* Data Cleanup Dialog */}
