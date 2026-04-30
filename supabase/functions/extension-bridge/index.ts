@@ -123,6 +123,16 @@ const extractId = (d: any): string => {
   return '';
 };
 
+// Crelate's 409 duplicate-record error embeds the offending Crelate id
+// directly in the message text:
+//   "A duplicate record of type Contacts with ID '7456fdb0-...' was found."
+// Pull it out so we can link + diff instead of failing the push entirely.
+const extractDupIdFromError = (err: string | undefined | null): string | null => {
+  if (!err) return null;
+  const m = err.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  return m ? m[0] : null;
+};
+
 // ── Sync log + linking ──────────────────────────────────────────────
 async function logSync(entry: {
   entity_type: 'contact' | 'company' | 'job';
@@ -473,14 +483,49 @@ Deno.serve(async (req) => {
           await logSync({ entity_type: 'contact', direction: 'push', action: 'error', mp_id, error_message: 'POST OK but no Crelate id returned', actor });
           return R({ success: false, error: 'POST OK but no Crelate id returned' }, 500);
         }
-        // 409 means a duplicate exists — try to find it and link.
-        if (res.status === 409 && mp.first_name && mp.last_name) {
-          const dup = await findCrelateContact(mp.first_name, mp.last_name, mp.email);
-          if (dup) {
-            await sb.from('marketing_contacts').update({ crelate_contact_id: dup.Id, updated_at: new Date().toISOString() }).eq('id', mp_id);
-            await upsertLink('contact', mp_id, dup.Id, 'push');
-            await logSync({ entity_type: 'contact', direction: 'push', action: 'skip', mp_id, crelate_id: dup.Id, error_message: '409 → linked existing', actor });
-            return R({ success: true, action: 'skip', crelate_id: dup.Id, message: '409 duplicate, linked existing' });
+        // 409 = Crelate detected a duplicate. The duplicate's id is in
+        // the error message; pull it out, link both sides, and decide
+        // whether to surface a conflict or silently skip based on diff.
+        if (res.status === 409) {
+          let dupId = extractDupIdFromError(res.err);
+          if (!dupId && mp.first_name && mp.last_name) {
+            const dup = await findCrelateContact(mp.first_name, mp.last_name, mp.email);
+            if (dup) dupId = dup.Id;
+          }
+          if (dupId && isUuid(dupId)) {
+            // Link the records both ways so future runs see the pair.
+            await sb.from('marketing_contacts').update({ crelate_contact_id: dupId, updated_at: new Date().toISOString() }).eq('id', mp_id);
+            await upsertLink('contact', mp_id, dupId, 'push');
+
+            // Fetch the existing Crelate record + compute diff so the
+            // user can resolve. If no fields diverge, skip silently.
+            const cr = await crelateGet(`/contacts/${dupId}`);
+            await W(DL);
+            if (cr?.Data) {
+              const mapped = crelateToMpContact(cr.Data);
+              const diff = diffContact(mp, mapped);
+              if (diff.conflicts.length > 0) {
+                await logSync({
+                  entity_type: 'contact', direction: 'push', action: 'conflict',
+                  mp_id, crelate_id: dupId,
+                  fields_changed: diff.conflicts,
+                  error_message: '409 duplicate, conflicts pending resolution',
+                  actor,
+                });
+                return R({
+                  success: true,
+                  action: 'conflict',
+                  crelate_id: dupId,
+                  mp_id,
+                  diff,
+                  crelate: mapped,
+                  mp,
+                  message: 'Linked to an existing Crelate contact — fields differ. Resolve to merge.',
+                });
+              }
+            }
+            await logSync({ entity_type: 'contact', direction: 'push', action: 'skip', mp_id, crelate_id: dupId, error_message: '409 → linked existing (no field diff)', actor });
+            return R({ success: true, action: 'skip', crelate_id: dupId, message: 'Linked to existing Crelate contact (no changes needed).' });
           }
         }
         await logSync({ entity_type: 'contact', direction: 'push', action: 'error', mp_id, error_message: res.err, actor });
@@ -678,14 +723,43 @@ Deno.serve(async (req) => {
           }
           return R({ success: false, error: 'POST OK but no Crelate id returned' }, 500);
         }
-        // 409 means a duplicate exists — try to find and link.
-        if (res.status === 409 && merged.company_name) {
-          const dup = await findCrelateCompany(merged.company_name);
-          if (dup) {
-            await sb.from('marketing_companies').update({ crelate_id: dup.Id, updated_at: new Date().toISOString() }).eq('id', mp_id);
-            await upsertLink('company', mp_id, dup.Id, 'push');
-            await logSync({ entity_type: 'company', direction: 'push', action: 'skip', mp_id, crelate_id: dup.Id, error_message: '409 → linked existing', actor });
-            return R({ success: true, action: 'skip', crelate_id: dup.Id, message: '409 duplicate, linked existing' });
+        // 409 — same conflict-surfacing path as push_contact.
+        if (res.status === 409) {
+          let dupId = extractDupIdFromError(res.err);
+          if (!dupId && merged.company_name) {
+            const dup = await findCrelateCompany(merged.company_name);
+            if (dup) dupId = dup.Id;
+          }
+          if (dupId && isUuid(dupId)) {
+            await sb.from('marketing_companies').update({ crelate_id: dupId, updated_at: new Date().toISOString() }).eq('id', mp_id);
+            await upsertLink('company', mp_id, dupId, 'push');
+            const cr = await crelateGet(`/companies/${dupId}`);
+            await W(DL);
+            if (cr?.Data) {
+              const mapped = crelateToMpCompany(cr.Data);
+              const diff = diffCompany(mp, mapped);
+              if (diff.conflicts.length > 0) {
+                await logSync({
+                  entity_type: 'company', direction: 'push', action: 'conflict',
+                  mp_id, crelate_id: dupId,
+                  fields_changed: diff.conflicts,
+                  error_message: '409 duplicate, conflicts pending resolution',
+                  actor,
+                });
+                return R({
+                  success: true,
+                  action: 'conflict',
+                  crelate_id: dupId,
+                  mp_id,
+                  diff,
+                  crelate: mapped,
+                  mp,
+                  message: 'Linked to an existing Crelate company — fields differ. Resolve to merge.',
+                });
+              }
+            }
+            await logSync({ entity_type: 'company', direction: 'push', action: 'skip', mp_id, crelate_id: dupId, error_message: '409 → linked existing (no field diff)', actor });
+            return R({ success: true, action: 'skip', crelate_id: dupId, message: 'Linked to existing Crelate company (no changes needed).' });
           }
         }
         await logSync({ entity_type: 'company', direction: 'push', action: 'error', mp_id, error_message: res.err, actor });

@@ -126,10 +126,19 @@ export default function PushTab({ entity }: { entity: EntityType }) {
 
   // ── Bulk progress / summary view ─────────────────────────────────
   if (bulk) {
-    const okCount   = bulk.results.filter(r => r.ok && r.action !== 'skip').length;
-    const skipCount = bulk.results.filter(r => r.ok && r.action === 'skip').length;
-    const errCount  = bulk.results.filter(r => !r.ok).length;
+    const okCount       = bulk.results.filter(r => r.ok && r.action !== 'skip' && r.action !== 'conflict').length;
+    const skipCount     = bulk.results.filter(r => r.ok && r.action === 'skip').length;
+    const conflictCount = bulk.results.filter(r => r.ok && r.action === 'conflict').length;
+    const errCount      = bulk.results.filter(r => !r.ok).length;
     const pct = bulk.total > 0 ? Math.round((bulk.done / bulk.total) * 100) : 0;
+    // "Resolve" jumps back to the search list and opens the single-record
+    // detail panel for that contact. The dedupe-check there will see the
+    // freshly-linked crelate_contact_id and surface the diff.
+    const resolveOne = (mp_id: string) => {
+      const row = results.find(r => r.id === mp_id);
+      if (row) setSelected(row);
+      setBulk(null);
+    };
     return (
       <>
         <div className="bulk-progress">
@@ -144,21 +153,41 @@ export default function PushTab({ entity }: { entity: EntityType }) {
           <div className="bar"><div style={{ width: `${pct}%` }} /></div>
           <div className="results-summary">
             <span className="ok">{okCount} pushed</span>
-            <span className="skip">{skipCount} skipped (already linked)</span>
+            <span className="skip">{skipCount} skipped</span>
+            {conflictCount > 0 && <span className="conflict-count">{conflictCount} need merge</span>}
             <span className="err">{errCount} errors</span>
           </div>
+          {conflictCount > 0 && (
+            <p style={{ marginTop: 8, fontSize: 11, color: '#92400e' }}>
+              Crelate flagged {conflictCount} as duplicates with field-level differences. Click <strong>Resolve</strong> on each to pick which side wins per field.
+            </p>
+          )}
         </div>
         <div className="list">
           {bulk.results.map((r, idx) => (
             <div key={`${r.id}-${idx}`} className="row" style={{ cursor: 'default' }}>
               <div className="body" style={{ cursor: 'default' }}>
-                <div className="name" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <div className="name" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
                   <span>{r.name}</span>
-                  {r.ok
-                    ? <span className={`badge ${r.action === 'skip' ? 'badge-conflict' : 'badge-linked'}`}>{r.action}</span>
-                    : <span className="badge" style={{ background: '#fee2e2', color: '#991b1b' }}>error</span>}
+                  <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    {r.ok && r.action === 'conflict' && (
+                      <button
+                        className="btn btn-primary"
+                        style={{ flex: 'none', padding: '3px 10px', fontSize: 11 }}
+                        onClick={() => resolveOne(r.id)}
+                      >
+                        Resolve
+                      </button>
+                    )}
+                    {r.ok && r.action === 'conflict' && <span className="badge badge-conflict">needs merge</span>}
+                    {r.ok && r.action === 'skip'     && <span className="badge badge-conflict">{r.action}</span>}
+                    {r.ok && r.action !== 'skip' && r.action !== 'conflict' && <span className="badge badge-linked">{r.action}</span>}
+                    {!r.ok && <span className="badge" style={{ background: '#fee2e2', color: '#991b1b' }}>error</span>}
+                  </span>
                 </div>
-                {r.msg && !r.ok && <div className="meta" style={{ color: '#991b1b' }}>{r.msg}</div>}
+                {r.msg && (r.action === 'conflict' || !r.ok) && (
+                  <div className="meta" style={{ color: r.ok ? '#92400e' : '#991b1b' }}>{r.msg}</div>
+                )}
               </div>
             </div>
           ))}
