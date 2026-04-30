@@ -1,31 +1,35 @@
-// Content script for app.crelate.com. Day-1 stub: detects a contact
-// detail page and injects a "Push to MatchPoint" button into the page
-// header. Day 2 wires it up to the edge function via chrome.runtime.
+// Content script for app.crelate.com. Detects contact + company detail
+// pages and injects a "Pull to MatchPoint" button. The button writes the
+// crelate_id + entity type to chrome.storage.local; when the user opens
+// the extension popup, the Pull tab consumes that and skips straight to
+// the preview.
 //
-// Crelate's URL pattern for a contact detail is:
-//   https://app.crelate.com/main2/contact/<uuid>/...
-// Other entities follow a similar pattern. We watch for SPA navigation
-// since Crelate is a single-page app — pushState doesn't fire load.
+// Crelate URL patterns:
+//   /main2/contact/<uuid>
+//   /main2/company/<uuid>  (also seen as /account/<uuid> on older builds)
+// Crelate is an SPA so we watch the DOM for URL changes — pushState
+// doesn't fire load.
 
-const CRELATE_CONTACT_URL_RE = /\/main2\/contact\/([0-9a-f-]{36})/i;
+const CONTACT_RE = /\/main2\/contact\/([0-9a-f-]{36})/i;
+const COMPANY_RE = /\/main2\/(?:company|account)\/([0-9a-f-]{36})/i;
 const BUTTON_ID = 'crelate-bridge-push-btn';
 
-function getCrelateContactIdFromUrl(): string | null {
-  const m = location.href.match(CRELATE_CONTACT_URL_RE);
-  return m ? m[1] : null;
+type Detected = { entity: 'contact' | 'company'; id: string } | null;
+
+function detect(): Detected {
+  const c = location.href.match(CONTACT_RE);
+  if (c) return { entity: 'contact', id: c[1] };
+  const co = location.href.match(COMPANY_RE);
+  if (co) return { entity: 'company', id: co[1] };
+  return null;
 }
 
-function injectPushButton() {
+function injectButton(d: NonNullable<Detected>) {
   if (document.getElementById(BUTTON_ID)) return;
-  const id = getCrelateContactIdFromUrl();
-  if (!id) return;
 
-  // Crelate's header DOM changes between releases; pick the most stable
-  // anchor we can find, fall back to body if needed. The button is
-  // floated in the top-right so it doesn't fight with their toolbar.
   const btn = document.createElement('button');
   btn.id = BUTTON_ID;
-  btn.textContent = '⇄ Pull to MatchPoint';
+  btn.textContent = `⇄ Pull ${d.entity} to MatchPoint`;
   btn.style.cssText = `
     position: fixed;
     top: 12px;
@@ -43,26 +47,27 @@ function injectPushButton() {
     box-shadow: 0 2px 8px rgba(0,0,0,0.15);
   `;
   btn.onclick = () => {
-    // Day 1: open the popup pointed at this id. Day 2: trigger pull
-    // directly via chrome.runtime.sendMessage to background.
-    chrome.runtime.sendMessage({ type: 'crelate_pull_request', crelate_id: id });
-    btn.textContent = '✓ Use the popup\'s Pull tab';
-    btn.style.background = '#166534';
+    chrome.storage.local.set({
+      pending_pull_id: d.id,
+      pending_pull_entity: d.entity,
+    }, () => {
+      btn.textContent = '✓ Open the extension popup';
+      btn.style.background = '#166534';
+    });
   };
   document.body.appendChild(btn);
 }
 
 function removeButton() {
-  const el = document.getElementById(BUTTON_ID);
-  if (el) el.remove();
+  document.getElementById(BUTTON_ID)?.remove();
 }
 
 function update() {
-  if (getCrelateContactIdFromUrl()) injectPushButton();
+  const d = detect();
+  if (d) injectButton(d);
   else removeButton();
 }
 
-// Initial + observe SPA route changes.
 update();
 const observer = new MutationObserver(() => update());
 observer.observe(document.documentElement, { childList: true, subtree: true });

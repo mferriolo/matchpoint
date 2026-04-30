@@ -36,12 +36,27 @@ export async function bridge<T = any>(action: string, payload: Record<string, an
 // Typed wrappers for the actions the popup uses.
 export const bridgeApi = {
   ping: () => bridge('ping'),
-  searchContacts: (query: string) => bridge('search_mp_contacts', { query }),
+
+  // Push side: search MatchPoint, dedupe-check, push.
+  searchMpContacts:  (query: string) => bridge('search_mp_contacts', { query }),
+  searchMpCompanies: (query: string) => bridge('search_mp_companies', { query }),
   dedupeContact: (mp_id: string) => bridge('dedupe_check_contact', { mp_id }),
+  dedupeCompany: (mp_id: string) => bridge('dedupe_check_company', { mp_id }),
   pushContact: (mp_id: string, field_choices?: Record<string, any>) =>
     bridge('push_contact', { mp_id, field_choices }),
+  pushCompany: (mp_id: string, field_choices?: Record<string, any>) =>
+    bridge('push_company', { mp_id, field_choices }),
+
+  // Pull side: search Crelate, preview vs MP, pull.
+  searchCrelateContacts:  (query: string) => bridge('search_crelate_contacts', { query }),
+  searchCrelateCompanies: (query: string) => bridge('search_crelate_companies', { query }),
+  pullContactPreview: (crelate_id: string) => bridge('pull_contact_preview', { crelate_id }),
+  pullCompanyPreview: (crelate_id: string) => bridge('pull_company_preview', { crelate_id }),
   pullContact: (crelate_id: string, field_choices?: Record<string, any>) =>
     bridge('pull_contact', { crelate_id, field_choices }),
+  pullCompany: (crelate_id: string, field_choices?: Record<string, any>) =>
+    bridge('pull_company', { crelate_id, field_choices }),
+
   history: (opts: { limit?: number; entity_type?: string; direction?: string } = {}) =>
     bridge('list_history', opts),
 };

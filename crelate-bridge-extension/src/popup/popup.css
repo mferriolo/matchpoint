@@ -47,6 +47,32 @@ nav.tabs button.active { color: #911406; border-bottom-color: #911406; }
 
 main { flex: 1; padding: 12px; overflow-y: auto; }
 
+.entity-picker {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 10px;
+  padding: 3px;
+  background: #f3f4f6;
+  border-radius: 6px;
+}
+.entity-picker button {
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #6b7280;
+  cursor: pointer;
+  font-family: inherit;
+}
+.entity-picker button.active {
+  background: white;
+  color: #911406;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+
 .search {
   display: flex;
   gap: 6px;

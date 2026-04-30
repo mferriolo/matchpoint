@@ -228,6 +228,82 @@ function diffContact(mp: any, crelateMapped: any): { conflicts: any[]; mp_empty:
   return { conflicts, mp_empty, crelate_empty };
 }
 
+// ── Field mapping (companies) ────────────────────────────────────────
+// MP marketing_companies has company_name + website + homepage_url +
+// notes + company_phone + location (free-form "City, State"). Crelate
+// company entity has Name + Websites_Other + Description + PhoneNumbers_Work
+// + Locations_Business{City,State}. We split MP's location into city/state
+// best-effort on push, and reassemble on pull.
+function splitLocation(loc: string | null | undefined): { city: string; state: string } {
+  if (!loc) return { city: '', state: '' };
+  const parts = loc.split(',').map((s) => s.trim()).filter(Boolean);
+  return { city: parts[0] || '', state: parts[1] || '' };
+}
+
+function mpToCrelateCompany(mp: any): any {
+  const ent: any = {};
+  if (mp.company_name) ent.Name = mp.company_name.trim();
+  const website = mp.website || mp.homepage_url || '';
+  if (website) ent.Websites_Other = { Value: website, IsPrimary: true };
+  if (mp.notes) ent.Description = String(mp.notes).slice(0, 5000);
+  const phone = mp.company_phone || mp.contact_phone || '';
+  if (phone) ent.PhoneNumbers_Work = { Value: phone, IsPrimary: true };
+  const { city, state } = splitLocation(mp.location);
+  if (city || state) ent.Locations_Business = { City: city, State: state, IsPrimary: true };
+  return ent;
+}
+
+function crelateToMpCompany(c: any): any {
+  const website = c.Websites_Other?.Value || c.Website || '';
+  const phone   = c.PhoneNumbers_Work?.Value || '';
+  const city    = c.Locations_Business?.City || '';
+  const state   = c.Locations_Business?.State || '';
+  const location = [city, state].filter(Boolean).join(', ');
+  return {
+    company_name: c.Name || '',
+    website,
+    notes: c.Description || '',
+    company_phone: phone,
+    location,
+  };
+}
+
+function diffCompany(mp: any, mapped: any): { conflicts: any[]; mp_empty: string[]; crelate_empty: string[] } {
+  const fields = ['company_name', 'website', 'notes', 'company_phone', 'location'] as const;
+  const conflicts: any[] = [];
+  const mp_empty: string[] = [];
+  const crelate_empty: string[] = [];
+  for (const f of fields) {
+    const mv = (mp[f] || '').toString().trim();
+    const cv = (mapped[f] || '').toString().trim();
+    if (!mv && !cv) continue;
+    if (!mv) { mp_empty.push(f); continue; }
+    if (!cv) { crelate_empty.push(f); continue; }
+    if (mv.toLowerCase() !== cv.toLowerCase()) {
+      conflicts.push({ field: f, mp_value: mv, crelate_value: cv });
+    }
+  }
+  return { conflicts, mp_empty, crelate_empty };
+}
+
+async function findCrelateCompany(name: string) {
+  if (!name) return null;
+  try {
+    const r = await crelateGet('/companies', { name, limit: '20' });
+    const target = norm(name);
+    for (const c of (r?.Data || [])) {
+      if (!c.Id || !isUuid(c.Id) || !c.Name) continue;
+      if (norm(c.Name) === target) return c;
+      // Prefix / substring match — Crelate's name search is fuzzy enough
+      // that exact-string matches sometimes don't show up if punctuation
+      // differs ("Acme, Inc." vs "Acme Inc"). Accept the first close match.
+      const nc = norm(c.Name);
+      if (target && (nc.startsWith(target + ' ') || target.startsWith(nc + ' ') || nc === target)) return c;
+    }
+    return null;
+  } catch { return null; }
+}
+
 // ── Find an existing Crelate contact by name+email ───────────────────
 async function findCrelateContact(fn: string, ln: string, email?: string) {
   // Email match first if available — far more reliable than name match.
@@ -484,11 +560,274 @@ Deno.serve(async (req) => {
       return R({ success: true, entries: data || [] });
     }
 
-    // ── push_company / pull_company / push_job / pull_job — Day 2-3 ──
-    if (['push_company', 'pull_company', 'push_job', 'pull_job',
-         'dedupe_check_company', 'dedupe_check_job',
-         'search_mp_companies', 'search_mp_jobs'].includes(action)) {
-      return R({ success: false, error: `${action} — implementation pending (Day 2-3)`, todo: true }, 501);
+    // ── search_mp_companies — popup type-ahead, Push side ────────────
+    if (action === 'search_mp_companies') {
+      const q: string = (body.query || '').trim();
+      if (q.length < 2) return R({ success: true, companies: [] });
+      const { data, error } = await sb.from('marketing_companies')
+        .select('id, company_name, website, homepage_url, notes, company_phone, contact_phone, location, crelate_id')
+        .ilike('company_name', `%${q}%`).limit(20);
+      if (error) return R({ success: false, error: error.message }, 500);
+      return R({ success: true, companies: data || [] });
+    }
+
+    // ── search_crelate_contacts / search_crelate_companies — popup
+    //    type-ahead on the Pull side. Crelate's /contacts and /companies
+    //    endpoints accept name + email, so we proxy lightly and shape
+    //    the response so the popup can render results without knowing
+    //    Crelate's payload shape.
+    if (action === 'search_crelate_contacts') {
+      const q: string = (body.query || '').trim();
+      if (q.length < 2) return R({ success: true, contacts: [] });
+      const params: Record<string, string> = { limit: '20' };
+      // If it looks like an email, search by email; otherwise by name.
+      if (q.includes('@')) params.email = q; else params.name = q;
+      const r = await crelateGet('/contacts', params);
+      const items = (r?.Data || []).slice(0, 20).map((c: any) => ({
+        crelate_id: c.Id,
+        first_name: c.FirstName || '',
+        last_name:  c.LastName || '',
+        email:      c.EmailAddresses_Work?.Value || c.PrimaryEmail || '',
+        title:      c.CurrentPosition?.JobTitle || '',
+        company_name: c.CurrentPosition?.CompanyName || c.AccountName || '',
+      }));
+      return R({ success: true, contacts: items });
+    }
+
+    if (action === 'search_crelate_companies') {
+      const q: string = (body.query || '').trim();
+      if (q.length < 2) return R({ success: true, companies: [] });
+      const r = await crelateGet('/companies', { name: q, limit: '20' });
+      const items = (r?.Data || []).slice(0, 20).map((c: any) => ({
+        crelate_id: c.Id,
+        company_name: c.Name || '',
+        website: c.Websites_Other?.Value || '',
+      }));
+      return R({ success: true, companies: items });
+    }
+
+    // ── dedupe_check_company — same shape as the contact equivalent ─
+    if (action === 'dedupe_check_company') {
+      const mp_id: string = body.mp_id;
+      if (!mp_id) return R({ success: false, error: 'mp_id required' }, 400);
+
+      const { data: mp } = await sb.from('marketing_companies').select('*').eq('id', mp_id).single();
+      if (!mp) return R({ success: false, error: 'mp company not found' }, 404);
+
+      const { data: existingLink } = await sb.from('crelate_links')
+        .select('crelate_id').eq('entity_type', 'company').eq('mp_id', mp_id).maybeSingle();
+      const linkedId = existingLink?.crelate_id || mp.crelate_id || null;
+
+      if (linkedId) {
+        const cr = await crelateGet(`/companies/${linkedId}`);
+        const crData = cr?.Data;
+        if (!crData) return R({ success: true, status: 'linked', crelate_id: linkedId, crelate: null, diff: null, mp });
+        const mapped = crelateToMpCompany(crData);
+        const diff = diffCompany(mp, mapped);
+        return R({
+          success: true,
+          status: diff.conflicts.length > 0 ? 'conflict' : 'linked',
+          crelate_id: linkedId, crelate: mapped, diff, mp,
+        });
+      }
+
+      const found = await findCrelateCompany(mp.company_name);
+      if (!found) return R({ success: true, status: 'none', mp });
+      const mapped = crelateToMpCompany(found);
+      const diff = diffCompany(mp, mapped);
+      return R({
+        success: true,
+        status: diff.conflicts.length > 0 ? 'conflict' : 'match',
+        crelate_id: found.Id, crelate: mapped, diff, mp,
+      });
+    }
+
+    // ── push_company — MP → Crelate ──────────────────────────────────
+    if (action === 'push_company') {
+      const mp_id: string = body.mp_id;
+      const choices: Record<string, any> | undefined = body.field_choices;
+      if (!mp_id) return R({ success: false, error: 'mp_id required' }, 400);
+
+      const { data: mp } = await sb.from('marketing_companies').select('*').eq('id', mp_id).single();
+      if (!mp) return R({ success: false, error: 'mp company not found' }, 404);
+
+      const { data: link } = await sb.from('crelate_links')
+        .select('crelate_id').eq('entity_type', 'company').eq('mp_id', mp_id).maybeSingle();
+      const linkedId: string | null = link?.crelate_id || mp.crelate_id || null;
+
+      const merged = { ...mp };
+      if (choices) {
+        for (const [field, choice] of Object.entries(choices)) {
+          if (choice === 'crelate') delete (merged as any)[field];
+          else if (typeof choice === 'object' && choice && 'override' in choice) (merged as any)[field] = (choice as any).override;
+        }
+      }
+
+      if (!linkedId) {
+        const ent = mpToCrelateCompany(merged);
+        if (!ent.Name) return R({ success: false, error: 'company_name required to push' }, 400);
+        const res = await crelatePost('/companies', ent);
+        await W(DL);
+        if (res.ok) {
+          const cid = extractId(res.data);
+          if (cid) {
+            await sb.from('marketing_companies').update({ crelate_id: cid, updated_at: new Date().toISOString() }).eq('id', mp_id);
+            await upsertLink('company', mp_id, cid, 'push');
+            await logSync({ entity_type: 'company', direction: 'push', action: 'create', mp_id, crelate_id: cid, fields_changed: ent, actor });
+            return R({ success: true, action: 'create', crelate_id: cid });
+          }
+          return R({ success: false, error: 'POST OK but no Crelate id returned' }, 500);
+        }
+        // 409 means a duplicate exists — try to find and link.
+        if (res.status === 409 && merged.company_name) {
+          const dup = await findCrelateCompany(merged.company_name);
+          if (dup) {
+            await sb.from('marketing_companies').update({ crelate_id: dup.Id, updated_at: new Date().toISOString() }).eq('id', mp_id);
+            await upsertLink('company', mp_id, dup.Id, 'push');
+            await logSync({ entity_type: 'company', direction: 'push', action: 'skip', mp_id, crelate_id: dup.Id, error_message: '409 → linked existing', actor });
+            return R({ success: true, action: 'skip', crelate_id: dup.Id, message: '409 duplicate, linked existing' });
+          }
+        }
+        await logSync({ entity_type: 'company', direction: 'push', action: 'error', mp_id, error_message: res.err, actor });
+        return R({ success: false, error: res.err }, 500);
+      }
+
+      // PATCH existing.
+      const ent = mpToCrelateCompany(merged);
+      const res = await crelatePatch(`/companies/${linkedId}`, ent);
+      await W(DL);
+      if (res.ok) {
+        await upsertLink('company', mp_id, linkedId, 'push');
+        await logSync({ entity_type: 'company', direction: 'push', action: 'update', mp_id, crelate_id: linkedId, fields_changed: ent, actor });
+        return R({ success: true, action: 'update', crelate_id: linkedId });
+      }
+      await logSync({ entity_type: 'company', direction: 'push', action: 'error', mp_id, crelate_id: linkedId, error_message: 'PATCH failed', actor });
+      return R({ success: false, error: 'Crelate PATCH failed' }, 500);
+    }
+
+    // ── pull_company — Crelate → MP ──────────────────────────────────
+    if (action === 'pull_company') {
+      const crelate_id: string = body.crelate_id;
+      const choices: Record<string, any> | undefined = body.field_choices;
+      if (!crelate_id) return R({ success: false, error: 'crelate_id required' }, 400);
+
+      const cr = await crelateGet(`/companies/${crelate_id}`);
+      if (!cr?.Data) return R({ success: false, error: 'Crelate company not found' }, 404);
+      const mapped = crelateToMpCompany(cr.Data);
+
+      const { data: link } = await sb.from('crelate_links')
+        .select('mp_id').eq('entity_type', 'company').eq('crelate_id', crelate_id).maybeSingle();
+      let mp_id: string | null = link?.mp_id || null;
+
+      // If no link, try to find an MP company with the same name to link
+      // before creating a duplicate.
+      if (!mp_id && mapped.company_name) {
+        const { data: existing } = await sb.from('marketing_companies')
+          .select('id').ilike('company_name', mapped.company_name).limit(1).maybeSingle();
+        if (existing?.id) mp_id = existing.id;
+      }
+
+      const patch: any = {};
+      for (const [k, v] of Object.entries(mapped)) {
+        if (choices?.[k] === 'mp') continue;
+        if (choices?.[k] && typeof choices[k] === 'object' && 'override' in (choices[k] as any)) {
+          patch[k] = (choices[k] as any).override;
+        } else if (v) {
+          patch[k] = v;
+        }
+      }
+
+      if (mp_id) {
+        await sb.from('marketing_companies').update({ ...patch, updated_at: new Date().toISOString(), crelate_id }).eq('id', mp_id);
+        await upsertLink('company', mp_id, crelate_id, 'pull');
+        await logSync({ entity_type: 'company', direction: 'pull', action: 'update', mp_id, crelate_id, fields_changed: patch, actor });
+        return R({ success: true, action: 'update', mp_id });
+      }
+
+      const { data: created, error } = await sb.from('marketing_companies')
+        .insert({ ...patch, source: 'Crelate (pull)', crelate_id })
+        .select('id').single();
+      if (error || !created) {
+        await logSync({ entity_type: 'company', direction: 'pull', action: 'error', crelate_id, error_message: error?.message, actor });
+        return R({ success: false, error: error?.message || 'insert failed' }, 500);
+      }
+      mp_id = created.id;
+      await upsertLink('company', mp_id!, crelate_id, 'pull');
+      await logSync({ entity_type: 'company', direction: 'pull', action: 'create', mp_id, crelate_id, fields_changed: patch, actor });
+      return R({ success: true, action: 'create', mp_id });
+    }
+
+    // ── pull_contact_preview — for Pull tab: fetch a Crelate contact +
+    //    compute the diff against any existing MP record. Returns the
+    //    same shape as dedupe_check_contact but keyed by crelate_id.
+    if (action === 'pull_contact_preview') {
+      const crelate_id: string = body.crelate_id;
+      if (!crelate_id) return R({ success: false, error: 'crelate_id required' }, 400);
+      const cr = await crelateGet(`/contacts/${crelate_id}`);
+      if (!cr?.Data) return R({ success: false, error: 'Crelate contact not found' }, 404);
+      const mapped = crelateToMpContact(cr.Data);
+
+      // Look for an existing link or fuzzy match in MP.
+      const { data: link } = await sb.from('crelate_links')
+        .select('mp_id').eq('entity_type', 'contact').eq('crelate_id', crelate_id).maybeSingle();
+      let mp: any = null;
+      if (link?.mp_id) {
+        const { data } = await sb.from('marketing_contacts').select('*').eq('id', link.mp_id).single();
+        mp = data;
+      } else if (mapped.email) {
+        const { data } = await sb.from('marketing_contacts').select('*').ilike('email', mapped.email).limit(1).maybeSingle();
+        if (data) mp = data;
+      }
+      if (!mp && mapped.first_name && mapped.last_name) {
+        const { data } = await sb.from('marketing_contacts').select('*')
+          .ilike('first_name', mapped.first_name).ilike('last_name', mapped.last_name).limit(1).maybeSingle();
+        if (data) mp = data;
+      }
+
+      if (!mp) {
+        return R({ success: true, status: 'none', crelate_id, crelate: mapped, mp: null });
+      }
+      const diff = diffContact(mp, mapped);
+      return R({
+        success: true,
+        status: diff.conflicts.length > 0 ? 'conflict' : (link ? 'linked' : 'match'),
+        crelate_id, crelate: mapped, mp, diff,
+      });
+    }
+
+    if (action === 'pull_company_preview') {
+      const crelate_id: string = body.crelate_id;
+      if (!crelate_id) return R({ success: false, error: 'crelate_id required' }, 400);
+      const cr = await crelateGet(`/companies/${crelate_id}`);
+      if (!cr?.Data) return R({ success: false, error: 'Crelate company not found' }, 404);
+      const mapped = crelateToMpCompany(cr.Data);
+
+      const { data: link } = await sb.from('crelate_links')
+        .select('mp_id').eq('entity_type', 'company').eq('crelate_id', crelate_id).maybeSingle();
+      let mp: any = null;
+      if (link?.mp_id) {
+        const { data } = await sb.from('marketing_companies').select('*').eq('id', link.mp_id).single();
+        mp = data;
+      } else if (mapped.company_name) {
+        const { data } = await sb.from('marketing_companies').select('*')
+          .ilike('company_name', mapped.company_name).limit(1).maybeSingle();
+        if (data) mp = data;
+      }
+
+      if (!mp) {
+        return R({ success: true, status: 'none', crelate_id, crelate: mapped, mp: null });
+      }
+      const diff = diffCompany(mp, mapped);
+      return R({
+        success: true,
+        status: diff.conflicts.length > 0 ? 'conflict' : (link ? 'linked' : 'match'),
+        crelate_id, crelate: mapped, mp, diff,
+      });
+    }
+
+    // Jobs still in Day 3 scope.
+    if (['push_job', 'pull_job', 'dedupe_check_job', 'search_mp_jobs', 'pull_job_preview', 'search_crelate_jobs'].includes(action)) {
+      return R({ success: false, error: `${action} — Day 3 (jobs entity)`, todo: true }, 501);
     }
 
     return R({ success: false, error: `unknown action: ${action}` }, 400);
