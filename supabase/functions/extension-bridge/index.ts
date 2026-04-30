@@ -93,8 +93,8 @@ async function crelatePost(path: string, entity: any) {
   return { ok: false, err: 'retry', status: 0 };
 }
 
-async function crelatePatch(path: string, entity: any) {
-  if (!CK) return { ok: false };
+async function crelatePatch(path: string, entity: any): Promise<{ ok: boolean; status?: number; err?: string; rawBody?: string }> {
+  if (!CK) return { ok: false, err: 'No CRELATE_API_KEY' };
   for (let i = 0; i <= 2; i++) {
     try {
       const r = await fetch(`${CB}${path}`, {
@@ -107,11 +107,19 @@ async function crelatePatch(path: string, entity: any) {
         body: JSON.stringify({ entity }),
       });
       if (r.status === 429) { await W(3000 * (i + 1)); continue; }
-      if (!r.ok) { await r.text(); return { ok: false }; }
-      return { ok: true };
-    } catch { await W(2000); }
+      if (r.ok) return { ok: true, status: r.status };
+      // Capture the body so the caller can surface a useful message
+      // instead of "PATCH failed". Crelate sometimes returns a structured
+      // { Errors: [{ Message }] } and sometimes a plain string.
+      const text = await r.text();
+      let parsed: any; try { parsed = JSON.parse(text); } catch { parsed = null; }
+      const err = parsed?.Errors?.[0]?.Message
+        || parsed?.error
+        || (text && text.length < 500 ? text : `HTTP ${r.status}`);
+      return { ok: false, status: r.status, err, rawBody: text };
+    } catch (e) { await W(2000); }
   }
-  return { ok: false };
+  return { ok: false, err: 'retry exhausted' };
 }
 
 const extractId = (d: any): string => {
@@ -541,8 +549,9 @@ Deno.serve(async (req) => {
         await logSync({ entity_type: 'contact', direction: 'push', action: 'update', mp_id, crelate_id: linkedId, fields_changed: ent, actor });
         return R({ success: true, action: 'update', crelate_id: linkedId });
       }
-      await logSync({ entity_type: 'contact', direction: 'push', action: 'error', mp_id, crelate_id: linkedId, error_message: 'PATCH failed', actor });
-      return R({ success: false, error: 'Crelate PATCH failed' }, 500);
+      const errMsg = res.err || `Crelate PATCH failed (status ${res.status || '?'})`;
+      await logSync({ entity_type: 'contact', direction: 'push', action: 'error', mp_id, crelate_id: linkedId, error_message: errMsg, actor });
+      return R({ success: false, error: errMsg, status: res.status, rawBody: res.rawBody?.slice(0, 500) }, 500);
     }
 
     // ── pull_contact — Crelate → MP. Patches the MP row from a Crelate
@@ -766,17 +775,52 @@ Deno.serve(async (req) => {
         return R({ success: false, error: res.err }, 500);
       }
 
-      // PATCH existing.
-      const ent = mpToCrelateCompany(merged);
-      const res = await crelatePatch(`/companies/${linkedId}`, ent);
+      // PATCH existing. Some Crelate fields are write-once on companies
+      // (e.g. Locations_Business gets weird on PATCH because it represents
+      // a collection); if the full payload fails, retry with just the
+      // safest fields (Name, Description, Websites_Other) so a stray
+      // location / phone validation doesn't sink the whole update.
+      const fullEnt = mpToCrelateCompany(merged);
+      let res = await crelatePatch(`/companies/${linkedId}`, fullEnt);
       await W(DL);
+
+      if (!res.ok && (res.status === 400 || res.status === 422)) {
+        // Validation error → strip the collection-style fields that PATCH
+        // is fussy about and retry with the scalar set.
+        const safeEnt: any = {};
+        if (fullEnt.Name)        safeEnt.Name        = fullEnt.Name;
+        if (fullEnt.Description) safeEnt.Description = fullEnt.Description;
+        if (fullEnt.Websites_Other) safeEnt.Websites_Other = fullEnt.Websites_Other;
+        const retry = await crelatePatch(`/companies/${linkedId}`, safeEnt);
+        await W(DL);
+        if (retry.ok) {
+          await upsertLink('company', mp_id, linkedId, 'push');
+          await logSync({
+            entity_type: 'company', direction: 'push', action: 'update',
+            mp_id, crelate_id: linkedId,
+            fields_changed: safeEnt,
+            error_message: `partial-update — fields skipped due to ${res.status}: ${(res.err || '').slice(0, 120)}`,
+            actor,
+          });
+          return R({
+            success: true,
+            action: 'update',
+            crelate_id: linkedId,
+            partial: true,
+            message: `Updated Name/Description/Website only — Crelate rejected the full payload (${res.err || 'validation error'}). Phone/location were skipped.`,
+          });
+        }
+        res = retry; // surface the retry error if both fail
+      }
+
       if (res.ok) {
         await upsertLink('company', mp_id, linkedId, 'push');
-        await logSync({ entity_type: 'company', direction: 'push', action: 'update', mp_id, crelate_id: linkedId, fields_changed: ent, actor });
+        await logSync({ entity_type: 'company', direction: 'push', action: 'update', mp_id, crelate_id: linkedId, fields_changed: fullEnt, actor });
         return R({ success: true, action: 'update', crelate_id: linkedId });
       }
-      await logSync({ entity_type: 'company', direction: 'push', action: 'error', mp_id, crelate_id: linkedId, error_message: 'PATCH failed', actor });
-      return R({ success: false, error: 'Crelate PATCH failed' }, 500);
+      const errMsg = res.err || `Crelate PATCH failed (status ${res.status || '?'})`;
+      await logSync({ entity_type: 'company', direction: 'push', action: 'error', mp_id, crelate_id: linkedId, error_message: errMsg, actor });
+      return R({ success: false, error: errMsg, status: res.status, rawBody: res.rawBody?.slice(0, 500) }, 500);
     }
 
     // ── pull_company — Crelate → MP ──────────────────────────────────
