@@ -540,8 +540,18 @@ Deno.serve(async (req) => {
         return R({ success: false, error: res.err }, 500);
       }
 
-      // Update existing.
-      const ent = mpToCrelateContact(merged);
+      // Update existing. Drop FirstName/LastName from PATCH for the same
+      // "Duplicate entities" reason that bites companies — the link is
+      // by id, the name is set, leave it alone.
+      const fullEnt = mpToCrelateContact(merged);
+      const ent: any = { ...fullEnt };
+      delete ent.FirstName;
+      delete ent.LastName;
+      if (Object.keys(ent).length === 0) {
+        await upsertLink('contact', mp_id, linkedId, 'push');
+        await logSync({ entity_type: 'contact', direction: 'push', action: 'skip', mp_id, crelate_id: linkedId, error_message: 'nothing to update (already in sync)', actor });
+        return R({ success: true, action: 'skip', crelate_id: linkedId, message: 'Already in sync — nothing to send.' });
+      }
       const res = await crelatePatch(`/contacts/${linkedId}`, ent);
       await W(DL);
       if (res.ok) {
@@ -775,52 +785,76 @@ Deno.serve(async (req) => {
         return R({ success: false, error: res.err }, 500);
       }
 
-      // PATCH existing. Some Crelate fields are write-once on companies
-      // (e.g. Locations_Business gets weird on PATCH because it represents
-      // a collection); if the full payload fails, retry with just the
-      // safest fields (Name, Description, Websites_Other) so a stray
-      // location / phone validation doesn't sink the whole update.
+      // PATCH existing. Crelate enforces uniqueness on company Name and
+      // throws "Duplicate entities found for entity of type _Accounts"
+      // when you PATCH with a Name that's also held by another record —
+      // even when you're not changing the Name. We're linked by id, so
+      // we never need to send Name; drop it always.
+      //
+      // Same reasoning for Locations_Business / PhoneNumbers_Work — these
+      // are collection-shaped fields that PATCH treats as additions, and
+      // validation rejects them in unpredictable ways. Send the scalar
+      // safe set; if even that fails, surface the error.
       const fullEnt = mpToCrelateCompany(merged);
-      let res = await crelatePatch(`/companies/${linkedId}`, fullEnt);
+      const safeEnt: any = {};
+      if (fullEnt.Description)    safeEnt.Description    = fullEnt.Description;
+      if (fullEnt.Websites_Other) safeEnt.Websites_Other = fullEnt.Websites_Other;
+      // Phone + location are commonly the rejected ones — try them in a
+      // separate "extras" PATCH after the safe one succeeds, so a single
+      // failing field doesn't sink the rest. This keeps the operation
+      // resilient without hiding errors.
+      const extrasEnt: any = {};
+      if (fullEnt.PhoneNumbers_Work)  extrasEnt.PhoneNumbers_Work  = fullEnt.PhoneNumbers_Work;
+      if (fullEnt.Locations_Business) extrasEnt.Locations_Business = fullEnt.Locations_Business;
+
+      // If there's nothing safe to send (everything is collection-shaped),
+      // skip the API call rather than send `{}`.
+      if (Object.keys(safeEnt).length === 0 && Object.keys(extrasEnt).length === 0) {
+        await upsertLink('company', mp_id, linkedId, 'push');
+        await logSync({ entity_type: 'company', direction: 'push', action: 'skip', mp_id, crelate_id: linkedId, error_message: 'nothing to update (already in sync)', actor });
+        return R({ success: true, action: 'skip', crelate_id: linkedId, message: 'Already in sync — nothing to send.' });
+      }
+
+      let res = Object.keys(safeEnt).length > 0
+        ? await crelatePatch(`/companies/${linkedId}`, safeEnt)
+        : { ok: true } as { ok: boolean; status?: number; err?: string; rawBody?: string };
       await W(DL);
 
-      if (!res.ok && (res.status === 400 || res.status === 422)) {
-        // Validation error → strip the collection-style fields that PATCH
-        // is fussy about and retry with the scalar set.
-        const safeEnt: any = {};
-        if (fullEnt.Name)        safeEnt.Name        = fullEnt.Name;
-        if (fullEnt.Description) safeEnt.Description = fullEnt.Description;
-        if (fullEnt.Websites_Other) safeEnt.Websites_Other = fullEnt.Websites_Other;
-        const retry = await crelatePatch(`/companies/${linkedId}`, safeEnt);
-        await W(DL);
-        if (retry.ok) {
-          await upsertLink('company', mp_id, linkedId, 'push');
-          await logSync({
-            entity_type: 'company', direction: 'push', action: 'update',
-            mp_id, crelate_id: linkedId,
-            fields_changed: safeEnt,
-            error_message: `partial-update — fields skipped due to ${res.status}: ${(res.err || '').slice(0, 120)}`,
-            actor,
-          });
-          return R({
-            success: true,
-            action: 'update',
-            crelate_id: linkedId,
-            partial: true,
-            message: `Updated Name/Description/Website only — Crelate rejected the full payload (${res.err || 'validation error'}). Phone/location were skipped.`,
-          });
-        }
-        res = retry; // surface the retry error if both fail
+      const skipped: string[] = [];
+      if (!res.ok) {
+        // Surface the real error; nothing got through.
+        const errMsg = res.err || `Crelate PATCH failed (status ${res.status || '?'})`;
+        await logSync({ entity_type: 'company', direction: 'push', action: 'error', mp_id, crelate_id: linkedId, error_message: errMsg, actor });
+        return R({ success: false, error: errMsg, status: res.status, rawBody: res.rawBody?.slice(0, 500) }, 500);
       }
 
-      if (res.ok) {
-        await upsertLink('company', mp_id, linkedId, 'push');
-        await logSync({ entity_type: 'company', direction: 'push', action: 'update', mp_id, crelate_id: linkedId, fields_changed: fullEnt, actor });
-        return R({ success: true, action: 'update', crelate_id: linkedId });
+      // Try the extras separately; if they fail, the main update still
+      // counts as success and we report what was skipped.
+      if (Object.keys(extrasEnt).length > 0) {
+        const extras = await crelatePatch(`/companies/${linkedId}`, extrasEnt);
+        await W(DL);
+        if (!extras.ok) {
+          if (extrasEnt.PhoneNumbers_Work)  skipped.push('phone');
+          if (extrasEnt.Locations_Business) skipped.push('location');
+        }
       }
-      const errMsg = res.err || `Crelate PATCH failed (status ${res.status || '?'})`;
-      await logSync({ entity_type: 'company', direction: 'push', action: 'error', mp_id, crelate_id: linkedId, error_message: errMsg, actor });
-      return R({ success: false, error: errMsg, status: res.status, rawBody: res.rawBody?.slice(0, 500) }, 500);
+
+      await upsertLink('company', mp_id, linkedId, 'push');
+      await logSync({
+        entity_type: 'company', direction: 'push', action: 'update',
+        mp_id, crelate_id: linkedId,
+        fields_changed: { ...safeEnt, ...extrasEnt },
+        error_message: skipped.length > 0 ? `partial — skipped: ${skipped.join(', ')}` : null,
+        actor,
+      });
+      if (skipped.length > 0) {
+        return R({
+          success: true, action: 'update', crelate_id: linkedId,
+          partial: true,
+          message: `Updated description/website. Crelate rejected ${skipped.join(' + ')} — re-edit those manually if needed.`,
+        });
+      }
+      return R({ success: true, action: 'update', crelate_id: linkedId });
     }
 
     // ── pull_company — Crelate → MP ──────────────────────────────────
