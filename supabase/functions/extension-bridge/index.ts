@@ -403,6 +403,104 @@ async function resolveOrCreateCompanyForJob(name: string): Promise<{ id: string;
   return null;
 }
 
+// ── Lookup caches ────────────────────────────────────────────────────
+// Crelate requires lookup fields (JobTitleId, LeadSourceId, etc.) to
+// reference an existing entity by Id. POSTing to /jobtitles or
+// /contactsources is 403 with our API key, and the search-style filter
+// params on /jobtitles are silently ignored. So we paginate the full
+// list once per warm function instance and match in-memory.
+//
+// Cache TTL is 10 min — long enough that a recruiter pushing 50 jobs in
+// a row only pays the load cost once, short enough that a new lookup
+// they manually create in Crelate becomes available within the hour.
+
+interface CachedTitle { id: string; titleNorm: string; title: string }
+let jobTitlesCache: CachedTitle[] = [];
+let jobTitlesLoadedAt = 0;
+const LOOKUP_TTL_MS = 10 * 60 * 1000;
+
+async function loadAllJobTitles(): Promise<void> {
+  if (jobTitlesCache.length > 0 && (Date.now() - jobTitlesLoadedAt) < LOOKUP_TTL_MS) return;
+  const seen = new Set<string>();
+  const out: CachedTitle[] = [];
+  for (let offset = 0; offset < 10000; offset += 100) {
+    const r = await crelateGet('/jobtitles', { limit: '100', offset: String(offset) });
+    await W(DL);
+    const data = (r?.Data || []) as any[];
+    if (!Array.isArray(data) || data.length === 0) break;
+    let added = 0;
+    for (const t of data) {
+      if (!t.Id || !isUuid(t.Id) || !t.Title || seen.has(t.Id)) continue;
+      seen.add(t.Id);
+      out.push({ id: t.Id, title: t.Title, titleNorm: norm(t.Title) });
+      added++;
+    }
+    if (added === 0) break;
+  }
+  jobTitlesCache = out;
+  jobTitlesLoadedAt = Date.now();
+  console.log(`[bridge] loaded ${out.length} job titles into cache`);
+}
+
+async function resolveJobTitleId(title: string): Promise<{ id: string; title: string } | null> {
+  if (!title) return null;
+  await loadAllJobTitles();
+  const target = norm(title);
+  if (!target) return null;
+  // Exact match first.
+  for (const t of jobTitlesCache) {
+    if (t.titleNorm === target) return { id: t.id, title: t.title };
+  }
+  // Loose match — substring with min-50%-overlap so "Medical Director"
+  // matches "Medical Director - South Broward" but "Director" doesn't
+  // hijack "Senior Director of Engineering".
+  for (const t of jobTitlesCache) {
+    if (!t.titleNorm.includes(target) && !target.includes(t.titleNorm)) continue;
+    const ratio = Math.min(t.titleNorm.length, target.length) / Math.max(t.titleNorm.length, target.length);
+    if (ratio >= 0.5) return { id: t.id, title: t.title };
+  }
+  return null;
+}
+
+// Lead-source resolver — Job.LeadSourceId pulls from /contactsources.
+// Cache the "Matchpoint" id once we find it; surface a clear hint if
+// it's not in the user's Crelate so they know to create it manually.
+let matchpointLeadSourceId: string | null | undefined = undefined; // undefined = not yet attempted
+
+async function getMatchpointLeadSourceId(): Promise<string | null> {
+  if (matchpointLeadSourceId !== undefined) return matchpointLeadSourceId;
+
+  // Allow override via env so a user can hardcode the uuid.
+  const envId = Deno.env.get('CRELATE_MATCHPOINT_LEADSOURCE_ID');
+  if (envId && isUuid(envId)) {
+    matchpointLeadSourceId = envId;
+    return envId;
+  }
+
+  // Paginate /contactsources looking for an entry named "Matchpoint"
+  // (case-insensitive). Tenants typically have a few hundred sources;
+  // we cap at 5000 to be safe.
+  for (let offset = 0; offset < 5000; offset += 100) {
+    const r = await crelateGet('/contactsources', { limit: '100', offset: String(offset) });
+    await W(DL);
+    const data = (r?.Data || []) as any[];
+    if (!Array.isArray(data) || data.length === 0) break;
+    for (const cs of data) {
+      if (!cs.Id || !isUuid(cs.Id) || !cs.Name) continue;
+      if (norm(cs.Name) === 'matchpoint') {
+        matchpointLeadSourceId = cs.Id;
+        console.log(`[bridge] resolved Matchpoint lead source: ${cs.Id}`);
+        return cs.Id;
+      }
+    }
+    if (data.length < 100) break;
+  }
+
+  matchpointLeadSourceId = null;
+  console.log('[bridge] Matchpoint lead source NOT found in /contactsources — user must create it manually');
+  return null;
+}
+
 // ── Field mapping (jobs) ─────────────────────────────────────────────
 // Crelate's job entity is the most complex of the three. Pushing a job
 // requires resolving (a) the company by name → AccountId, (b) the job
@@ -1359,6 +1457,17 @@ Deno.serve(async (req) => {
           }
         }
 
+        // Resolve JobTitleId by paginating Crelate /jobtitles and matching
+        // by name. Crelate enforces JobTitleId.Id is a real uuid, and POST
+        // /jobtitles is 403, so we can only set this if a matching title
+        // already exists in the user's Crelate.
+        const titleMatch = await resolveJobTitleId(title);
+
+        // Lead source — default to "Matchpoint" if it exists in the
+        // user's /contactsources lookup pool. If not, the job gets pushed
+        // without LeadSourceId and we surface a one-time hint.
+        const leadSrcId = await getMatchpointLeadSourceId();
+
         const dn = company ? `${title} - ${company}` : title;
         const ent: any = {
           Name: dn,
@@ -1376,6 +1485,8 @@ Deno.serve(async (req) => {
         if (ci || sa) ent.Locations_Business = { City: ci, State: sa, IsPrimary: true };
         else ent.Locations_Business = { City: 'Various', State: '', IsPrimary: true };
         if (companyCrelateId) ent.AccountId = { Id: companyCrelateId };
+        if (titleMatch?.id)   ent.JobTitleId = { Id: titleMatch.id };
+        if (leadSrcId)        ent.LeadSourceId = { Id: leadSrcId };
 
         const res = await crelatePost('/jobs', ent);
         await W(DL);
@@ -1388,19 +1499,34 @@ Deno.serve(async (req) => {
             await logSync({
               entity_type: 'job', direction: 'push', action: 'create',
               mp_id, crelate_id: cid,
-              fields_changed: { name: dn, account: companyCrelateId || null, company_source: companySource },
-              error_message: companyCrelateId ? null : 'Created without AccountId — company name was empty',
+              fields_changed: {
+                name: dn,
+                account: companyCrelateId || null,
+                company_source: companySource,
+                job_title_id: titleMatch?.id || null,
+                lead_source_id: leadSrcId || null,
+              },
+              error_message: !companyCrelateId
+                ? 'Created without AccountId — company name was empty'
+                : !leadSrcId
+                  ? 'LeadSourceId skipped — "Matchpoint" not found in /contactsources'
+                  : null,
               actor,
             });
-            const companyMsg = companySource === 'auto_create' || companySource === 'auto_create_409'
-              ? ` Company "${company}" auto-created in Crelate and linked.`
-              : '';
+            const notes: string[] = [];
+            if (companySource === 'auto_create' || companySource === 'auto_create_409') {
+              notes.push(`company "${company}" auto-created`);
+            }
+            if (!titleMatch && title) {
+              notes.push(`job title "${title}" not in Crelate (left blank)`);
+            }
+            if (!leadSrcId) {
+              notes.push(`Lead Source skipped — create a "Matchpoint" entry in Crelate's Contact Sources`);
+            }
             return R({
               success: true, action: 'create', crelate_id: cid,
               company_source: companySource,
-              message: companyCrelateId
-                ? companyMsg || undefined
-                : `Created in Crelate, but company name was empty — fill it in MP and re-push to link.`,
+              message: notes.length > 0 ? notes.join(' · ') : undefined,
             });
           }
           await logSync({ entity_type: 'job', direction: 'push', action: 'error', mp_id, error_message: 'POST OK but no Crelate id returned', actor });
