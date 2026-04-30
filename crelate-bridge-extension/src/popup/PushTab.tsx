@@ -53,11 +53,20 @@ export default function PushTab({ entity }: { entity: EntityType }) {
     try {
       const visible = await getVisibleMpIds(entity);
       if (!visible) {
-        setReadError('No MatchPoint /marketing tab found. Open the page first.');
+        setReadError('Could not access the active tab. Reload the extension after the latest build.');
         return;
       }
       if (visible.ids.length === 0) {
-        setReadError(`No ${entity}s on the page. Switch to the ${entity === 'contact' ? 'Contacts' : 'Companies'} tab in MatchPoint.`);
+        const shortUrl = visible.url.length > 60 ? visible.url.slice(0, 60) + '…' : visible.url;
+        if (!visible.matched) {
+          // Active tab isn't a /marketing page at all.
+          setReadError(`Active tab (${shortUrl}) isn't a /marketing page. Click on the MatchPoint tab in your browser, then come back and click this button again.`);
+        } else {
+          // We're on /marketing but didn't find data-mp-${entity}-id rows.
+          // Two likely causes: wrong sub-tab, or the latest MP deploy
+          // (with the data-attrs) hasn't reached this browser yet.
+          setReadError(`No ${entity}s found on this page. Switch to the ${entity === 'contact' ? 'Contacts' : 'Companies'} sub-tab in MatchPoint and reload it. (URL: ${shortUrl})`);
+        }
         return;
       }
       const r = await bridgeApi.getMpRecordsByIds(entity, visible.ids);

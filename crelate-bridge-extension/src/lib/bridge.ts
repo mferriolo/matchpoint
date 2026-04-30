@@ -65,29 +65,50 @@ export const bridgeApi = {
     bridge('get_mp_records_by_ids', { entity, ids }),
 };
 
-// Ask the active MatchPoint tab's content script which entity ids are
-// currently visible. Returns null if no MP tab is open or the content
-// script isn't loaded.
-export async function getVisibleMpIds(entity: 'contact' | 'company'): Promise<{ ids: string[]; url: string } | null> {
+// Read the visible MP entity ids from whatever's the active tab. Uses
+// chrome.scripting.executeScript instead of pre-declared content scripts
+// so we don't depend on the manifest's URL match list — works on any
+// MatchPoint deployment (custom domain, Vercel preview, localhost, etc.)
+// as long as activeTab + scripting permissions are granted.
+//
+// Returns:
+//   { ids, url, matched: true }  — got ids from a page that looks like /marketing
+//   { ids: [], url, matched: false } — active tab isn't a /marketing page
+//   null — no active tab / api unavailable
+export async function getVisibleMpIds(
+  entity: 'contact' | 'company'
+): Promise<{ ids: string[]; url: string; matched: boolean } | null> {
   if (!chrome?.tabs) return null;
-  const tabs = await chrome.tabs.query({
-    url: [
-      'https://matchpoint-nu-dun.vercel.app/marketing*',
-      'http://localhost:5173/marketing*',
-      'http://localhost:8080/marketing*',
-    ],
-  });
-  if (tabs.length === 0) return null;
-  // Prefer the active tab; fall back to the first match.
-  const tab = tabs.find(t => t.active) || tabs[0];
-  if (!tab.id) return null;
-  return new Promise(resolve => {
-    chrome.tabs.sendMessage(tab.id!, { type: 'get_visible_ids', entity }, (res) => {
-      if (chrome.runtime.lastError || !res?.ok) {
-        resolve(null);
-      } else {
-        resolve({ ids: res.ids || [], url: res.url || '' });
-      }
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !tab.url) return null;
+
+  const isMarketing = /\/marketing/i.test(tab.url);
+  if (!chrome.scripting) {
+    return { ids: [], url: tab.url, matched: isMarketing };
+  }
+
+  try {
+    const attr = entity === 'contact' ? 'data-mp-contact-id' : 'data-mp-company-id';
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      // The function runs in the page context, so it can't reference
+      // anything from this scope — pass via args.
+      func: (attrName: string) => {
+        const ids: string[] = [];
+        document.querySelectorAll(`[${attrName}]`).forEach(el => {
+          const v = el.getAttribute(attrName);
+          if (v) ids.push(v);
+        });
+        return ids;
+      },
+      args: [attr],
     });
-  });
+    const ids: string[] = (results?.[0]?.result as string[]) || [];
+    return { ids, url: tab.url, matched: isMarketing };
+  } catch (e) {
+    // Most common reason this throws: the page is a chrome:// URL or
+    // the user hasn't granted activeTab. Bubble up a benign result so
+    // the caller can show the active tab url in the error.
+    return { ids: [], url: tab.url, matched: isMarketing };
+  }
 }
