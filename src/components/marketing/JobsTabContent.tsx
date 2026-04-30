@@ -553,10 +553,27 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       });
       if (error) throw error;
       const summary = data?.summary || {};
-      toast({
-        title: 'Scrape complete',
-        description: `${summary.scraped || 0} scraped · ${summary.failed || 0} failed · ${summary.skipped || 0} skipped`,
-      });
+      const successes = (data?.results || []).filter((r: any) => r.status === 'success');
+
+      // Single-job scrape → open the detail dialog so the description
+      // is immediately visible. The edge function returns a `preview`
+      // (first 200 chars) we can show in the toast as a teaser.
+      if (successes.length === 1 && summary.scraped === 1) {
+        const r = successes[0];
+        const preview = (r.preview || '').replace(/\s+/g, ' ').trim();
+        toast({
+          title: 'Description scraped',
+          description: preview
+            ? `${preview.slice(0, 180)}${preview.length > 180 ? '…' : ''}`
+            : `${r.descLength || 0} chars saved`,
+        });
+        setViewingJobId(r.id);
+      } else {
+        toast({
+          title: 'Scrape complete',
+          description: `${summary.scraped || 0} scraped · ${summary.failed || 0} failed · ${summary.skipped || 0} skipped — click 👁 on any row to read.`,
+        });
+      }
       clearSelection();
       onRefresh();
     } catch (err: any) {
