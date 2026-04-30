@@ -120,6 +120,17 @@ main { flex: 1; padding: 12px; overflow-y: auto; }
   min-width: 0;
 }
 
+.from-page-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border: 1px dashed #d1d5db;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
 .bulk-bar {
   position: sticky;
   top: 0;

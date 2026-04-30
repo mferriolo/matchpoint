@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { bridgeApi } from '../lib/bridge';
+import { bridgeApi, getVisibleMpIds } from '../lib/bridge';
 import { ENTITY_FIELDS, type DedupeStatus, type EntityType, type FieldChoice, type FieldDiff } from '../lib/types';
 
 type DedupeResult = {
@@ -28,12 +28,65 @@ export default function PushTab({ entity }: { entity: EntityType }) {
   // contacts to single-record mode later if they want the picker).
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulk, setBulk] = useState<BulkProgress | null>(null);
+  // "From page" state: when populated, results came from scraping the
+  // active MP tab rather than a search. The badge tells the user the
+  // source and a count of how many of those rows are unlinked.
+  const [fromPage, setFromPage] = useState<{ count: number; unlinked: number } | null>(null);
+  const [reading, setReading] = useState(false);
+  const [readError, setReadError] = useState<string | null>(null);
 
   // Reset when entity flips.
   useEffect(() => {
     setQuery(''); setResults([]); setSelected(null); setDedupe(null);
     setOutcome(null); setChoices({}); setSelectedIds(new Set()); setBulk(null);
+    setFromPage(null); setReadError(null);
   }, [entity]);
+
+  // ── Read visible IDs from the active MatchPoint tab ──────────────
+  // The content script scrapes data-mp-{entity}-id off rendered <tr>
+  // rows, we fetch the full records via the bridge, mark each as
+  // linked / new based on crelate_links, and seed the multi-select set
+  // with the unlinked rows so the user can immediately Push New.
+  const readFromPage = async () => {
+    setReading(true);
+    setReadError(null);
+    try {
+      const visible = await getVisibleMpIds(entity);
+      if (!visible) {
+        setReadError('No MatchPoint /marketing tab found. Open the page first.');
+        return;
+      }
+      if (visible.ids.length === 0) {
+        setReadError(`No ${entity}s on the page. Switch to the ${entity === 'contact' ? 'Contacts' : 'Companies'} tab in MatchPoint.`);
+        return;
+      }
+      const r = await bridgeApi.getMpRecordsByIds(entity, visible.ids);
+      if (!r.success) {
+        setReadError(r.error || 'Failed to load records');
+        return;
+      }
+      const recs: any[] = r.records || [];
+      // Tag each row with its linked status for the result row to render.
+      const enriched = recs.map(rec => ({
+        ...rec,
+        // PushTab's existing ResultRow checks crelate_id / crelate_contact_id;
+        // mirror linked_crelate_id into the field that matches the entity.
+        ...(entity === 'contact'
+          ? { crelate_contact_id: rec.linked_crelate_id }
+          : { crelate_id: rec.linked_crelate_id }),
+      }));
+      setResults(enriched);
+      setQuery('');
+      // Pre-select only the unlinked rows — the most useful default.
+      const unlinked = enriched.filter(r => !r.linked_crelate_id);
+      setSelectedIds(new Set(unlinked.map(r => r.id)));
+      setFromPage({ count: enriched.length, unlinked: unlinked.length });
+    } catch (e) {
+      setReadError((e as Error).message);
+    } finally {
+      setReading(false);
+    }
+  };
 
   // Debounced search.
   useEffect(() => {
@@ -200,14 +253,35 @@ export default function PushTab({ entity }: { entity: EntityType }) {
     <>
       <div className="search">
         <input
-          autoFocus
           placeholder={entity === 'contact'
             ? 'Search MatchPoint contacts by name, email, or company…'
             : 'Search MatchPoint companies by name…'}
           value={query}
-          onChange={e => setQuery(e.target.value)}
+          onChange={e => { setQuery(e.target.value); if (fromPage) setFromPage(null); }}
         />
       </div>
+
+      {/* "Read visible from MatchPoint page" — scrapes the open
+          /marketing tab so the user can push the currently-filtered set
+          rather than re-typing a search. The bar shows how many were
+          read and how many are new vs already linked. */}
+      <div className="from-page-bar">
+        <button
+          className="btn btn-secondary"
+          style={{ flex: 'none', padding: '5px 10px', fontSize: 11 }}
+          onClick={readFromPage}
+          disabled={reading}
+        >
+          {reading ? <><span className="spin">↻</span> reading…</> : `📄 Read ${entity === 'contact' ? 'Contacts' : 'Companies'} from MatchPoint page`}
+        </button>
+        {fromPage && (
+          <span style={{ fontSize: 11, color: '#6b7280' }}>
+            {fromPage.count} on page · <strong style={{ color: '#1e3a8a' }}>{fromPage.unlinked} new</strong>
+            {fromPage.unlinked < fromPage.count && <> · {fromPage.count - fromPage.unlinked} already linked</>}
+          </span>
+        )}
+      </div>
+      {readError && <div className="status status-err" style={{ marginBottom: 8 }}>{readError}</div>}
 
       {!selected && selectedIds.size > 0 && (
         <div className="bulk-bar">
@@ -222,8 +296,9 @@ export default function PushTab({ entity }: { entity: EntityType }) {
       {!selected && (
         <>
           {searching && <div className="placeholder"><span className="spin">↻</span> searching…</div>}
-          {!searching && query.length < 2 && <div className="placeholder">Type 2+ characters. Use checkboxes to push multiple.</div>}
-          {!searching && query.length >= 2 && results.length === 0 && <div className="placeholder">No matches.</div>}
+          {!searching && !fromPage && query.length < 2 && <div className="placeholder">Type 2+ characters or click "Read from MatchPoint page" to use the visible filtered list.</div>}
+          {!searching && !fromPage && query.length >= 2 && results.length === 0 && <div className="placeholder">No matches.</div>}
+          {!searching && fromPage && results.length === 0 && <div className="placeholder">No {entity}s on the page.</div>}
           {!searching && results.length > 0 && (
             <div style={{ marginBottom: 6, display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#6b7280' }}>
               <button

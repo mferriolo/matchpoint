@@ -624,6 +624,47 @@ Deno.serve(async (req) => {
       return R({ success: true, entries: data || [] });
     }
 
+    // ── get_mp_records_by_ids — used by the "Read visible from page"
+    //    button in the Push tab. Takes a list of MP ids the content
+    //    script scraped from the rendered page and returns the full
+    //    records, joined with crelate_links so the caller knows which
+    //    are already linked to Crelate vs new.
+    if (action === 'get_mp_records_by_ids') {
+      const entity: 'contact' | 'company' = body.entity;
+      const ids: string[] = Array.isArray(body.ids) ? body.ids.filter((x: any) => typeof x === 'string' && isUuid(x)) : [];
+      if (!entity || (entity !== 'contact' && entity !== 'company')) {
+        return R({ success: false, error: 'entity must be contact or company' }, 400);
+      }
+      if (ids.length === 0) return R({ success: true, records: [] });
+
+      const table = entity === 'contact' ? 'marketing_contacts' : 'marketing_companies';
+      const cols = entity === 'contact'
+        ? 'id, first_name, last_name, email, title, company_name, linkedin_url, phone_work, phone_cell, phone_home, notes, crelate_contact_id, outreach_status'
+        : 'id, company_name, website, homepage_url, notes, company_phone, contact_phone, location, crelate_id';
+      const { data, error } = await sb.from(table).select(cols).in('id', ids);
+      if (error) return R({ success: false, error: error.message }, 500);
+
+      // Cross-reference crelate_links so we surface the linked-status
+      // even if the legacy crelate_id column wasn't backfilled. The link
+      // table is the source of truth going forward.
+      const { data: links } = await sb.from('crelate_links')
+        .select('mp_id, crelate_id').eq('entity_type', entity).in('mp_id', ids);
+      const linkMap = new Map<string, string>();
+      for (const l of (links || [])) linkMap.set(l.mp_id, l.crelate_id);
+
+      const records = (data || []).map((r: any) => ({
+        ...r,
+        // Normalise to a single `linked_crelate_id` field the popup can
+        // check without caring whether it came from the column or the link.
+        linked_crelate_id: linkMap.get(r.id) || (entity === 'contact' ? r.crelate_contact_id : r.crelate_id) || null,
+      }));
+
+      // Preserve the input order so the popup can render in page order.
+      const byId = new Map(records.map(r => [r.id, r]));
+      const ordered = ids.map(id => byId.get(id)).filter(Boolean);
+      return R({ success: true, records: ordered });
+    }
+
     // ── search_mp_companies — popup type-ahead, Push side ────────────
     if (action === 'search_mp_companies') {
       const q: string = (body.query || '').trim();
@@ -643,30 +684,49 @@ Deno.serve(async (req) => {
     if (action === 'search_crelate_contacts') {
       const q: string = (body.query || '').trim();
       if (q.length < 2) return R({ success: true, contacts: [] });
-      const params: Record<string, string> = { limit: '20' };
-      // If it looks like an email, search by email; otherwise by name.
-      if (q.includes('@')) params.email = q; else params.name = q;
-      const r = await crelateGet('/contacts', params);
-      const items = (r?.Data || []).slice(0, 20).map((c: any) => ({
-        crelate_id: c.Id,
-        first_name: c.FirstName || '',
-        last_name:  c.LastName || '',
-        email:      c.EmailAddresses_Work?.Value || c.PrimaryEmail || '',
-        title:      c.CurrentPosition?.JobTitle || '',
-        company_name: c.CurrentPosition?.CompanyName || c.AccountName || '',
-      }));
+
+      // Crelate's `/contacts` endpoint silently ignores name / firstName /
+      // lastName / email query params and returns the first 50 contacts
+      // unchanged. The actual full-text search lives at
+      // `/contacts/search?query=...`, which returns slim records:
+      //   { Id, EntityStatus, EntityName, Title }
+      // where Title is "LastName, FirstName MiddleInitial." — we split it
+      // for display. Email / title / company aren't in the search payload;
+      // they get fetched when the user opens the preview.
+      const r = await crelateGet('/contacts/search', { query: q, limit: '50' });
+      const items = (r?.Data || [])
+        .filter((c: any) => c.Id && isUuid(c.Id))
+        .map((c: any) => {
+          const title = c.Title || '';
+          // "Shah, Hiren C." → last="Shah", first="Hiren C."
+          const commaIdx = title.indexOf(',');
+          const last  = commaIdx >= 0 ? title.slice(0, commaIdx).trim() : '';
+          const first = commaIdx >= 0 ? title.slice(commaIdx + 1).trim() : title.trim();
+          return {
+            crelate_id: c.Id,
+            first_name: first,
+            last_name:  last,
+            email: '',         // Not in search response; fetched on preview.
+            title: '',
+            company_name: '',
+            display_title: c.Title || '',
+          };
+        });
       return R({ success: true, contacts: items });
     }
 
     if (action === 'search_crelate_companies') {
       const q: string = (body.query || '').trim();
       if (q.length < 2) return R({ success: true, companies: [] });
-      const r = await crelateGet('/companies', { name: q, limit: '20' });
-      const items = (r?.Data || []).slice(0, 20).map((c: any) => ({
-        crelate_id: c.Id,
-        company_name: c.Name || '',
-        website: c.Websites_Other?.Value || '',
-      }));
+      // Same pattern as contacts: /companies/search?query=...
+      const r = await crelateGet('/companies/search', { query: q, limit: '50' });
+      const items = (r?.Data || [])
+        .filter((c: any) => c.Id && isUuid(c.Id))
+        .map((c: any) => ({
+          crelate_id: c.Id,
+          company_name: c.Title || c.Name || '',
+          website: '',
+        }));
       return R({ success: true, companies: items });
     }
 

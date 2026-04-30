@@ -1,18 +1,31 @@
-// Content script for the MatchPoint /marketing page. Day-1 stub: just
-// confirms it loaded. Day 2-3 will inject "Push to Crelate" buttons on
-// individual contact rows by querying for the table row React renders
-// (we'll use a stable data-attribute we add to the React component).
+// Content script for the MatchPoint /marketing page. The popup uses
+// chrome.tabs.sendMessage to ask which contact / company ids are
+// currently rendered (i.e. survived all the page's filters). The page
+// itself adds data-mp-contact-id / data-mp-company-id attrs to each
+// table <tr> so we can scrape without re-parsing React state.
 
 console.log('[crelate-bridge] matchpoint content script loaded');
 
-// Reserved for inter-tab messaging if the popup needs to know which
-// contact id is selected on the MatchPoint side.
+type Kind = 'contact' | 'company';
+
+function readVisibleIds(kind: Kind): string[] {
+  const attr = kind === 'contact' ? 'data-mp-contact-id' : 'data-mp-company-id';
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  document.querySelectorAll(`[${attr}]`).forEach(el => {
+    const id = el.getAttribute(attr);
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  });
+  return ids;
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg?.type === 'matchpoint_get_selected_contact') {
-    // Look for a data-mp-contact-id attribute we'll add to selected rows
-    // in a later pass. Returns null if none found.
-    const el = document.querySelector('[data-mp-contact-id]');
-    sendResponse({ id: el?.getAttribute('data-mp-contact-id') || null });
+  if (msg?.type === 'get_visible_ids') {
+    const kind = msg.entity as Kind;
+    sendResponse({ ok: true, ids: readVisibleIds(kind), kind, url: location.href });
   }
   return true;
 });

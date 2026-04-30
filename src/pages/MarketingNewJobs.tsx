@@ -2206,7 +2206,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
                       const blocked = !!c.is_blocked;
 
                       return (
-                        <tr key={c.id} className={`border-b transition-colors ${blocked ? 'bg-gray-100 opacity-60' : isSelected ? 'bg-amber-50 hover:bg-amber-100/50' : (c.is_high_priority ? 'bg-amber-50/50 hover:bg-amber-100/50' : !hasOpenRoles ? 'opacity-60 hover:bg-gray-50' : idx % 2 === 0 ? 'bg-white hover:bg-gray-50' : 'bg-gray-50/30 hover:bg-gray-100/50')}`}>
+                        <tr key={c.id} data-mp-company-id={c.id} className={`border-b transition-colors ${blocked ? 'bg-gray-100 opacity-60' : isSelected ? 'bg-amber-50 hover:bg-amber-100/50' : (c.is_high_priority ? 'bg-amber-50/50 hover:bg-amber-100/50' : !hasOpenRoles ? 'opacity-60 hover:bg-gray-50' : idx % 2 === 0 ? 'bg-white hover:bg-gray-50' : 'bg-gray-50/30 hover:bg-gray-100/50')}`}>
                           <td className="px-2 py-3 text-center">
                             <input
                               type="checkbox"
@@ -3186,6 +3186,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
                       return (
                         <tr
                           key={c.id}
+                          data-mp-contact-id={c.id}
                           className={`border-b border-gray-100 hover:bg-blue-50/40 cursor-pointer transition-colors ${
                             idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/30'
                           } ${selectedContact?.id === c.id ? 'bg-blue-50 ring-1 ring-blue-200' : ''}`}

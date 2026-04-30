@@ -59,4 +59,35 @@ export const bridgeApi = {
 
   history: (opts: { limit?: number; entity_type?: string; direction?: string } = {}) =>
     bridge('list_history', opts),
+
+  // Used by the "Read visible from MatchPoint page" flow.
+  getMpRecordsByIds: (entity: 'contact' | 'company', ids: string[]) =>
+    bridge('get_mp_records_by_ids', { entity, ids }),
 };
+
+// Ask the active MatchPoint tab's content script which entity ids are
+// currently visible. Returns null if no MP tab is open or the content
+// script isn't loaded.
+export async function getVisibleMpIds(entity: 'contact' | 'company'): Promise<{ ids: string[]; url: string } | null> {
+  if (!chrome?.tabs) return null;
+  const tabs = await chrome.tabs.query({
+    url: [
+      'https://matchpoint-nu-dun.vercel.app/marketing*',
+      'http://localhost:5173/marketing*',
+      'http://localhost:8080/marketing*',
+    ],
+  });
+  if (tabs.length === 0) return null;
+  // Prefer the active tab; fall back to the first match.
+  const tab = tabs.find(t => t.active) || tabs[0];
+  if (!tab.id) return null;
+  return new Promise(resolve => {
+    chrome.tabs.sendMessage(tab.id!, { type: 'get_visible_ids', entity }, (res) => {
+      if (chrome.runtime.lastError || !res?.ok) {
+        resolve(null);
+      } else {
+        resolve({ ids: res.ids || [], url: res.url || '' });
+      }
+    });
+  });
+}
