@@ -312,22 +312,95 @@ function diffCompany(mp: any, mapped: any): { conflicts: any[]; mp_empty: string
   return { conflicts, mp_empty, crelate_empty };
 }
 
-async function findCrelateCompany(name: string) {
+async function findCrelateCompany(name: string): Promise<{ Id: string; Name: string } | null> {
   if (!name) return null;
   try {
-    const r = await crelateGet('/companies', { name, limit: '20' });
+    // /companies (without /search) silently ignores filter params and
+    // returns the first N companies in the tenant. Use /companies/search
+    // which actually filters by full-text on Name.
+    const r = await crelateGet('/companies/search', { query: name, limit: '20' });
     const target = norm(name);
     for (const c of (r?.Data || [])) {
-      if (!c.Id || !isUuid(c.Id) || !c.Name) continue;
-      if (norm(c.Name) === target) return c;
-      // Prefix / substring match — Crelate's name search is fuzzy enough
-      // that exact-string matches sometimes don't show up if punctuation
-      // differs ("Acme, Inc." vs "Acme Inc"). Accept the first close match.
-      const nc = norm(c.Name);
-      if (target && (nc.startsWith(target + ' ') || target.startsWith(nc + ' ') || nc === target)) return c;
+      if (!c.Id || !isUuid(c.Id)) continue;
+      const cName = c.Title || c.Name || '';
+      if (!cName) continue;
+      const cn = norm(cName);
+      if (cn === target) return { Id: c.Id, Name: cName };
+      // Prefix / substring match for punctuation drift ("Acme, Inc." vs
+      // "Acme Inc"). Accept the first close match after exact misses.
+      if (target && (cn.startsWith(target + ' ') || target.startsWith(cn + ' '))) return { Id: c.Id, Name: cName };
     }
     return null;
   } catch { return null; }
+}
+
+// Resolve a company name to a Crelate id, with full provenance + auto-
+// create on miss. Used by push_job so a fresh job always lands with its
+// AccountId populated even if the user never pushed the company first.
+//
+// Order:
+//   1. marketing_companies.crelate_id (column already populated)
+//   2. crelate_links join on the marketing_companies row
+//   3. Crelate /companies/search by exact name
+//   4. Auto-create via POST /companies; on 409, parse the dup id
+//
+// Returns { id, source } or null. `source` is logged so we can debug
+// "why did this job land without a company?" cases.
+async function resolveOrCreateCompanyForJob(name: string): Promise<{ id: string; source: 'mp_column' | 'mp_link' | 'crelate_search' | 'auto_create' | 'auto_create_409' } | null> {
+  if (!name) return null;
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+
+  // 1 + 2: existing MP-side mapping.
+  const { data: mpCo } = await sb.from('marketing_companies')
+    .select('id, crelate_id').ilike('company_name', trimmed).limit(1).maybeSingle();
+  if (mpCo?.crelate_id && isUuid(mpCo.crelate_id)) {
+    return { id: mpCo.crelate_id, source: 'mp_column' };
+  }
+  if (mpCo?.id) {
+    const { data: cLink } = await sb.from('crelate_links').select('crelate_id')
+      .eq('entity_type', 'company').eq('mp_id', mpCo.id).maybeSingle();
+    if (cLink?.crelate_id && isUuid(cLink.crelate_id)) {
+      // Backfill the legacy column so subsequent lookups skip this branch.
+      await sb.from('marketing_companies').update({ crelate_id: cLink.crelate_id }).eq('id', mpCo.id);
+      return { id: cLink.crelate_id, source: 'mp_link' };
+    }
+  }
+
+  // 3: search Crelate.
+  const found = await findCrelateCompany(trimmed);
+  if (found?.Id) {
+    if (mpCo?.id) {
+      await sb.from('marketing_companies').update({ crelate_id: found.Id }).eq('id', mpCo.id);
+      await upsertLink('company', mpCo.id, found.Id, 'push');
+    }
+    return { id: found.Id, source: 'crelate_search' };
+  }
+
+  // 4: auto-create.
+  const cr = await crelatePost('/companies', { Name: trimmed });
+  await W(DL);
+  if (cr.ok) {
+    const cid = extractId(cr.data);
+    if (cid && isUuid(cid)) {
+      if (mpCo?.id) {
+        await sb.from('marketing_companies').update({ crelate_id: cid }).eq('id', mpCo.id);
+        await upsertLink('company', mpCo.id, cid, 'push');
+      }
+      return { id: cid, source: 'auto_create' };
+    }
+  }
+  if (cr.status === 409) {
+    const dupId = extractDupIdFromError(cr.err);
+    if (dupId && isUuid(dupId)) {
+      if (mpCo?.id) {
+        await sb.from('marketing_companies').update({ crelate_id: dupId }).eq('id', mpCo.id);
+        await upsertLink('company', mpCo.id, dupId, 'push');
+      }
+      return { id: dupId, source: 'auto_create_409' };
+    }
+  }
+  return null;
 }
 
 // ── Field mapping (jobs) ─────────────────────────────────────────────
@@ -417,27 +490,57 @@ async function findCrelateJob(title: string, company: string) {
 }
 
 // ── Find an existing Crelate contact by name+email ───────────────────
-async function findCrelateContact(fn: string, ln: string, email?: string) {
-  // Email match first if available — far more reliable than name match.
-  if (email) {
-    try {
-      const r = await crelateGet('/contacts', { email, limit: '5' });
-      for (const i of (r?.Data || [])) {
-        if ((i.EmailAddresses_Work?.Value || '').toLowerCase().trim() === email.toLowerCase().trim()) return i;
-        if ((i.PrimaryEmail || '').toLowerCase().trim() === email.toLowerCase().trim()) return i;
+// /contacts (without /search) silently ignores filter params and just
+// returns the first 50 contacts. /contacts/search?query=X is the actual
+// full-text search; it returns slim { Id, Title } records, so we follow
+// up with /contacts/<id> to get the full payload that callers expect.
+async function findCrelateContact(fn: string, ln: string, email?: string): Promise<any | null> {
+  const queries: string[] = [];
+  if (email)        queries.push(email);
+  if (fn && ln)     queries.push(`${ln}, ${fn}`); // Crelate's display format
+  if (fn && ln)     queries.push(`${fn} ${ln}`);
+  if (ln && !email) queries.push(ln);
+
+  for (const q of queries) {
+    if (!q || q.length < 2) continue;
+    const slim = await crelateGet('/contacts/search', { query: q, limit: '10' });
+    if (!slim?.Data || slim.Data.length === 0) continue;
+
+    // Pick the candidate that matches first/last most strictly.
+    let candidate: any = null;
+    if (fn && ln) {
+      for (const s of slim.Data) {
+        if (!s.Id || !isUuid(s.Id)) continue;
+        const title = s.Title || '';
+        const commaIdx = title.indexOf(',');
+        const last  = commaIdx >= 0 ? title.slice(0, commaIdx).trim() : '';
+        const first = commaIdx >= 0 ? title.slice(commaIdx + 1).trim() : title.trim();
+        if (norm(last) === norm(ln) && norm(first).split(/\s+/)[0] === norm(fn).split(/\s+/)[0]) {
+          candidate = s;
+          break;
+        }
       }
-    } catch {}
-  }
-  if (fn && ln) {
-    try {
-      const r = await crelateGet('/contacts', { name: `${fn} ${ln}`, limit: '10' });
-      for (const i of (r?.Data || [])) {
-        if (
-          (i.FirstName || '').toLowerCase().trim() === fn.toLowerCase().trim() &&
-          (i.LastName  || '').toLowerCase().trim() === ln.toLowerCase().trim()
-        ) return i;
-      }
-    } catch {}
+    }
+    // Email-only or last-name-only queries: take the first valid hit.
+    if (!candidate) candidate = slim.Data.find((s: any) => s.Id && isUuid(s.Id));
+    if (!candidate) continue;
+
+    // Fetch full record to verify and return.
+    const full = await crelateGet(`/contacts/${candidate.Id}`);
+    await W(DL);
+    if (!full?.Data) continue;
+
+    if (email) {
+      const fullEmail = (full.Data.EmailAddresses_Work?.Value || full.Data.PrimaryEmail || '').toLowerCase().trim();
+      if (fullEmail === email.toLowerCase().trim()) return full.Data;
+      // Email didn't match — fall through to name check below.
+    }
+    if (fn && ln) {
+      if (
+        norm(full.Data.LastName || '') === norm(ln) &&
+        norm(full.Data.FirstName || '').split(/\s+/)[0] === norm(fn).split(/\s+/)[0]
+      ) return full.Data;
+    }
   }
   return null;
 }
@@ -1242,20 +1345,17 @@ Deno.serve(async (req) => {
           return R({ success: false, error: 'job_title is required to push a job' }, 400);
         }
 
+        // Resolve (or auto-create) the company in Crelate so the job
+        // lands with its AccountId populated. Without this the job shows
+        // up in Crelate without a company, which breaks the relational
+        // model the user relies on for searching contacts/jobs by company.
         let companyCrelateId: string | null = null;
+        let companySource: string | null = null;
         if (company) {
-          const { data: mpCo } = await sb.from('marketing_companies')
-            .select('id, crelate_id').ilike('company_name', company).limit(1).maybeSingle();
-          if (mpCo?.crelate_id && isUuid(mpCo.crelate_id)) {
-            companyCrelateId = mpCo.crelate_id;
-          } else if (mpCo?.id) {
-            const { data: cLink } = await sb.from('crelate_links').select('crelate_id')
-              .eq('entity_type', 'company').eq('mp_id', mpCo.id).maybeSingle();
-            if (cLink?.crelate_id) companyCrelateId = cLink.crelate_id;
-          }
-          if (!companyCrelateId) {
-            const found = await findCrelateCompany(company);
-            if (found?.Id) companyCrelateId = found.Id;
+          const resolved = await resolveOrCreateCompanyForJob(company);
+          if (resolved) {
+            companyCrelateId = resolved.id;
+            companySource = resolved.source;
           }
         }
 
@@ -1288,15 +1388,19 @@ Deno.serve(async (req) => {
             await logSync({
               entity_type: 'job', direction: 'push', action: 'create',
               mp_id, crelate_id: cid,
-              fields_changed: { name: dn, account: companyCrelateId || null },
-              error_message: companyCrelateId ? null : 'Created without AccountId — company not found in Crelate',
+              fields_changed: { name: dn, account: companyCrelateId || null, company_source: companySource },
+              error_message: companyCrelateId ? null : 'Created without AccountId — company name was empty',
               actor,
             });
+            const companyMsg = companySource === 'auto_create' || companySource === 'auto_create_409'
+              ? ` Company "${company}" auto-created in Crelate and linked.`
+              : '';
             return R({
               success: true, action: 'create', crelate_id: cid,
+              company_source: companySource,
               message: companyCrelateId
-                ? undefined
-                : `Created in Crelate, but company "${company}" wasn't matched — push the company first to link them.`,
+                ? companyMsg || undefined
+                : `Created in Crelate, but company name was empty — fill it in MP and re-push to link.`,
             });
           }
           await logSync({ entity_type: 'job', direction: 'push', action: 'error', mp_id, error_message: 'POST OK but no Crelate id returned', actor });
