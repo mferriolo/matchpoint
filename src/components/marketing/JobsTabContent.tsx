@@ -543,43 +543,83 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
   // didn't pass one, so it ran a full database scan (limit=50). Here
   // we wire the visible-row selection in directly.
   const [scrapingSelected, setScrapingSelected] = useState(false);
+  // Track bulk-scrape progress so the user sees something happening
+  // while a 100-job batch chugs through. Reset when scrape completes.
+  const [scrapeProgress, setScrapeProgress] = useState<{ done: number; total: number } | null>(null);
+
   const handleBulkScrapeDescriptions = useCallback(async () => {
     if (selectedIds.size === 0) return;
     const ids = Array.from(selectedIds);
     setScrapingSelected(true);
+    setScrapeProgress({ done: 0, total: ids.length });
+
+    // Chunk client-side. Each invocation gets a small jobIds array so
+    // PostgREST's `.in()` URL length stays well below the gateway limit
+    // and the edge function's 60-second budget doesn't blow on long
+    // sequences of slow-loading job pages. 25 is a comfortable batch
+    // size: most jobs scrape in 2-5s, so a batch finishes in under
+    // ~90s of wall time but each Crelate/edge call is small.
+    const BATCH = 25;
+    let scraped = 0, failed = 0, skipped = 0;
+    let firstSuccess: any = null;
+    let lastError: string | null = null;
+
     try {
-      const { data, error } = await supabase.functions.invoke('scrape-job-descriptions', {
-        body: { action: 'scrape', jobIds: ids, limit: ids.length },
-      });
-      if (error) throw error;
-      const summary = data?.summary || {};
-      const successes = (data?.results || []).filter((r: any) => r.status === 'success');
+      for (let i = 0; i < ids.length; i += BATCH) {
+        const batch = ids.slice(i, i + BATCH);
+        try {
+          const { data, error } = await supabase.functions.invoke('scrape-job-descriptions', {
+            body: { action: 'scrape', jobIds: batch, limit: batch.length },
+          });
+          if (error) {
+            // Don't bail the whole batch loop — record the error and
+            // keep going so a transient rate-limit on one batch doesn't
+            // wipe out 75 already-scraped rows.
+            lastError = error.message || 'Edge function error';
+            failed += batch.length;
+          } else {
+            const summary = data?.summary || {};
+            scraped += summary.scraped || 0;
+            failed  += summary.failed  || 0;
+            skipped += summary.skipped || 0;
+            if (!firstSuccess) {
+              const successes = (data?.results || []).filter((r: any) => r.status === 'success');
+              if (successes.length > 0) firstSuccess = successes[0];
+            }
+          }
+        } catch (e: any) {
+          lastError = e.message || 'Network error';
+          failed += batch.length;
+        }
+        setScrapeProgress({ done: Math.min(i + BATCH, ids.length), total: ids.length });
+      }
 
       // Single-job scrape → open the detail dialog so the description
-      // is immediately visible. The edge function returns a `preview`
-      // (first 200 chars) we can show in the toast as a teaser.
-      if (successes.length === 1 && summary.scraped === 1) {
-        const r = successes[0];
-        const preview = (r.preview || '').replace(/\s+/g, ' ').trim();
+      // is immediately visible. Use the preview the edge function
+      // returned for a teaser in the toast body.
+      if (ids.length === 1 && scraped === 1 && firstSuccess) {
+        const preview = (firstSuccess.preview || '').replace(/\s+/g, ' ').trim();
         toast({
           title: 'Description scraped',
           description: preview
             ? `${preview.slice(0, 180)}${preview.length > 180 ? '…' : ''}`
-            : `${r.descLength || 0} chars saved`,
+            : `${firstSuccess.descLength || 0} chars saved`,
         });
-        setViewingJobId(r.id);
+        setViewingJobId(firstSuccess.id);
       } else {
+        const parts = [`${scraped} scraped`, `${failed} failed`, `${skipped} skipped`];
+        if (lastError) parts.push(`(last error: ${lastError.slice(0, 60)})`);
         toast({
-          title: 'Scrape complete',
-          description: `${summary.scraped || 0} scraped · ${summary.failed || 0} failed · ${summary.skipped || 0} skipped — click 👁 on any row to read.`,
+          title: scraped > 0 ? 'Scrape complete' : 'Scrape finished with errors',
+          description: parts.join(' · '),
+          variant: scraped === 0 && failed > 0 ? 'destructive' : undefined,
         });
       }
       clearSelection();
       onRefresh();
-    } catch (err: any) {
-      toast({ title: 'Scrape failed', description: err.message, variant: 'destructive' });
     } finally {
       setScrapingSelected(false);
+      setScrapeProgress(null);
     }
   }, [selectedIds, toast, onRefresh, clearSelection]);
 
@@ -1000,10 +1040,14 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
               onClick={handleBulkScrapeDescriptions}
               disabled={scrapingSelected}
               className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-emerald-200 bg-white hover:bg-emerald-50 text-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Scrape job descriptions for selected jobs only"
+              title="Scrape job descriptions for selected jobs only (chunked at 25 per batch)"
             >
               {scrapingSelected ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileText className="w-3.5 h-3.5" />}
-              {scrapingSelected ? 'Scraping…' : `Scrape Descriptions (${selectedIds.size})`}
+              {scrapingSelected
+                ? scrapeProgress
+                  ? `Scraping ${scrapeProgress.done}/${scrapeProgress.total}…`
+                  : 'Scraping…'
+                : `Scrape Descriptions (${selectedIds.size})`}
             </button>
             <button
               type="button"
@@ -1235,6 +1279,20 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                           )}
                         </button>
                         <span className="truncate block font-medium">{j.job_title || '(untitled)'}</span>
+                        {/* Description-scraped indicator. Shown only when
+                            a non-empty description is on file; clicking
+                            opens the detail dialog scrolled to the
+                            Description block. */}
+                        {j.description && String(j.description).trim().length > 0 && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setViewingJobId(j.id); }}
+                            className="flex-shrink-0 mt-0.5 text-emerald-600 hover:text-emerald-700"
+                            title={`Description scraped (${String(j.description).length.toLocaleString()} chars) — click to read`}
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     </td>
                     {/* Job Type (matched against tracked job_types). */}
