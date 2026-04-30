@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { bridgeApi } from '../lib/bridge';
+import { bridgeApi, mapWithConcurrency } from '../lib/bridge';
 import { ENTITY_FIELDS, type DedupeStatus, type EntityType, type FieldChoice, type FieldDiff } from '../lib/types';
 
 type PreviewResult = {
@@ -111,8 +111,8 @@ export default function PullTab({ entity }: { entity: EntityType }) {
         ? (row.company_name || '(unnamed)')
         : (row.job_title ? `${row.job_title}${row.company_name ? ' · ' + row.company_name : ''}` : '(untitled)');
     setBulk({ done: 0, total: ids.length, results: [], running: true });
-    for (let i = 0; i < ids.length; i++) {
-      const cid = ids[i];
+
+    await mapWithConcurrency(ids, 4, async (cid) => {
       const row = results.find(r => r.crelate_id === cid);
       const name = row ? nameOf(row) : cid.slice(0, 8);
       const r = await fn(cid);
@@ -120,8 +120,11 @@ export default function PullTab({ entity }: { entity: EntityType }) {
         crelate_id: cid, name, ok: !!r.success, action: r.action,
         msg: r.error || r.message || '',
       };
-      setBulk(prev => prev ? { ...prev, done: i + 1, results: [...prev.results, result] } : null);
-    }
+      return result;
+    }, (_item, result, _i, doneSoFar) => {
+      setBulk(prev => prev ? { ...prev, done: doneSoFar, results: [...prev.results, result] } : null);
+    });
+
     setBulk(prev => prev ? { ...prev, running: false } : null);
     setSelectedIds(new Set());
   };

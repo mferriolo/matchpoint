@@ -73,6 +73,37 @@ export const bridgeApi = {
     bridge('get_mp_records_by_ids', { entity, ids }),
 };
 
+// Run async work over an array with a fixed concurrency cap. Each
+// completed task fires `onComplete` so callers can update progress
+// state in real time. Items finish out of order — the result array
+// preserves input order for callers that need it. Used by bulk push +
+// bulk pull to stop processing one Crelate request at a time.
+export async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+  onComplete?: (item: T, result: R, index: number, doneSoFar: number) => void,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  let done = 0;
+  const concurrency = Math.max(1, Math.min(limit, items.length));
+  const workers: Promise<void>[] = [];
+  for (let w = 0; w < concurrency; w++) {
+    workers.push((async () => {
+      while (true) {
+        const i = cursor++;
+        if (i >= items.length) return;
+        results[i] = await fn(items[i], i);
+        done++;
+        onComplete?.(items[i], results[i], i, done);
+      }
+    })());
+  }
+  await Promise.all(workers);
+  return results;
+}
+
 // Read the visible MP entity ids from whatever's the active tab. Uses
 // chrome.scripting.executeScript instead of pre-declared content scripts
 // so we don't depend on the manifest's URL match list — works on any

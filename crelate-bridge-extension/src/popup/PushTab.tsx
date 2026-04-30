@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { bridgeApi, getVisibleMpIds } from '../lib/bridge';
+import { bridgeApi, getVisibleMpIds, mapWithConcurrency } from '../lib/bridge';
 import { ENTITY_FIELDS, type DedupeStatus, type EntityType, type FieldChoice, type FieldDiff } from '../lib/types';
 
 type DedupeResult = {
@@ -165,8 +165,12 @@ export default function PushTab({ entity }: { entity: EntityType }) {
         ? (row.company_name || '(unnamed)')
         : (row.job_title ? `${row.job_title}${row.company_name ? ' · ' + row.company_name : ''}` : '(untitled)');
     setBulk({ done: 0, total: ids.length, results: [], running: true });
-    for (let i = 0; i < ids.length; i++) {
-      const id = ids[i];
+
+    // Concurrency=4: empirically Crelate's API tolerates 4 in-flight
+    // pushes well; the function's 400ms inter-call throttle within each
+    // push provides enough breathing room to avoid 429s. Cuts wall time
+    // by ~3-4x vs sequential.
+    await mapWithConcurrency(ids, 4, async (id) => {
       const row = results.find(r => r.id === id);
       const name = row ? nameOf(row) : id.slice(0, 8);
       const r = await fn(id);
@@ -174,8 +178,13 @@ export default function PushTab({ entity }: { entity: EntityType }) {
         id, name, ok: !!r.success, action: r.action,
         msg: r.error || r.message || '',
       };
-      setBulk(prev => prev ? { ...prev, done: i + 1, results: [...prev.results, result] } : null);
-    }
+      return result;
+    }, (_item, result, _i, doneSoFar) => {
+      // Append-as-completed (out of input order). Keeps the user
+      // staring at forward motion instead of a frozen counter.
+      setBulk(prev => prev ? { ...prev, done: doneSoFar, results: [...prev.results, result] } : null);
+    });
+
     setBulk(prev => prev ? { ...prev, running: false } : null);
     setSelectedIds(new Set());
   };
