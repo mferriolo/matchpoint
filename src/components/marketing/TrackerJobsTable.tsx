@@ -11,6 +11,7 @@ import { useToast } from '@/hooks/use-toast';
 import JobPriorityBadge from './JobPriorityBadge';
 import { priorityScore } from '@/lib/jobPriorityScore';
 import EditJobModal, { EditJobRow } from './EditJobModal';
+import { DateRangeFilter, DateRange, inDateRange } from './DateRangeFilter';
 import { Pencil } from 'lucide-react';
 
 // Each row is a marketing_jobs row. The parent decorates each job with a
@@ -90,7 +91,7 @@ type SortKey =
   | 'created_at';
 type SortDir = 'asc' | 'desc';
 
-type FilterKind = 'text' | 'select-job-type' | 'select-company-type' | 'select-run' | 'select-priority-bucket' | 'none';
+type FilterKind = 'text' | 'select-job-type' | 'select-company-type' | 'select-run' | 'select-priority-bucket' | 'date-range' | 'none';
 const COLUMNS: Array<{ key: SortKey; label: string; className?: string; filter: FilterKind }> = [
   { key: 'priority_score', label: 'Priority',  className: 'w-[6%]',  filter: 'select-priority-bucket' },
   { key: 'job_title',    label: 'Job Title',    className: 'w-[16%]', filter: 'text' },
@@ -100,8 +101,8 @@ const COLUMNS: Array<{ key: SortKey; label: string; className?: string; filter: 
   { key: 'city',         label: 'City',         className: 'w-[7%]',  filter: 'text' },
   { key: 'state',        label: 'State',        className: 'w-[5%]',  filter: 'text' },
   { key: 'source',       label: 'Source',       className: 'w-[9%]',  filter: 'text' },
-  { key: 'date_posted',  label: 'Date Posted',  className: 'w-[11%]', filter: 'none' },
-  { key: 'created_at',   label: 'Date Found',   className: 'w-[13%]', filter: 'select-run' },
+  { key: 'date_posted',  label: 'Date Posted',  className: 'w-[11%]', filter: 'date-range' },
+  { key: 'created_at',   label: 'Date Found',   className: 'w-[13%]', filter: 'date-range' },
 ];
 
 /**
@@ -221,7 +222,7 @@ export function TrackerJobsTable({
 }) {
   // Text columns store a single string (substring match); select columns
   // store a string[] (exact-match any-of; empty = show all).
-  const [filters, setFilters] = useState<Record<string, string | string[]>>({});
+  const [filters, setFilters] = useState<Record<string, string | string[] | DateRange>>({});
   // Default sort: hottest priority first. high_priority manual flag still
   // takes precedence within ties — handled in the sort comparator below.
   const [sortKey, setSortKey] = useState<SortKey>('priority_score');
@@ -306,6 +307,8 @@ export function TrackerJobsTable({
     setFilters(prev => ({ ...prev, [key]: v }));
   const setMultiFilter = (key: string, v: string[]) =>
     setFilters(prev => ({ ...prev, [key]: v }));
+  const setRangeFilter = (key: string, v: DateRange) =>
+    setFilters(prev => ({ ...prev, [key]: v }));
   const getMulti = (key: string): string[] => {
     const v = filters[key];
     return Array.isArray(v) ? v : [];
@@ -313,6 +316,10 @@ export function TrackerJobsTable({
   const getText = (key: string): string => {
     const v = filters[key];
     return typeof v === 'string' ? v : '';
+  };
+  const getRange = (key: string): DateRange => {
+    const v = filters[key];
+    return v && typeof v === 'object' && !Array.isArray(v) ? v as DateRange : {};
   };
 
   const filtered = useMemo(() => {
@@ -324,6 +331,10 @@ export function TrackerJobsTable({
         } else if (col.filter === 'text') {
           if (typeof v !== 'string' || !v) continue;
           if (!fieldFor(j, col.key).toLowerCase().includes(v.toLowerCase())) return false;
+        } else if (col.filter === 'date-range') {
+          const range = (v && typeof v === 'object' && !Array.isArray(v)) ? v as DateRange : {};
+          const rowIso = col.key === 'date_posted' ? j.date_posted : j.created_at;
+          if (!inDateRange(rowIso, range)) return false;
         } else {
           const selected = Array.isArray(v) ? v : [];
           if (selected.length === 0) continue;
@@ -376,9 +387,12 @@ export function TrackerJobsTable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filtered, sortKey, sortDir, matchedTypes]);
 
-  const hasActiveFilter = Object.values(filters).some(v =>
-    Array.isArray(v) ? v.length > 0 : typeof v === 'string' && v.trim().length > 0
-  );
+  const hasActiveFilter = Object.values(filters).some(v => {
+    if (Array.isArray(v)) return v.length > 0;
+    if (typeof v === 'string') return v.trim().length > 0;
+    if (v && typeof v === 'object') return !!((v as DateRange).from || (v as DateRange).to);
+    return false;
+  });
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -489,6 +503,13 @@ export function TrackerJobsTable({
                       }))}
                       values={getMulti(col.key)}
                       onChange={next => setMultiFilter(col.key, next)}
+                    />
+                  )}
+                  {col.filter === 'date-range' && (
+                    <DateRangeFilter
+                      label={col.label}
+                      value={getRange(col.key)}
+                      onChange={next => setRangeFilter(col.key, next)}
                     />
                   )}
                 </th>

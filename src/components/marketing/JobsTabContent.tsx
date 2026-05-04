@@ -20,6 +20,7 @@ import { sourceLabel, sourceUrl, fmtDateTime, companyTypeBadge, matchJobType } f
 import JobPriorityBadge from './JobPriorityBadge';
 import { priorityScore } from '@/lib/jobPriorityScore';
 import EditJobModal, { EditJobRow } from './EditJobModal';
+import { DateRangeFilterIcon, DateRange, inDateRange } from './DateRangeFilter';
 import { useToast } from '@/hooks/use-toast';
 
 interface JobsTabContentProps {
@@ -184,6 +185,8 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
   const [filterCity, setFilterCity] = useState<Set<string>>(new Set());
   const [filterState, setFilterState] = useState<Set<string>>(new Set());
   const [filterSource, setFilterSource] = useState<Set<string>>(new Set());
+  const [filterDatePosted, setFilterDatePosted] = useState<DateRange>({});
+  const [filterDateFound, setFilterDateFound] = useState<DateRange>({});
 
   // Dropdown open state is managed inside each MultiSelectColumnHeader
   // via Radix Popover — no parent-level coordination needed.
@@ -366,9 +369,11 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       if (filterCity.size > 0 && !filterCity.has(j.city || '')) return false;
       if (filterState.size > 0 && !filterState.has(j.state || '')) return false;
       if (filterSource.size > 0 && !filterSource.has(sourceLabel(j))) return false;
+      if (!inDateRange(j.date_posted, filterDatePosted)) return false;
+      if (!inDateRange(j.created_at, filterDateFound)) return false;
       return true;
     });
-  }, [baseJobs, searchTerm, filterPriorityBucket, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource, filterHighPriority, showBlocked]);
+  }, [baseJobs, searchTerm, filterPriorityBucket, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource, filterDatePosted, filterDateFound, filterHighPriority, showBlocked]);
 
 
   // Sort
@@ -884,7 +889,10 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
 
   // Active filter count — counts each column that has at least one value
   // selected (not the total number of selected values across columns).
-  const activeFilterCount = [filterPriorityBucket, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource].filter(s => s.size > 0).length;
+  const activeFilterCount =
+    [filterPriorityBucket, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource].filter(s => s.size > 0).length
+    + (filterDatePosted.from || filterDatePosted.to ? 1 : 0)
+    + (filterDateFound.from || filterDateFound.to ? 1 : 0);
 
   const clearAllFilters = () => {
     setFilterPriorityBucket(new Set());
@@ -895,6 +903,8 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
     setFilterCity(new Set());
     setFilterState(new Set());
     setFilterSource(new Set());
+    setFilterDatePosted({});
+    setFilterDateFound({});
     setFilterHighPriority(false);
     setSearchTerm('');
   };
@@ -1187,16 +1197,22 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
               <MultiSelectColumnHeader<SortField> field="source" label="Source" filterValues={filterSource} filterOptions={uniqueSources} onFilterChange={setFilterSource} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
 
               <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[140px]">
-                <button onClick={() => handleSort('date_posted')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
-                  Date Posted
-                  <SortIcon field="date_posted" />
-                </button>
+                <div className="flex items-center gap-1">
+                  <button onClick={() => handleSort('date_posted')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
+                    Date Posted
+                    <SortIcon field="date_posted" />
+                  </button>
+                  <DateRangeFilterIcon label="Date Posted" value={filterDatePosted} onChange={setFilterDatePosted} />
+                </div>
               </th>
               <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[140px]">
-                <button onClick={() => handleSort('created_at')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
-                  Date Found
-                  <SortIcon field="created_at" />
-                </button>
+                <div className="flex items-center gap-1">
+                  <button onClick={() => handleSort('created_at')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
+                    Date Found
+                    <SortIcon field="created_at" />
+                  </button>
+                  <DateRangeFilterIcon label="Date Found" value={filterDateFound} onChange={setFilterDateFound} />
+                </div>
               </th>
               <th className="text-center px-4 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[100px]">Actions</th>
 
