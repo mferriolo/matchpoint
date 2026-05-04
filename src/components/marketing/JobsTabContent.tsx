@@ -7,7 +7,7 @@ import {
   Download, Loader2, X, Archive, RotateCcw, Filter, ShieldCheck,
   CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Trash2,
   Link2, Star, Zap, Building2, Briefcase, Ban, Eye, EyeOff, Pencil,
-  Calendar, FileText, Minus, Wand2
+  Calendar, FileText, Minus, Wand2, Columns3
 } from 'lucide-react';
 
 
@@ -22,6 +22,27 @@ import { priorityScore } from '@/lib/jobPriorityScore';
 import EditJobModal, { EditJobRow } from './EditJobModal';
 import { DateRangeFilterIcon, DateRange, inDateRange } from './DateRangeFilter';
 import { ScriptGeneratorModal, ScriptJobInput } from './ScriptGeneratorModal';
+import { useResizableColumns } from './useResizableColumns';
+
+// Column keys must match the order of <col> in the table's <colgroup>
+// and the order of header/body cells. Defaults are tuned to roughly
+// match the previous layout so users don't see a layout shift on
+// first load. Persisted to localStorage so widths survive reload.
+const JOBS_TAB_COLUMNS = [
+  { key: 'select',         defaultWidth: 36,  minWidth: 28 },
+  { key: 'priority_score', defaultWidth: 100, minWidth: 70 },
+  { key: 'job_title',      defaultWidth: 240, minWidth: 120 },
+  { key: 'has_description',defaultWidth: 70,  minWidth: 50 },
+  { key: 'job_type',       defaultWidth: 130, minWidth: 80 },
+  { key: 'company_name',   defaultWidth: 200, minWidth: 100 },
+  { key: 'company_type',   defaultWidth: 150, minWidth: 90 },
+  { key: 'city',           defaultWidth: 130, minWidth: 70 },
+  { key: 'state',          defaultWidth: 80,  minWidth: 60 },
+  { key: 'source',         defaultWidth: 130, minWidth: 80 },
+  { key: 'date_posted',    defaultWidth: 140, minWidth: 90 },
+  { key: 'created_at',     defaultWidth: 140, minWidth: 90 },
+  { key: 'actions',        defaultWidth: 110, minWidth: 80 },
+];
 import { useToast } from '@/hooks/use-toast';
 
 interface JobsTabContentProps {
@@ -234,6 +255,16 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
   const [viewingJobId, setViewingJobId] = useState<string | null>(null);
   const [editingJob, setEditingJob] = useState<EditJobRow | null>(null);
   const [scriptJob, setScriptJob] = useState<ScriptJobInput | null>(null);
+
+  // Resizable columns. Pulls persisted widths from localStorage (or
+  // falls back to defaults) and exposes a per-column ResizeHandle that
+  // renders a 6px-wide drag grip on the right edge of any th with
+  // `position: relative`. The grip turns the cursor to col-resize and
+  // updates the matching <col> in the table's colgroup live.
+  const { widths: colWidths, ResizeHandle, reset: resetColumnWidths } = useResizableColumns(
+    'jobs-tab',
+    JOBS_TAB_COLUMNS
+  );
   const viewingJob = viewingJobId ? jobs.find(j => j.id === viewingJobId) : null;
 
 
@@ -1008,6 +1039,15 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
           </button>
         )}
 
+        <button
+          onClick={resetColumnWidths}
+          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md bg-white text-gray-500 border border-gray-200 hover:bg-gray-50 hover:text-gray-700 transition-colors"
+          title="Reset column widths to defaults"
+        >
+          <Columns3 className="w-3 h-3" />
+          Reset widths
+        </button>
+
         {/* High Priority Quick Filter */}
         <button
           onClick={() => setFilterHighPriority(prev => !prev)}
@@ -1197,10 +1237,15 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
 
       {/* Table */}
       <div className="flex-1 overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="text-sm table-fixed" style={{ width: 'max-content', minWidth: '100%' }}>
+          <colgroup>
+            {JOBS_TAB_COLUMNS.map(c => (
+              <col key={c.key} style={{ width: `${colWidths[c.key]}px` }} />
+            ))}
+          </colgroup>
           <thead className="bg-gray-50 border-b sticky top-0 z-10">
             <tr>
-              <th className="text-center px-2 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[36px]">
+              <th className="relative text-center px-2 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold">
                 <input
                   type="checkbox"
                   checked={allVisibleSelected}
@@ -1208,6 +1253,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                   className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406] cursor-pointer"
                   title={allVisibleSelected ? 'Deselect all visible' : 'Select all visible'}
                 />
+                <ResizeHandle columnKey="select" />
               </th>
               {/* Columns mirror Tracker's jobs table, with the priority
                   score added as the leftmost data column.
@@ -1223,8 +1269,9 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                 sortDir={sortDir}
                 onSort={handleSort}
                 filterPanelLabel="Filter by priority bucket"
+                resizeHandle={<ResizeHandle columnKey="priority_score" />}
               />
-              <MultiSelectColumnHeader<SortField> field="job_title" label="Job Title" filterValues={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="job_title" label="Job Title" filterValues={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} sortField={sortField} sortDir={sortDir} onSort={handleSort} resizeHandle={<ResizeHandle columnKey="job_title" />} />
               <MultiSelectColumnHeader<SortField>
                 field="has_description"
                 label="Desc"
@@ -1235,15 +1282,16 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                 sortDir={sortDir}
                 onSort={handleSort}
                 filterPanelLabel="Filter by description"
+                resizeHandle={<ResizeHandle columnKey="has_description" />}
               />
-              <MultiSelectColumnHeader<SortField> field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={uniqueJobTypes} onFilterChange={setFilterJobType} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="company_type" label="Company Type" filterValues={filterCompanyType} filterOptions={uniqueCompanyTypes} onFilterChange={setFilterCompanyType} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="city" label="City" filterValues={filterCity} filterOptions={uniqueCities} onFilterChange={setFilterCity} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="state" label="State" filterValues={filterState} filterOptions={uniqueStates} onFilterChange={setFilterState} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="source" label="Source" filterValues={filterSource} filterOptions={uniqueSources} onFilterChange={setFilterSource} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={uniqueJobTypes} onFilterChange={setFilterJobType} sortField={sortField} sortDir={sortDir} onSort={handleSort} resizeHandle={<ResizeHandle columnKey="job_type" />} />
+              <MultiSelectColumnHeader<SortField> field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} sortField={sortField} sortDir={sortDir} onSort={handleSort} resizeHandle={<ResizeHandle columnKey="company_name" />} />
+              <MultiSelectColumnHeader<SortField> field="company_type" label="Company Type" filterValues={filterCompanyType} filterOptions={uniqueCompanyTypes} onFilterChange={setFilterCompanyType} sortField={sortField} sortDir={sortDir} onSort={handleSort} resizeHandle={<ResizeHandle columnKey="company_type" />} />
+              <MultiSelectColumnHeader<SortField> field="city" label="City" filterValues={filterCity} filterOptions={uniqueCities} onFilterChange={setFilterCity} sortField={sortField} sortDir={sortDir} onSort={handleSort} resizeHandle={<ResizeHandle columnKey="city" />} />
+              <MultiSelectColumnHeader<SortField> field="state" label="State" filterValues={filterState} filterOptions={uniqueStates} onFilterChange={setFilterState} sortField={sortField} sortDir={sortDir} onSort={handleSort} resizeHandle={<ResizeHandle columnKey="state" />} />
+              <MultiSelectColumnHeader<SortField> field="source" label="Source" filterValues={filterSource} filterOptions={uniqueSources} onFilterChange={setFilterSource} sortField={sortField} sortDir={sortDir} onSort={handleSort} resizeHandle={<ResizeHandle columnKey="source" />} />
 
-              <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[140px]">
+              <th className="relative text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold">
                 <div className="flex items-center gap-1">
                   <button onClick={() => handleSort('date_posted')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
                     Date Posted
@@ -1251,8 +1299,9 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                   </button>
                   <DateRangeFilterIcon label="Date Posted" value={filterDatePosted} onChange={setFilterDatePosted} />
                 </div>
+                <ResizeHandle columnKey="date_posted" />
               </th>
-              <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[140px]">
+              <th className="relative text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold">
                 <div className="flex items-center gap-1">
                   <button onClick={() => handleSort('created_at')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors">
                     Date Found
@@ -1260,8 +1309,12 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                   </button>
                   <DateRangeFilterIcon label="Date Found" value={filterDateFound} onChange={setFilterDateFound} />
                 </div>
+                <ResizeHandle columnKey="created_at" />
               </th>
-              <th className="text-center px-4 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[100px]">Actions</th>
+              <th className="relative text-center px-4 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold">
+                Actions
+                <ResizeHandle columnKey="actions" />
+              </th>
 
             </tr>
           </thead>

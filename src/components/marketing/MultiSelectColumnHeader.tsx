@@ -27,11 +27,15 @@ export type MultiSelectColumnHeaderProps<Field extends string> = {
    *  (Work) column on the Contacts tab to place an "Any Phone" filter
    *  immediately next to the per-column phone filters. */
   extraButton?: React.ReactNode;
+  /** Optional resize handle rendered absolutely on the right edge of
+   *  the th. Positioned by the caller via standard absolute classes;
+   *  the th already has `relative`. */
+  resizeHandle?: React.ReactNode;
 };
 
 export function MultiSelectColumnHeader<Field extends string>(props: MultiSelectColumnHeaderProps<Field>) {
   const { field, label, filterValues, filterOptions, onFilterChange,
-    sortField, sortDir, onSort, filterPanelLabel, extraButton } = props;
+    sortField, sortDir, onSort, filterPanelLabel, extraButton, resizeHandle } = props;
   const hasFilter = filterValues.size > 0;
   const [open, setOpen] = useState(false);
   const [filterSearch, setFilterSearch] = useState('');
@@ -160,6 +164,7 @@ export function MultiSelectColumnHeader<Field extends string>(props: MultiSelect
         )}
         {extraButton}
       </div>
+      {resizeHandle}
     </th>
   );
 }
