@@ -14,7 +14,7 @@ const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
 const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-const CATS = ["Value Based Care (VBC)","PACE Medical Groups","Health Plans","Health Systems","Hospitals","FQHC","All Others"];
+const CATS = ["Value Based Care (VBC)","ACO","PACE Medical Groups","Health Plans","Health Systems","Hospitals","FQHC","All Others"];
 const ROLES = ["Medical Director","Chief Medical Officer","Primary Care Physician","Nurse Practitioner","Physician Assistant"];
 const JOB_BOARDS = ["Indeed","LinkedIn Jobs","ZipRecruiter","Google Jobs","Glassdoor","DocCafe","Health eCareers","PracticeLink","Monster","CareerBuilder","SimplyHired"];
 
@@ -43,6 +43,7 @@ const STEP_ORDER = ['loading','searching_sources','deduplicating','enriching_con
 function catCo(n: string): string {
   const l = n.toLowerCase();
   if (l.includes("pace")) return "PACE Medical Groups";
+  if (l.includes("accountable care") || /\baco\b/.test(l)) return "ACO";
   if (["vbc","value based","agilon","oak street","chenmed","iora","aledade","cityblock","cano","privia","signify","curana","villagemd","hopscotch","cohere","cinqcare","centerwel","harmonycares","caremax","p3 health","wellvana","bloom","pair team","firefly","vera whole","everside","marathon","landmark","devoted","clover","bright health","alignment","carelon"].some(k=>l.includes(k))) return "Value Based Care (VBC)";
   if (["health plan","payer","insurance","humana","aetna","cigna","molina","centene","elevance","oscar","scan health","optum","unitedhealth","anthem","wellcare","point32","blue cross","emblemhealth","health net","caresource"].some(k=>l.includes(k))) return "Health Plans";
   if (["health system","commonspirit","ascension","providence","trinity","intermountain","kaiser","advocate aurora","atrium","geisinger","sanford","bon secours"].some(k=>l.includes(k))) return "Health Systems";

@@ -191,6 +191,7 @@ function rowFieldForKey(j: TrackerJobsTableRow, key: SortKey, matchedType: strin
 export function companyTypeBadge(cat?: string): string {
   const colors: Record<string, string> = {
     'Value Based Care (VBC)': 'bg-blue-100 text-blue-800',
+    'ACO': 'bg-cyan-100 text-cyan-800',
     'PACE Medical Groups': 'bg-purple-100 text-purple-800',
     'Health Plans': 'bg-green-100 text-green-800',
     'Health Systems': 'bg-orange-100 text-orange-800',

@@ -52,6 +52,7 @@ export function categoryScore(companyType: string | null | undefined): number {
   if (!companyType || !companyType.trim()) return 60;
   const c = companyType.toLowerCase();
   if (c.includes('value based care') || c.includes('vbc')) return 100;
+  if (c.includes('accountable care') || /\baco\b/.test(c)) return 95;
   if (c.includes('pace'))           return 90;
   if (c.includes('fqhc'))           return 80;
   if (c.includes('health plan'))    return 70;

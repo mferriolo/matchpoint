@@ -42,6 +42,7 @@ const JOB_TYPE_OPTIONS = ['All', 'CMO', 'Medical Director', 'PCP', 'APP', 'Other
 const CATEGORY_OPTIONS = [
   'All',
   'Value Based Care (VBC)',
+  'ACO',
   'PACE Medical Groups',
   'Health Plans',
   'Health Systems',
@@ -53,6 +54,7 @@ const CATEGORY_OPTIONS = [
 const categoryBadge = (cat: string) => {
   const colors: Record<string, string> = {
     'Value Based Care (VBC)': 'bg-blue-100 text-blue-800',
+    'ACO': 'bg-cyan-100 text-cyan-800',
     'PACE Medical Groups': 'bg-purple-100 text-purple-800',
     'Health Plans': 'bg-green-100 text-green-800',
     'Health Systems': 'bg-orange-100 text-orange-800',

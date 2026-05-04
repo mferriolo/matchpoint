@@ -608,7 +608,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
   // time; editingCompanyTypeId === c.id swaps the Category cell into a
   // <select>. Same constants the scraper uses for company categorization.
   const COMPANY_CATEGORY_OPTIONS = [
-    'Value Based Care (VBC)', 'PACE Medical Groups', 'Health Plans',
+    'Value Based Care (VBC)', 'ACO', 'PACE Medical Groups', 'Health Plans',
     'Health Systems', 'Hospitals', 'FQHC', 'All Others'
   ];
   const [editingCompanyTypeId, setEditingCompanyTypeId] = useState<string | null>(null);
@@ -1598,6 +1598,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
   const categoryBadge = (cat: string) => {
     const colors: Record<string, string> = {
       'Value Based Care (VBC)': 'bg-blue-100 text-blue-800',
+      'ACO': 'bg-cyan-100 text-cyan-800',
       'PACE Medical Groups': 'bg-purple-100 text-purple-800',
       'Health Plans': 'bg-green-100 text-green-800',
       'Health Systems': 'bg-orange-100 text-orange-800',
