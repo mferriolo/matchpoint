@@ -681,10 +681,11 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
 
   // Export to CSV — columns mirror the visible Tracker-style layout.
   const handleExportCSV = useCallback(() => {
-    const headers = ['Priority', 'Job Title', 'Job Type', 'Company', 'Company Type', 'City', 'State', 'Source', 'Source URL', 'Has Description', 'Date Posted', 'Date Found', 'High Priority'];
+    const headers = ['Priority', 'Job Title', 'Has Description', 'Job Type', 'Company', 'Company Type', 'City', 'State', 'Source', 'Source URL', 'Date Posted', 'Date Found', 'High Priority'];
     const rows = sortedJobs.map((j: any) => [
       typeof j._priorityScore === 'number' ? Math.round(j._priorityScore).toString() : '',
       j.job_title || '',
+      (j.description && String(j.description).trim().length > 0) ? 'Yes' : 'No',
       j._matchedJobType || '',
       j.company_name || '',
       j._companyType || '',
@@ -692,7 +693,6 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       j.state || '',
       sourceLabel(j),
       sourceUrl(j),
-      (j.description && String(j.description).trim().length > 0) ? 'Yes' : 'No',
       j.date_posted || '',
       j.created_at || '',
       (j.high_priority || j._companyIsHighPriority) ? 'Yes' : 'No',
