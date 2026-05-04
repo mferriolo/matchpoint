@@ -10,6 +10,7 @@ import { useToast } from '@/hooks/use-toast';
 export interface ScriptJobInput {
   id: string;
   job_title?: string | null;
+  company_id?: string | null;
   company_name?: string | null;
   city?: string | null;
   state?: string | null;
@@ -22,6 +23,84 @@ export interface ScriptJobInput {
   priority_score?: number | null;
   description?: string | null;
   company_description?: string | null;
+}
+
+interface ContactRow {
+  id: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  title?: string | null;
+  suffix?: string | null;
+}
+
+/** Map a free-text contact title to one of the AUDIENCE_OPTIONS values,
+ *  or '' if no confident match. Order matters: CMO is checked before
+ *  generic "medical" so we don't downgrade a CMO to "Regional MD". */
+function audienceFromTitle(title: string): string {
+  const t = (title || '').toLowerCase();
+  if (!t) return '';
+  if (/\bcmo\b|chief medical officer/.test(t)) return 'Chief Medical Officer';
+  if (/operating partner|private equity/.test(t)) return 'Private Equity Operating Partner';
+  if (/\bceo\b|chief executive|founder|president/.test(t)) return 'CEO / Founder';
+  if (/\bcoo\b|chief operating|chief of operations|chief operations/.test(t)) return 'COO / Chief of Operations';
+  if (/vp .*clinical|vice president .*clinical/.test(t)) return 'VP of Clinical Operations';
+  if (/talent acquisition|head of ta|director of ta/.test(t)) return 'Head of Talent Acquisition';
+  if (/recruit/.test(t)) return 'Recruiting Manager';
+  if (/practice administrator|practice manager/.test(t)) return 'Practice Administrator';
+  if (/regional medical director/.test(t)) return 'Regional Medical Director';
+  if (/medical director/.test(t)) return 'Regional Medical Director';
+  return '';
+}
+
+/** Seniority rank for picking the best contact to pitch when a company
+ *  has several. Higher = better target. Falls back to 0 (any contact) so
+ *  we still pre-fill something. */
+function contactSeniorityRank(title: string): number {
+  const t = (title || '').toLowerCase();
+  if (/\bcmo\b|chief medical officer/.test(t)) return 100;
+  if (/\bceo\b|chief executive|founder|president/.test(t)) return 90;
+  if (/\bcoo\b|chief operating|chief of operations/.test(t)) return 85;
+  if (/operating partner|private equity/.test(t)) return 80;
+  if (/regional medical director/.test(t)) return 75;
+  if (/medical director/.test(t)) return 70;
+  if (/vp .*clinical|vice president .*clinical/.test(t)) return 65;
+  if (/practice administrator|practice manager/.test(t)) return 50;
+  if (/talent acquisition|head of ta|director of ta/.test(t)) return 45;
+  if (/recruit/.test(t)) return 40;
+  return 1;
+}
+
+/** Format a hiring-manager name per the user's rule:
+ *    - "Dr. {LastName}" if the contact is a CMO or Medical Director (or
+ *      has an MD/DO suffix indicating a physician).
+ *    - "{FirstName}" otherwise.
+ *  Returns '' if neither name field is populated. */
+function formatHiringManagerName(c: ContactRow | null): string {
+  if (!c) return '';
+  const first = (c.first_name || '').trim();
+  const last = (c.last_name || '').trim();
+  const title = (c.title || '').toLowerCase();
+  const suffix = (c.suffix || '').toLowerCase();
+  const isPhysicianTitle = /\bcmo\b|chief medical officer|medical director/.test(title);
+  const hasPhysicianSuffix = /\bm\.?d\.?\b|\bd\.?o\.?\b/.test(suffix);
+  if ((isPhysicianTitle || hasPhysicianSuffix) && last) return `Dr. ${last}`;
+  if (first) return first;
+  if (last) return last;
+  return '';
+}
+
+/** Pick the best contact from a company's contact list to pitch. Prefer
+ *  the most senior decision-maker by title match; tiebreak on whichever
+ *  has both names populated. */
+function pickBestContact(contacts: ContactRow[]): ContactRow | null {
+  if (!contacts || contacts.length === 0) return null;
+  const scored = contacts.map(c => ({
+    c,
+    rank: contactSeniorityRank(c.title || ''),
+    nameComplete: !!((c.first_name || '').trim() && (c.last_name || '').trim()),
+  }));
+  scored.sort((a, b) => (b.rank - a.rank) || (Number(b.nameComplete) - Number(a.nameComplete)));
+  return scored[0]?.c || null;
 }
 
 interface FormInputs {
@@ -228,11 +307,38 @@ export function ScriptGeneratorModal({
   const [savedAt, setSavedAt] = useState<string | null>(null);
 
   useEffect(() => {
-    if (job) {
-      setForm(defaultInputs(job));
-      setOutputs(null);
-      setSavedAt(null);
-    }
+    if (!job) return;
+    setForm(defaultInputs(job));
+    setOutputs(null);
+    setSavedAt(null);
+
+    // Auto-fill Decision Maker + Hiring Manager Name from
+    // marketing_contacts whenever the company has a contact on record.
+    // Bail early if neither identifier is set so we don't issue an
+    // unfiltered query.
+    const cancelled = { v: false };
+    (async () => {
+      const hasId = !!job.company_id;
+      const hasName = !!(job.company_name && job.company_name.trim());
+      if (!hasId && !hasName) return;
+      let q = supabase.from('marketing_contacts').select('id, first_name, last_name, title, suffix');
+      if (hasId) q = q.eq('company_id', job.company_id);
+      else q = q.eq('company_name', job.company_name);
+      const { data, error } = await q;
+      if (cancelled.v) return;
+      if (error || !data || data.length === 0) return;
+      const best = pickBestContact(data as ContactRow[]);
+      if (!best) return;
+      const audience = audienceFromTitle(best.title || '');
+      const hiringName = formatHiringManagerName(best);
+      setForm(prev => ({
+        ...prev,
+        ...(audience ? { audience } : {}),
+        ...(hiringName ? { hiringManagerName: hiringName } : {}),
+      }));
+    })();
+
+    return () => { cancelled.v = true; };
   }, [job?.id]);
 
   const age = useMemo(() => ageDays(job?.date_posted, job?.created_at), [job?.date_posted, job?.created_at]);

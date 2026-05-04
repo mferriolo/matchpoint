@@ -1415,6 +1415,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                           onClick={() => setScriptJob({
                             id: j.id,
                             job_title: j.job_title || null,
+                            company_id: j.company_id || null,
                             company_name: j.company_name || null,
                             city: j.city || null,
                             state: j.state || null,
