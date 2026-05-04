@@ -7,7 +7,7 @@ import {
   Download, Loader2, X, Archive, RotateCcw, Filter, ShieldCheck,
   CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Trash2,
   Link2, Star, Zap, Building2, Briefcase, Ban, Eye, EyeOff, Pencil,
-  Calendar, FileText, Minus, Wand2, Columns3
+  Calendar, FileText, Minus, Wand2, Columns3, Send
 } from 'lucide-react';
 
 
@@ -22,6 +22,7 @@ import { priorityScore } from '@/lib/jobPriorityScore';
 import EditJobModal, { EditJobRow } from './EditJobModal';
 import { DateRangeFilterIcon, DateRange, inDateRange } from './DateRangeFilter';
 import { ScriptGeneratorModal, ScriptJobInput } from './ScriptGeneratorModal';
+import { OutreachWorkspace } from './OutreachWorkspace';
 import { useResizableColumns } from './useResizableColumns';
 
 // Column keys must match the order of <col> in the table's <colgroup>
@@ -255,6 +256,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
   const [viewingJobId, setViewingJobId] = useState<string | null>(null);
   const [editingJob, setEditingJob] = useState<EditJobRow | null>(null);
   const [scriptJob, setScriptJob] = useState<ScriptJobInput | null>(null);
+  const [outreachJob, setOutreachJob] = useState<ScriptJobInput | null>(null);
 
   // Resizable columns. Pulls persisted widths from localStorage (or
   // falls back to defaults) and exposes a per-column ResizeHandle that
@@ -1531,6 +1533,29 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                         >
                           <Wand2 className="w-3.5 h-3.5" />
                         </button>
+                        <button
+                          onClick={() => setOutreachJob({
+                            id: j.id,
+                            job_title: j.job_title || null,
+                            company_id: j.company_id || null,
+                            company_name: j.company_name || null,
+                            city: j.city || null,
+                            state: j.state || null,
+                            job_url: j.job_url || j.website_source || null,
+                            date_posted: j.date_posted || null,
+                            created_at: j.created_at || null,
+                            company_type: j._companyType || j.company_type || null,
+                            job_type: j._matchedJobType || j.job_type || null,
+                            compensation: j.salary_range || j.compensation || null,
+                            priority_score: typeof j._priorityScore === 'number' ? j._priorityScore : (typeof j.priority_score === 'number' ? j.priority_score : null),
+                            description: j.description || null,
+                            company_description: null,
+                          })}
+                          className="inline-flex items-center justify-center p-1 rounded text-[#911406] hover:bg-red-50"
+                          title="Open Outreach Workspace — recommended contacts + send"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                        </button>
                         {subTab === 'open' ? (
                           <button
                             onClick={() => handleMoveJob(j.id, true)}
@@ -1967,6 +1992,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
         onClose={() => setEditingJob(null)}
       />
       <ScriptGeneratorModal job={scriptJob} onClose={() => setScriptJob(null)} />
+      <OutreachWorkspace job={outreachJob} onClose={() => setOutreachJob(null)} />
     </div>
   );
 };
