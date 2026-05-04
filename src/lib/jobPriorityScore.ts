@@ -61,14 +61,16 @@ export function categoryScore(companyType: string | null | undefined): number {
   return 60;
 }
 
-/** Penalty applied when the job title indicates per-diem or locum-tenens
- *  work. These roles are deprioritized for this workflow; matches the
- *  SQL-side modifier in the priority migration. */
+/** Penalty applied when the job title indicates per-diem, locum-tenens,
+ *  part-time, or 1099 work. These roles are deprioritized for this
+ *  workflow; matches the SQL-side modifier in the priority migration. */
 function perDiemLocumsPenalty(jobTitle: string | null | undefined): number {
   const t = (jobTitle || '').toLowerCase();
   if (!t) return 0;
   if (t.includes('per diem') || t.includes('per-diem') || t.includes('perdiem')) return 15;
   if (/\blocums?\b/.test(t)) return 15;
+  if (t.includes('part time') || t.includes('part-time') || t.includes('parttime')) return 15;
+  if (/\b1099\b/.test(t)) return 15;
   return 0;
 }
 
