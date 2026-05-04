@@ -1213,6 +1213,14 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             `Phase A: scraping ${careerTargets.length} career pages ` +
             `(${deepScan ? 'deep scan — every priority company' : `fast scan — skipped ${skippedQuiet} quiet companies`})`
           );
+          // Expand items_total so the percent bar keeps moving across Phase A
+          // — without this, items_processed stays pinned at the post-Phase-D
+          // value for the entire career-page sweep (~5 min in deep mode) and
+          // the UI looks frozen even though scraping is progressing.
+          const phaseAStartProcessed = processed;
+          await progress.updateStep('searching_sources', {
+            items_total: totalUnits + careerTargets.length,
+          });
           let cpFetched = 0, cpErrors = 0;
           const cpJobsBefore = foundJobs.length;
           const atsCounts: Record<string, number> = {};
@@ -1259,6 +1267,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
               }
             }
             await progress.updateStep('searching_sources', {
+              items_processed: phaseAStartProcessed + cpFetched,
               sub_step: `Phase A: ${cpFetched}/${careerTargets.length} career pages, ${foundJobs.length} found jobs so far`
             });
             // Brief courtesy pause between batches.
