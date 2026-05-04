@@ -956,7 +956,15 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
   });
 
   const filterTiles: { key: FilterType; label: string; count: number; color: string; activeColor: string; icon: React.ReactNode }[] = [
-    { key: 'all_roles', label: 'All Open Roles', count: jobs.filter(j => !j.is_closed && j.status !== 'Closed').length, color: 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100', activeColor: 'bg-gray-900 border-gray-900 text-white shadow-lg', icon: <Briefcase className="w-5 h-5" /> },
+    // Match the table: openJobs across companies that have a row in
+    // enrichedCompanies and aren't blocked (unless showBlocked is on).
+    // Without this, the tile reported the raw jobs.length open count
+    // (e.g. 904) while the table dropped orphans + blocked-company
+    // rows (864), so the two disagreed.
+    { key: 'all_roles', label: 'All Open Roles', count: enrichedCompanies.reduce((sum, c) => {
+        if ((c as any).is_blocked && !showBlocked) return sum;
+        return sum + ((c as any).openJobs?.length || 0);
+      }, 0), color: 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100', activeColor: 'bg-gray-900 border-gray-900 text-white shadow-lg', icon: <Briefcase className="w-5 h-5" /> },
     { key: 'new_roles', label: 'New Roles Added', count: newRoles.length, color: 'bg-blue-50 border-blue-200 text-blue-700 hover:bg-blue-100', activeColor: 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-200', icon: <TrendingUp className="w-5 h-5" /> },
     { key: 'new_companies', label: 'New Companies', count: newCompanies.length, color: 'bg-purple-50 border-purple-200 text-purple-700 hover:bg-purple-100', activeColor: 'bg-purple-600 border-purple-600 text-white shadow-lg shadow-purple-200', icon: <Building2 className="w-5 h-5" /> },
     { key: 'contacts_added', label: 'Contacts Added', count: recentContacts.length, color: 'bg-green-50 border-green-200 text-green-700 hover:bg-green-100', activeColor: 'bg-green-600 border-green-600 text-white shadow-lg shadow-green-200', icon: <Users className="w-5 h-5" /> },
