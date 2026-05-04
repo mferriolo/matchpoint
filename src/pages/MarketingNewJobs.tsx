@@ -1579,10 +1579,62 @@ const DesktopMarketingNewJobs: React.FC = () => {
   // numbers so MultiSelectColumnHeader's string-Set matches our scores.
   const CONFIDENCE_OPTIONS = ['5', '4', '3', '2', '1', '0'];
 
-  const openJobsCount = jobs.filter(j => !j.is_closed && j.status !== 'Closed').length;
+  // Tab-bar headline counts apply the same scoping the Tracker uses so
+  // Jobs / Companies / Contacts all describe the same active universe:
+  //   eligibleOpenJobs = open jobs at a non-blocked company that exists
+  //                      in the companies list (drops orphans + blocked).
+  //   companiesWithOpenJobs = the distinct companies that own at least
+  //                           one of those jobs.
+  //   contactsForActiveCompanies = contacts whose company has ≥1 of
+  //                                those jobs.
+  const eligibleOpenJobs = useMemo(() => {
+    const byId = new Map<string, any>();
+    const byName = new Map<string, any>();
+    for (const co of companies) {
+      if (co?.id) byId.set(co.id, co);
+      if (co?.company_name) byName.set(String(co.company_name).toLowerCase().trim(), co);
+    }
+    return jobs.filter(j => {
+      if (j.is_closed || j.status === 'Closed') return false;
+      const co = (j.company_id && byId.get(j.company_id)) ||
+                 (j.company_name && byName.get(String(j.company_name).toLowerCase().trim())) ||
+                 null;
+      if (!co) return false;            // orphan — no matching company
+      if (co.is_blocked) return false;  // blocked-company job
+      return true;
+    });
+  }, [jobs, companies]);
+
+  const activeCompanyKeys = useMemo(() => {
+    const ids = new Set<string>();
+    const names = new Set<string>();
+    for (const j of eligibleOpenJobs) {
+      if (j.company_id) ids.add(String(j.company_id));
+      if (j.company_name) names.add(String(j.company_name).toLowerCase().trim());
+    }
+    return { ids, names };
+  }, [eligibleOpenJobs]);
+
+  const companiesWithOpenJobs = useMemo(() => {
+    return companies.filter(c => {
+      if (c?.id && activeCompanyKeys.ids.has(String(c.id))) return true;
+      if (c?.company_name && activeCompanyKeys.names.has(String(c.company_name).toLowerCase().trim())) return true;
+      return false;
+    });
+  }, [companies, activeCompanyKeys]);
+
+  const contactsForActiveCompanies = useMemo(() => {
+    return contacts.filter(c => {
+      if (c?.company_id && activeCompanyKeys.ids.has(String(c.company_id))) return true;
+      if (c?.company_name && activeCompanyKeys.names.has(String(c.company_name).toLowerCase().trim())) return true;
+      return false;
+    });
+  }, [contacts, activeCompanyKeys]);
+
+  const openJobsCount = eligibleOpenJobs.length;
   const closedJobsCount = jobs.filter(j => j.is_closed || j.status === 'Closed').length;
   const highPriorityCount = companies.filter(c => c.is_high_priority).length;
-  const highPriorityJobsCount = jobs.filter(j => j.high_priority && !j.is_closed && j.status !== 'Closed').length;
+  const highPriorityJobsCount = eligibleOpenJobs.filter(j => j.high_priority).length;
   const crelateCount = contacts.filter(c => c.source === 'Crelate ATS').length;
 
   // Company sort icon helper
@@ -1759,10 +1811,10 @@ const DesktopMarketingNewJobs: React.FC = () => {
 
             </TabsTrigger>
             <TabsTrigger value="companies" className="data-[state=active]:bg-[#911406] data-[state=active]:text-white px-5 py-2 gap-2">
-              <Building2 className="w-4 h-4" />Companies ({companies.length})
+              <Building2 className="w-4 h-4" />Companies ({companiesWithOpenJobs.length})
             </TabsTrigger>
             <TabsTrigger value="contacts" className="data-[state=active]:bg-[#911406] data-[state=active]:text-white px-5 py-2 gap-2">
-              <Users className="w-4 h-4" />Contacts ({contacts.length})
+              <Users className="w-4 h-4" />Contacts ({contactsForActiveCompanies.length})
             </TabsTrigger>
           </TabsList>
 
