@@ -1346,7 +1346,12 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           // when the source didn't expose one (e.g. ATS career-page
           // scrapes that don't surface a date).
           const datePostedIso = parseSerpPostedAt(j._postedAtRaw) || new Date().toISOString();
-          const { error } = await supabase.from('marketing_jobs').insert({
+          // upsert with onConflict='dedup_key' protects against rare
+          // races (concurrent runs, dupes that slipped past the in-memory
+          // jKeys check due to whitespace/case oddities). ignoreDuplicates
+          // because the in-run reseenIds path already handles refreshing
+          // last_seen_at on existing rows.
+          const { error } = await supabase.from('marketing_jobs').upsert({
             company_id: cid, company_name: j.company, job_title: nt, job_type: nt, job_category: cat,
             city: j.city || '', state: j.state || '', location: j.city && j.state ? `${j.city}, ${j.state}` : '',
             job_url: directUrl, indeed_url: buildIndeedUrl(nt, j.company, j.city, j.state),
@@ -1357,7 +1362,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             url_status: 'live',
             url_check_result: (j._verifyReason || '').substring(0, 500),
             last_url_check: new Date().toISOString()
-          });
+          }, { onConflict: 'dedup_key', ignoreDuplicates: true });
           if (!error) { added++; roleB[nt] = (roleB[nt] || 0) + 1; }
           if (processedInsert % 10 === 0) await progress.updateStep('deduplicating', { items_processed: processedInsert, sub_step: `Inserted ${added}/${foundJobs.length} jobs (${coAdded} new companies)` });
         }

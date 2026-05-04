@@ -519,11 +519,14 @@ const ImportTool: React.FC<ImportToolProps> = ({ onComplete, onClose }) => {
           const chunk = batch.slice(i, i + BATCH_SIZE);
           setImportProgress({ current: i + chunk.length, total: batch.length, label: `Importing jobs from "${sheet.name}"...` });
           
-          const { error } = await supabase.from('marketing_jobs').insert(chunk);
+          // upsert with onConflict='dedup_key' so re-importing a sheet
+          // that overlaps existing jobs doesn't fail or duplicate. The
+          // partial unique index on dedup_key handles the conflict.
+          const { error } = await supabase.from('marketing_jobs').upsert(chunk, { onConflict: 'dedup_key', ignoreDuplicates: true });
           if (error) {
-            // Try one by one
+            // Try one by one to localize the failing row.
             for (const item of chunk) {
-              const { error: singleErr } = await supabase.from('marketing_jobs').insert(item);
+              const { error: singleErr } = await supabase.from('marketing_jobs').upsert(item, { onConflict: 'dedup_key', ignoreDuplicates: true });
               if (singleErr) {
                 result.errors.push(`${item.company_name} - ${item.job_title}: ${singleErr.message}`);
               } else {
