@@ -1225,12 +1225,6 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                 filterPanelLabel="Filter by priority bucket"
               />
               <MultiSelectColumnHeader<SortField> field="job_title" label="Job Title" filterValues={filterJobTitle} filterOptions={uniqueJobTitles} onFilterChange={setFilterJobTitle} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={uniqueJobTypes} onFilterChange={setFilterJobType} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="company_type" label="Company Type" filterValues={filterCompanyType} filterOptions={uniqueCompanyTypes} onFilterChange={setFilterCompanyType} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="city" label="City" filterValues={filterCity} filterOptions={uniqueCities} onFilterChange={setFilterCity} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="state" label="State" filterValues={filterState} filterOptions={uniqueStates} onFilterChange={setFilterState} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <MultiSelectColumnHeader<SortField> field="source" label="Source" filterValues={filterSource} filterOptions={uniqueSources} onFilterChange={setFilterSource} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <MultiSelectColumnHeader<SortField>
                 field="has_description"
                 label="Desc"
@@ -1242,6 +1236,12 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                 onSort={handleSort}
                 filterPanelLabel="Filter by description"
               />
+              <MultiSelectColumnHeader<SortField> field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={uniqueJobTypes} onFilterChange={setFilterJobType} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="company_type" label="Company Type" filterValues={filterCompanyType} filterOptions={uniqueCompanyTypes} onFilterChange={setFilterCompanyType} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="city" label="City" filterValues={filterCity} filterOptions={uniqueCities} onFilterChange={setFilterCity} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="state" label="State" filterValues={filterState} filterOptions={uniqueStates} onFilterChange={setFilterState} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField> field="source" label="Source" filterValues={filterSource} filterOptions={uniqueSources} onFilterChange={setFilterSource} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
 
               <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[140px]">
                 <div className="flex items-center gap-1">
@@ -1344,21 +1344,22 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                           )}
                         </button>
                         <span className="truncate block font-medium">{j.job_title || '(untitled)'}</span>
-                        {/* Description-scraped indicator. Shown only when
-                            a non-empty description is on file; clicking
-                            opens the detail dialog scrolled to the
-                            Description block. */}
-                        {j.description && String(j.description).trim().length > 0 && (
-                          <button
-                            type="button"
-                            onClick={(e) => { e.stopPropagation(); setViewingJobId(j.id); }}
-                            className="flex-shrink-0 mt-0.5 text-emerald-600 hover:text-emerald-700"
-                            title={`Description scraped (${String(j.description).length.toLocaleString()} chars) — click to read`}
-                          >
-                            <FileText className="w-3.5 h-3.5" />
-                          </button>
-                        )}
                       </div>
+                    </td>
+                    {/* Description present? Click the icon to read. */}
+                    <td className="px-4 py-3 text-center">
+                      {j.description && String(j.description).trim().length > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => setViewingJobId(j.id)}
+                          className="inline-flex items-center justify-center text-emerald-600 hover:text-emerald-700"
+                          title={`Description scraped (${String(j.description).length.toLocaleString()} chars) — click to read`}
+                        >
+                          <FileText className="w-4 h-4" />
+                        </button>
+                      ) : (
+                        <span className="text-gray-300">—</span>
+                      )}
                     </td>
                     {/* Job Type (matched against tracked job_types). */}
                     <td className="px-4 py-3">
@@ -1402,21 +1403,6 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                         </a>
                       ) : (
                         <span className="text-gray-500">{srcLabel}</span>
-                      )}
-                    </td>
-                    {/* Description present? Click the icon to read. */}
-                    <td className="px-4 py-3 text-center">
-                      {j.description && String(j.description).trim().length > 0 ? (
-                        <button
-                          type="button"
-                          onClick={() => setViewingJobId(j.id)}
-                          className="inline-flex items-center justify-center text-emerald-600 hover:text-emerald-700"
-                          title={`Description scraped (${String(j.description).length.toLocaleString()} chars) — click to read`}
-                        >
-                          <FileText className="w-4 h-4" />
-                        </button>
-                      ) : (
-                        <span className="text-gray-300">—</span>
                       )}
                     </td>
                     {/* Date Posted — drives priority recency. */}
