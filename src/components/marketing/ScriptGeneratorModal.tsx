@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { X, Loader2, Wand2, Copy, Check, Save, RotateCw } from 'lucide-react';
+import { X, Loader2, Wand2, Copy, Check, Save, RotateCw, History, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -182,7 +182,18 @@ const COMPANY_TYPE_OPTIONS = [
   'All Others',
 ];
 
-const ROLE_CATEGORY_OPTIONS = ['CMO', 'Medical Director', 'PCP', 'APP', 'Other'];
+// Fallback role categories used only if the job_types table is empty or
+// the fetch fails. The live list is loaded from job_types and includes
+// every type the rest of the app shows in its picker.
+const ROLE_CATEGORY_FALLBACK = ['CMO', 'Medical Director', 'PCP', 'APP', 'Other'];
+
+interface SavedScriptRow {
+  id: string;
+  version: number;
+  created_at: string;
+  inputs: any;
+  outputs: any;
+}
 
 const URGENCY_OPTIONS = ['Low urgency', 'Moderate urgency', 'High urgency', 'Very high urgency', 'Unknown'];
 
@@ -305,12 +316,41 @@ export function ScriptGeneratorModal({
   const [saving, setSaving] = useState(false);
   const [outputs, setOutputs] = useState<ScriptOutputs | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [roleCategoryOptions, setRoleCategoryOptions] = useState<string[]>(ROLE_CATEGORY_FALLBACK);
+  const [savedScripts, setSavedScripts] = useState<SavedScriptRow[]>([]);
+  const [activeScriptId, setActiveScriptId] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+
+  const loadSavedScripts = async (jobId: string) => {
+    const { data } = await supabase
+      .from('marketing_job_scripts')
+      .select('id, version, created_at, inputs, outputs')
+      .eq('job_id', jobId)
+      .order('version', { ascending: false });
+    setSavedScripts((data || []) as SavedScriptRow[]);
+  };
+
+  // One-time job_types load — same source the rest of the app picks
+  // from, so Role Category mirrors the JOB_TYPE picker exactly. Cached
+  // across modal opens.
+  useEffect(() => {
+    let cancelled = false;
+    supabase.from('job_types').select('name').then(({ data }) => {
+      if (cancelled || !data) return;
+      const names = data.map((r: any) => r.name).filter(Boolean) as string[];
+      if (names.length > 0) setRoleCategoryOptions(names);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!job) return;
     setForm(defaultInputs(job));
     setOutputs(null);
     setSavedAt(null);
+    setActiveScriptId(null);
+    setShowHistory(false);
+    loadSavedScripts(job.id);
 
     // Auto-fill Decision Maker + Hiring Manager Name from
     // marketing_contacts whenever the company has a contact on record.
@@ -340,6 +380,18 @@ export function ScriptGeneratorModal({
 
     return () => { cancelled.v = true; };
   }, [job?.id]);
+
+  // Once the job_types list is loaded, snap the form's roleCategory to
+  // the job's job_type if it matches one of the options. This handles
+  // the race where the modal opens before the job_types fetch resolves.
+  useEffect(() => {
+    if (!job) return;
+    const jt = (job.job_type || '').trim();
+    if (!jt) return;
+    if (roleCategoryOptions.includes(jt)) {
+      setForm(prev => prev.roleCategory ? prev : { ...prev, roleCategory: jt });
+    }
+  }, [roleCategoryOptions.length, job?.id]);
 
   const age = useMemo(() => ageDays(job?.date_posted, job?.created_at), [job?.date_posted, job?.created_at]);
 
@@ -402,22 +454,47 @@ export function ScriptGeneratorModal({
         .select('id', { count: 'exact', head: true })
         .eq('job_id', job.id);
       const nextVersion = (count || 0) + 1;
-      const { error } = await supabase.from('marketing_job_scripts').insert({
+      const { data, error } = await supabase.from('marketing_job_scripts').insert({
         job_id: job.id,
         company_name: job.company_name || null,
         job_title: job.job_title || null,
         inputs: form,
         outputs,
         version: nextVersion,
-      });
+      }).select('id').single();
       if (error) throw error;
       setSavedAt(new Date().toISOString());
+      setActiveScriptId(data?.id || null);
+      await loadSavedScripts(job.id);
       toast({ title: `Saved (v${nextVersion})` });
     } catch (err: any) {
       toast({ title: 'Save failed', description: err.message || String(err), variant: 'destructive' });
     } finally {
       setSaving(false);
     }
+  };
+
+  const loadVersion = (row: SavedScriptRow) => {
+    setForm(prev => ({ ...prev, ...(row.inputs || {}) }));
+    setOutputs(row.outputs as ScriptOutputs);
+    setActiveScriptId(row.id);
+    setSavedAt(row.created_at);
+    setShowHistory(false);
+  };
+
+  const deleteVersion = async (row: SavedScriptRow) => {
+    if (!confirm(`Delete saved script v${row.version}? This can't be undone.`)) return;
+    const { error } = await supabase.from('marketing_job_scripts').delete().eq('id', row.id);
+    if (error) {
+      toast({ title: 'Delete failed', description: error.message, variant: 'destructive' });
+      return;
+    }
+    if (activeScriptId === row.id) {
+      setActiveScriptId(null);
+      setSavedAt(null);
+    }
+    await loadSavedScripts(job!.id);
+    toast({ title: `Deleted v${row.version}` });
   };
 
   const allText = outputs
@@ -438,17 +515,90 @@ export function ScriptGeneratorModal({
             </h3>
             <p className="text-xs text-gray-500">
               {[job.job_title, job.company_name].filter(Boolean).join(' · ') || '(untitled)'}
+              {activeScriptId && (() => {
+                const row = savedScripts.find(s => s.id === activeScriptId);
+                return row ? <span className="ml-2 text-emerald-700">· Loaded v{row.version}</span> : null;
+              })()}
             </p>
           </div>
-          <button
-            onClick={onClose}
-            disabled={generating || saving}
-            className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100"
-            aria-label="Close"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setShowHistory(s => !s)}
+              className={`inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded border ${
+                showHistory ? 'border-[#911406]/40 bg-red-50 text-[#911406]' : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+              }`}
+              title="Saved scripts for this job"
+            >
+              <History className="w-3.5 h-3.5" />
+              Saved
+              {savedScripts.length > 0 && (
+                <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-700">
+                  {savedScripts.length}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={onClose}
+              disabled={generating || saving}
+              className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100"
+              aria-label="Close"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
+
+        {showHistory && (
+          <div className="border-b bg-gray-50 max-h-56 overflow-y-auto">
+            {savedScripts.length === 0 ? (
+              <div className="px-5 py-3 text-xs text-gray-500">
+                No saved scripts yet. Generate one and click <span className="font-semibold">Save Script</span> to keep it.
+              </div>
+            ) : (
+              <ul className="divide-y divide-gray-200">
+                {savedScripts.map(row => {
+                  const active = row.id === activeScriptId;
+                  const subj = row.outputs?.email?.subject || '';
+                  const audience = row.inputs?.audience || '';
+                  const tone = row.inputs?.tone || '';
+                  return (
+                    <li
+                      key={row.id}
+                      className={`flex items-center justify-between gap-3 px-5 py-2 text-xs ${active ? 'bg-emerald-50' : 'hover:bg-white'}`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => loadVersion(row)}
+                        className="flex-1 text-left"
+                        title="Load this version"
+                      >
+                        <div className="font-semibold text-gray-900">
+                          v{row.version}
+                          <span className="ml-2 text-gray-500 font-normal">
+                            {new Date(row.created_at).toLocaleString()}
+                          </span>
+                        </div>
+                        <div className="text-gray-600 truncate">
+                          {[audience, tone].filter(Boolean).join(' · ')}
+                          {subj ? ` — “${subj}”` : ''}
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deleteVersion(row)}
+                        className="p-1 rounded text-gray-400 hover:text-red-600 hover:bg-red-50"
+                        title={`Delete v${row.version}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
 
         <div className="overflow-y-auto flex-1 p-5 grid grid-cols-1 lg:grid-cols-2 gap-5">
           <div className="space-y-5">
@@ -490,7 +640,7 @@ export function ScriptGeneratorModal({
               <Select label="MedCentric Service to Pitch" value={form.service} options={SERVICE_OPTIONS} onChange={v => set('service', v)} />
               {form.service === 'Other' && <FreeText label="Specify service" value={form.serviceOther} onChange={v => set('serviceOther', v)} />}
               <Select label="Company Type" value={form.companyType} options={['', ...COMPANY_TYPE_OPTIONS]} onChange={v => set('companyType', v)} />
-              <Select label="Role Category" value={form.roleCategory} options={['', ...ROLE_CATEGORY_OPTIONS]} onChange={v => set('roleCategory', v)} />
+              <Select label="Role Category" value={form.roleCategory} options={['', ...roleCategoryOptions]} onChange={v => set('roleCategory', v)} />
               <Select label="Sales Tone" value={form.tone} options={TONE_OPTIONS} onChange={v => set('tone', v)} />
             </Section>
 
