@@ -4,7 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ExternalLink, Star,
-  Briefcase, Users, Globe, ShieldCheck, Ban, Undo2, Loader2, Wand2, Send,
+  Briefcase, Users, Globe, ShieldCheck, Ban, Undo2, Loader2, Wand2,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useToast } from '@/hooks/use-toast';
@@ -13,7 +13,6 @@ import { priorityScore } from '@/lib/jobPriorityScore';
 import EditJobModal, { EditJobRow } from './EditJobModal';
 import { DateRangeFilter, DateRange, inDateRange } from './DateRangeFilter';
 import { ScriptGeneratorModal, ScriptJobInput } from './ScriptGeneratorModal';
-import { OutreachWorkspace } from './OutreachWorkspace';
 import { Pencil } from 'lucide-react';
 
 // Each row is a marketing_jobs row. The parent decorates each job with a
@@ -234,7 +233,6 @@ export function TrackerJobsTable({
   const [selectedCompany, setSelectedCompany] = useState<CompanyRecord | null>(null);
   const [editingJob, setEditingJob] = useState<EditJobRow | null>(null);
   const [scriptJob, setScriptJob] = useState<ScriptJobInput | null>(null);
-  const [outreachJob, setOutreachJob] = useState<ScriptJobInput | null>(null);
 
   // Pre-compute the matched job type per row so filter/sort/render all
   // agree on what Job Type means for a given job.
@@ -662,29 +660,8 @@ export function TrackerJobsTable({
           });
           setSelectedJob(null);
         }}
-        onOpenOutreach={j => {
-          setOutreachJob({
-            id: j.id,
-            job_title: j.job_title || null,
-            company_id: (j as any).company_id || (j._company as any)?.id || null,
-            company_name: j.company_name || null,
-            city: j.city || null,
-            state: j.state || null,
-            job_url: (j as any).job_url || (j as any).website_source || null,
-            date_posted: j.date_posted || null,
-            created_at: j.created_at || null,
-            company_type: j._companyType || (j as any).company_type || null,
-            job_type: j.job_type || null,
-            compensation: ((j as any).salary_range || (j as any).compensation) || null,
-            priority_score: typeof j.priority_score === 'number' ? j.priority_score : null,
-            description: j.description || null,
-            company_description: (j._company as any)?.description || null,
-          });
-          setSelectedJob(null);
-        }}
       />
       <ScriptGeneratorModal job={scriptJob} onClose={() => setScriptJob(null)} />
-      <OutreachWorkspace job={outreachJob} onClose={() => setOutreachJob(null)} />
       <CompanyDetailDialog
         company={selectedCompany}
         onClose={() => setSelectedCompany(null)}
@@ -702,7 +679,7 @@ export function TrackerJobsTable({
   );
 }
 
-function JobDetailDialog({ job, onClose, onEdit, onGenerateScript, onOpenOutreach }: { job: TrackerJobsTableRow | null; onClose: () => void; onEdit?: (j: TrackerJobsTableRow) => void; onGenerateScript?: (j: TrackerJobsTableRow) => void; onOpenOutreach?: (j: TrackerJobsTableRow) => void }) {
+function JobDetailDialog({ job, onClose, onEdit, onGenerateScript }: { job: TrackerJobsTableRow | null; onClose: () => void; onEdit?: (j: TrackerJobsTableRow) => void; onGenerateScript?: (j: TrackerJobsTableRow) => void }) {
   const url = job ? sourceUrl(job) : '';
   return (
     <Dialog open={!!job} onOpenChange={v => { if (!v) onClose(); }}>
@@ -736,16 +713,6 @@ function JobDetailDialog({ job, onClose, onEdit, onGenerateScript, onOpenOutreac
                     >
                       <Wand2 className="w-3.5 h-3.5" />
                       Generate Script
-                    </button>
-                  )}
-                  {onOpenOutreach && (
-                    <button
-                      onClick={() => onOpenOutreach(job)}
-                      className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded border border-[#911406]/30 text-[#911406] hover:bg-red-50"
-                      title="Open Outreach Workspace — recommended contacts + send"
-                    >
-                      <Send className="w-3.5 h-3.5" />
-                      Outreach
                     </button>
                   )}
                 </div>
