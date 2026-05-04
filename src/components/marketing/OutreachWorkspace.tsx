@@ -445,8 +445,24 @@ export function OutreachWorkspace({
 
   if (!job) return null;
 
+  const closeIfIdle = () => {
+    if (generating) return;
+    onClose();
+  };
+
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-stretch justify-end" onClick={() => onClose()}>
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-stretch justify-end" onClick={closeIfIdle}>
+      {/* Top-of-modal banner that stays visible while the OpenAI call
+          is in flight. Without this, the only loading hint was buried
+          deep in the right column and impatient users were clicking
+          the dim background — which closed the modal mid-generation
+          and looked like a hang. */}
+      {generating && (
+        <div className="absolute top-0 left-0 right-0 bg-[#911406] text-white text-xs px-4 py-1.5 flex items-center justify-center gap-2 z-10">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          Drafting message — please wait, this can take 10–15 seconds.
+        </div>
+      )}
       <div
         className="bg-white shadow-xl w-full max-w-[1400px] flex flex-col"
         onClick={e => e.stopPropagation()}
@@ -464,8 +480,10 @@ export function OutreachWorkspace({
           </div>
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100"
+            disabled={generating}
+            className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
             aria-label="Close"
+            title={generating ? 'Wait for the draft to finish' : 'Close'}
           >
             <X className="w-5 h-5" />
           </button>
