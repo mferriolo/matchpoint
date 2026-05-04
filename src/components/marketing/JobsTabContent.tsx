@@ -261,6 +261,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
         : priorityScore({ datePosted: j.date_posted, lastSeenAt: j.last_seen_at, createdAt: j.created_at, jobTitle: j.job_title, companyType }).total;
       return {
         ...j,
+        _hasMatchedCompany: !!co,
         _companyType: companyType,
         _companyIsBlocked: !!co?.is_blocked,
         _companyIsHighPriority: !!co?.is_high_priority,
@@ -269,6 +270,21 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       };
     });
   }, [jobs, companies, jobTypeOptions]);
+
+  // Match the Tracker's job set exactly so both surfaces report the
+  // same total. The Tracker iterates `companies` and pulls each
+  // company's openJobs, which silently drops:
+  //   1. orphan jobs whose company_name doesn't match any companies row
+  //   2. jobs at blocked companies when "Show blocked" is off
+  // Apply both filters here so the Jobs tab's headline count and the
+  // Tracker's count stay in lockstep.
+  const eligibleJobs = useMemo(() => {
+    return enrichedJobs.filter((j: any) => {
+      if (!j._hasMatchedCompany) return false;
+      if (!showBlocked && j._companyIsBlocked) return false;
+      return true;
+    });
+  }, [enrichedJobs, showBlocked]);
 
   // Derive unique values for filter dropdowns. No 'All' sentinel: the
   // multi-select checkbox list uses an empty set to mean "no filter".
@@ -332,9 +348,11 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
     return Array.from(set).sort();
   }, [enrichedJobs]);
 
-  // Split jobs into open and closed
-  const openJobs = useMemo(() => enrichedJobs.filter(isJobOpen), [enrichedJobs]);
-  const closedJobs = useMemo(() => enrichedJobs.filter(j => !isJobOpen(j)), [enrichedJobs]);
+  // Split jobs into open and closed. Source is `eligibleJobs` (post
+  // orphan + blocked-company filter) so the tab badge counts and the
+  // Tracker's count agree.
+  const openJobs = useMemo(() => eligibleJobs.filter(isJobOpen), [eligibleJobs]);
+  const closedJobs = useMemo(() => eligibleJobs.filter(j => !isJobOpen(j)), [eligibleJobs]);
 
   const baseJobs = subTab === 'open' ? openJobs : closedJobs;
 
