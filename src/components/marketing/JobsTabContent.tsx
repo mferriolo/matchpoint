@@ -7,7 +7,7 @@ import {
   Download, Loader2, X, Archive, RotateCcw, Filter, ShieldCheck,
   CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Trash2,
   Link2, Star, Zap, Building2, Briefcase, Ban, Eye, EyeOff, Pencil,
-  Calendar, FileText, Minus
+  Calendar, FileText, Minus, Wand2
 } from 'lucide-react';
 
 
@@ -21,6 +21,7 @@ import JobPriorityBadge from './JobPriorityBadge';
 import { priorityScore } from '@/lib/jobPriorityScore';
 import EditJobModal, { EditJobRow } from './EditJobModal';
 import { DateRangeFilterIcon, DateRange, inDateRange } from './DateRangeFilter';
+import { ScriptGeneratorModal, ScriptJobInput } from './ScriptGeneratorModal';
 import { useToast } from '@/hooks/use-toast';
 
 interface JobsTabContentProps {
@@ -231,6 +232,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
   // showing every field on the row including the full description text.
   const [viewingJobId, setViewingJobId] = useState<string | null>(null);
   const [editingJob, setEditingJob] = useState<EditJobRow | null>(null);
+  const [scriptJob, setScriptJob] = useState<ScriptJobInput | null>(null);
   const viewingJob = viewingJobId ? jobs.find(j => j.id === viewingJobId) : null;
 
 
@@ -1409,6 +1411,28 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                         >
                           <Pencil className="w-3.5 h-3.5" />
                         </button>
+                        <button
+                          onClick={() => setScriptJob({
+                            id: j.id,
+                            job_title: j.job_title || null,
+                            company_name: j.company_name || null,
+                            city: j.city || null,
+                            state: j.state || null,
+                            job_url: j.job_url || j.website_source || null,
+                            date_posted: j.date_posted || null,
+                            created_at: j.created_at || null,
+                            company_type: j._companyType || j.company_type || null,
+                            job_type: j.job_type || null,
+                            compensation: j.salary_range || j.compensation || null,
+                            priority_score: typeof j._priorityScore === 'number' ? j._priorityScore : (typeof j.priority_score === 'number' ? j.priority_score : null),
+                            description: j.description || null,
+                            company_description: null,
+                          })}
+                          className="inline-flex items-center justify-center p-1 rounded text-[#911406] hover:bg-red-50"
+                          title="Generate Problem/Solution outreach script"
+                        >
+                          <Wand2 className="w-3.5 h-3.5" />
+                        </button>
                         {subTab === 'open' ? (
                           <button
                             onClick={() => handleMoveJob(j.id, true)}
@@ -1844,6 +1868,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
         onSaved={() => onRefresh()}
         onClose={() => setEditingJob(null)}
       />
+      <ScriptGeneratorModal job={scriptJob} onClose={() => setScriptJob(null)} />
     </div>
   );
 };

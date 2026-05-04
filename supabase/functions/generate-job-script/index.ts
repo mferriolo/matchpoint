@@ -1,0 +1,197 @@
+// Generate a Problem/Solution outreach script for a marketing_jobs row.
+// Calls OpenAI gpt-4o-mini with a Danny Cahill-inspired prompt and returns
+// five formats: cold call, email, LinkedIn message, voicemail, objection
+// response. The client persists the result via a separate insert into
+// marketing_job_scripts (kept out of this function so a save failure
+// doesn't cost a regeneration).
+
+const ALLOWED_ORIGINS = [
+  'https://matchpoint-nu-dun.vercel.app',
+  'http://localhost:8080',
+  'http://localhost:5173',
+];
+
+function corsHeaders(req: Request) {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  };
+}
+
+interface JobContext {
+  company_name?: string;
+  job_title?: string;
+  city?: string;
+  state?: string;
+  job_url?: string;
+  date_posted?: string | null;
+  age_days?: number | null;
+  company_type?: string | null;
+  compensation?: string | null;
+  priority_score?: number | null;
+  company_description?: string | null;
+  job_description?: string | null;
+}
+
+interface FormInputs {
+  audience: string;            // A
+  audienceOther?: string;
+  problem: string;             // B
+  problemOther?: string;
+  service: string;             // C
+  serviceOther?: string;
+  companyType?: string;        // D
+  roleCategory?: string;       // E
+  urgency: string;             // F
+  tone: string;                // G
+  proof: string;               // H
+  proofOther?: string;
+  cta: string;                 // I
+  ctaOther?: string;
+  objections: string[];        // J — up to 3
+  // Optional free-text
+  customOpener?: string;
+  specificPain?: string;
+  companyInsight?: string;
+  hiringManagerName?: string;
+  caseStudy?: string;
+  notes?: string;
+  avoidLanguage?: string;
+}
+
+interface ScriptOutputs {
+  coldCall: string;
+  email: { subject: string; body: string };
+  linkedin: string;
+  voicemail: string;
+  objectionResponse: string;
+}
+
+function val(v?: string | null): string {
+  return (v || '').trim();
+}
+
+function buildPrompt(job: JobContext, f: FormInputs): string {
+  const audience = f.audience === 'Other' ? val(f.audienceOther) || 'a senior decision-maker' : f.audience;
+  const problem = f.problem === 'Other' ? val(f.problemOther) || 'an unfilled critical role' : f.problem;
+  const service = f.service === 'Other' ? val(f.serviceOther) || 'specialized healthcare recruiting' : f.service;
+  const proof = f.proof === 'Other' ? val(f.proofOther) || 'specialized healthcare recruiting expertise' : f.proof;
+  const cta = f.cta === 'Other' ? val(f.ctaOther) || 'a brief intro call' : f.cta;
+  const objection = (f.objections || []).filter(o => o && o !== 'No objection selected').slice(0, 3).join('; ');
+  const location = [val(job.city), val(job.state)].filter(Boolean).join(', ');
+
+  const known: string[] = [];
+  if (val(job.company_name)) known.push(`Company: ${val(job.company_name)}`);
+  if (val(job.job_title)) known.push(`Open role: ${val(job.job_title)}`);
+  if (location) known.push(`Location: ${location}`);
+  if (val(job.company_type)) known.push(`Company type: ${val(job.company_type)}`);
+  if (val(f.companyType) && val(f.companyType) !== val(job.company_type)) known.push(`User-confirmed company type: ${val(f.companyType)}`);
+  if (val(f.roleCategory)) known.push(`Role category: ${val(f.roleCategory)}`);
+  if (job.age_days != null) known.push(`Posting age: ${job.age_days} days`);
+  if (val(job.date_posted)) known.push(`Date posted: ${val(job.date_posted)}`);
+  if (val(job.compensation)) known.push(`Compensation: ${val(job.compensation)}`);
+  if (job.priority_score != null) known.push(`Priority score: ${job.priority_score}`);
+  if (val(job.job_url)) known.push(`Posting URL: ${val(job.job_url)}`);
+  if (val(job.company_description)) known.push(`Company description: ${val(job.company_description).slice(0, 600)}`);
+  if (val(job.job_description)) known.push(`Job description: ${val(job.job_description).slice(0, 1000)}`);
+  if (val(f.hiringManagerName)) known.push(`Hiring manager (if relevant to greeting): ${val(f.hiringManagerName)}`);
+  if (val(f.companyInsight)) known.push(`Company insight to weave in: ${val(f.companyInsight)}`);
+  if (val(f.specificPain)) known.push(`Specific pain to mention: ${val(f.specificPain)}`);
+  if (val(f.notes)) known.push(`Researcher notes: ${val(f.notes)}`);
+
+  const constraints: string[] = [
+    'Reference the company and the open role specifically — no mass-email language.',
+    `Target the actual needs of a ${audience}; a clinical leader has different priorities than HR or TA.`,
+    'Identify the likely business problem the open role creates, and explain why it matters now.',
+    'Position MedCentric as a specialized healthcare recruiting partner — not a generic staffing agency.',
+    `Emphasize this proof point: ${proof}.`,
+    `End with this call to action, kept low-friction: ${cta}.`,
+    'Keep tone human, confident, and practical. No buzzwords, no fluff.',
+    'If a detail is unknown, do not invent it — leave it out.',
+  ];
+  if (val(f.customOpener)) constraints.push(`Use this opening line verbatim: "${val(f.customOpener)}"`);
+  if (val(f.avoidLanguage)) constraints.push(`Avoid this language: ${val(f.avoidLanguage)}`);
+  if (val(f.caseStudy)) constraints.push(`Reference this proof point or case study where it fits: ${val(f.caseStudy)}`);
+
+  return `You are writing a Problem/Solution outreach script for MedCentric, a specialized healthcare recruiting firm. The recipient is a ${audience}. The MedCentric service being pitched is ${service}. The primary business problem to lead with is: ${problem}. Tone: ${f.tone}. Urgency: ${f.urgency}. Likely objection to address (if any): ${objection || 'none'}.
+
+Use a Danny Cahill-inspired recruiting style: lead with a specific, likely business pain, make it feel urgent and concrete, then position MedCentric as the practical solution. Be commercial — every line should earn its place.
+
+Known facts (use only what is relevant; never invent missing details):
+${known.map(k => `  - ${k}`).join('\n')}
+
+Constraints:
+${constraints.map(c => `  - ${c}`).join('\n')}
+
+Return STRICT JSON matching this exact shape, no prose outside the JSON:
+{
+  "coldCall": "string — under 90 seconds spoken, conversational, opens with a hook, names the role and likely problem, ends with the CTA",
+  "email": {
+    "subject": "string — short, specific, no clickbait, ideally references the role or company",
+    "body": "string — 5-9 short lines: opener, problem statement, why-it-matters, MedCentric solution + proof point, CTA. Plain prose, no greeting like 'Dear' unless a hiring manager name is provided."
+  },
+  "linkedin": "string — 4-7 short lines, more casual than the email, same structure",
+  "voicemail": "string — under 30 seconds spoken (~70 words), name + reason for call + ask for callback",
+  "objectionResponse": "string — 2-4 sentence rebuttal tailored to the listed objection(s); if none listed, write a generic 'why MedCentric earns the conversation' rebuttal"
+}`;
+}
+
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders(req) });
+  if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405, headers: corsHeaders(req) });
+
+  try {
+    const body = await req.json();
+    const job: JobContext = body.job || {};
+    const inputs: FormInputs = body.inputs || {};
+
+    const apiKey = Deno.env.get('OPENAI_API_KEY');
+    if (!apiKey) {
+      return new Response(JSON.stringify({ error: 'OPENAI_API_KEY not configured' }), {
+        status: 500, headers: { ...corsHeaders(req), 'Content-Type': 'application/json' },
+      });
+    }
+
+    const prompt = buildPrompt(job, inputs);
+
+    const oaResp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 1500,
+        temperature: 0.7,
+        response_format: { type: 'json_object' },
+      }),
+    });
+
+    if (!oaResp.ok) {
+      const errText = await oaResp.text();
+      return new Response(JSON.stringify({ error: `OpenAI ${oaResp.status}: ${errText}` }), {
+        status: 502, headers: { ...corsHeaders(req), 'Content-Type': 'application/json' },
+      });
+    }
+
+    const data = await oaResp.json();
+    const content = data?.choices?.[0]?.message?.content?.trim() || '';
+    let parsed: ScriptOutputs;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return new Response(JSON.stringify({ error: 'OpenAI returned non-JSON content', raw: content }), {
+        status: 502, headers: { ...corsHeaders(req), 'Content-Type': 'application/json' },
+      });
+    }
+
+    return new Response(JSON.stringify({ outputs: parsed, prompt }), {
+      status: 200, headers: { ...corsHeaders(req), 'Content-Type': 'application/json' },
+    });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ error: e?.message || String(e) }), {
+      status: 500, headers: { ...corsHeaders(req), 'Content-Type': 'application/json' },
+    });
+  }
+});
