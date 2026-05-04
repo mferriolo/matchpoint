@@ -34,7 +34,7 @@ interface JobsTabContentProps {
 // Sort keys mirror the Tracker's jobs table. Legacy keys (job_category,
 // location, job_url, has_description, date_posted, high_priority) have
 // been dropped in favor of the Tracker's column shape.
-type SortField = 'priority_score' | 'job_title' | 'job_type' | 'company_name' | 'company_type' | 'city' | 'state' | 'source' | 'date_posted' | 'created_at';
+type SortField = 'priority_score' | 'job_title' | 'job_type' | 'company_name' | 'company_type' | 'city' | 'state' | 'source' | 'has_description' | 'date_posted' | 'created_at';
 
 type SortDir = 'asc' | 'desc';
 
@@ -188,6 +188,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
   const [filterCity, setFilterCity] = useState<Set<string>>(new Set());
   const [filterState, setFilterState] = useState<Set<string>>(new Set());
   const [filterSource, setFilterSource] = useState<Set<string>>(new Set());
+  const [filterHasDescription, setFilterHasDescription] = useState<Set<string>>(new Set());
   const [filterDatePosted, setFilterDatePosted] = useState<DateRange>({});
   const [filterDateFound, setFilterDateFound] = useState<DateRange>({});
 
@@ -391,11 +392,15 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       if (filterCity.size > 0 && !filterCity.has(j.city || '')) return false;
       if (filterState.size > 0 && !filterState.has(j.state || '')) return false;
       if (filterSource.size > 0 && !filterSource.has(sourceLabel(j))) return false;
+      if (filterHasDescription.size > 0) {
+        const has = !!(j.description && String(j.description).trim().length > 0);
+        if (!filterHasDescription.has(has ? 'Yes' : 'No')) return false;
+      }
       if (!inDateRange(j.date_posted, filterDatePosted)) return false;
       if (!inDateRange(j.created_at, filterDateFound)) return false;
       return true;
     });
-  }, [baseJobs, searchTerm, filterPriorityBucket, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource, filterDatePosted, filterDateFound, filterHighPriority, showBlocked]);
+  }, [baseJobs, searchTerm, filterPriorityBucket, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource, filterHasDescription, filterDatePosted, filterDateFound, filterHighPriority, showBlocked]);
 
 
   // Sort
@@ -421,6 +426,13 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
         const aT = a.date_posted ? new Date(a.date_posted).getTime() : 0;
         const bT = b.date_posted ? new Date(b.date_posted).getTime() : 0;
         const cmp = aT - bT;
+        return sortDir === 'asc' ? cmp : -cmp;
+      }
+
+      if (sortField === 'has_description') {
+        const aHas = !!(a.description && String(a.description).trim().length > 0);
+        const bHas = !!(b.description && String(b.description).trim().length > 0);
+        const cmp = (aHas ? 1 : 0) - (bHas ? 1 : 0);
         return sortDir === 'asc' ? cmp : -cmp;
       }
 
@@ -669,7 +681,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
 
   // Export to CSV — columns mirror the visible Tracker-style layout.
   const handleExportCSV = useCallback(() => {
-    const headers = ['Priority', 'Job Title', 'Job Type', 'Company', 'Company Type', 'City', 'State', 'Source', 'Source URL', 'Date Posted', 'Date Found', 'High Priority'];
+    const headers = ['Priority', 'Job Title', 'Job Type', 'Company', 'Company Type', 'City', 'State', 'Source', 'Source URL', 'Has Description', 'Date Posted', 'Date Found', 'High Priority'];
     const rows = sortedJobs.map((j: any) => [
       typeof j._priorityScore === 'number' ? Math.round(j._priorityScore).toString() : '',
       j.job_title || '',
@@ -680,6 +692,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       j.state || '',
       sourceLabel(j),
       sourceUrl(j),
+      (j.description && String(j.description).trim().length > 0) ? 'Yes' : 'No',
       j.date_posted || '',
       j.created_at || '',
       (j.high_priority || j._companyIsHighPriority) ? 'Yes' : 'No',
@@ -912,7 +925,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
   // Active filter count — counts each column that has at least one value
   // selected (not the total number of selected values across columns).
   const activeFilterCount =
-    [filterPriorityBucket, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource].filter(s => s.size > 0).length
+    [filterPriorityBucket, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource, filterHasDescription].filter(s => s.size > 0).length
     + (filterDatePosted.from || filterDatePosted.to ? 1 : 0)
     + (filterDateFound.from || filterDateFound.to ? 1 : 0);
 
@@ -925,6 +938,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
     setFilterCity(new Set());
     setFilterState(new Set());
     setFilterSource(new Set());
+    setFilterHasDescription(new Set());
     setFilterDatePosted({});
     setFilterDateFound({});
     setFilterHighPriority(false);
@@ -1217,6 +1231,17 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
               <MultiSelectColumnHeader<SortField> field="city" label="City" filterValues={filterCity} filterOptions={uniqueCities} onFilterChange={setFilterCity} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <MultiSelectColumnHeader<SortField> field="state" label="State" filterValues={filterState} filterOptions={uniqueStates} onFilterChange={setFilterState} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <MultiSelectColumnHeader<SortField> field="source" label="Source" filterValues={filterSource} filterOptions={uniqueSources} onFilterChange={setFilterSource} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <MultiSelectColumnHeader<SortField>
+                field="has_description"
+                label="Desc"
+                filterValues={filterHasDescription}
+                filterOptions={["Yes", "No"]}
+                onFilterChange={setFilterHasDescription}
+                sortField={sortField}
+                sortDir={sortDir}
+                onSort={handleSort}
+                filterPanelLabel="Filter by description"
+              />
 
               <th className="text-left px-3 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[140px]">
                 <div className="flex items-center gap-1">
@@ -1243,14 +1268,14 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={12} className="text-center py-16">
+                <td colSpan={13} className="text-center py-16">
                   <Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400 mb-2" />
                   <span className="text-sm text-gray-400">Loading jobs...</span>
                 </td>
               </tr>
             ) : sortedJobs.length === 0 ? (
               <tr>
-                <td colSpan={12} className="text-center py-16">
+                <td colSpan={13} className="text-center py-16">
 
                   <div className="text-gray-400">
                     {searchTerm || activeFilterCount > 0 || filterHighPriority ? (
@@ -1377,6 +1402,21 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
                         </a>
                       ) : (
                         <span className="text-gray-500">{srcLabel}</span>
+                      )}
+                    </td>
+                    {/* Description present? Click the icon to read. */}
+                    <td className="px-4 py-3 text-center">
+                      {j.description && String(j.description).trim().length > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => setViewingJobId(j.id)}
+                          className="inline-flex items-center justify-center text-emerald-600 hover:text-emerald-700"
+                          title={`Description scraped (${String(j.description).length.toLocaleString()} chars) — click to read`}
+                        >
+                          <FileText className="w-4 h-4" />
+                        </button>
+                      ) : (
+                        <span className="text-gray-300">—</span>
                       )}
                     </td>
                     {/* Date Posted — drives priority recency. */}
