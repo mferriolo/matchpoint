@@ -183,37 +183,65 @@ Deno.serve(async (req) => {
 
     const prompt = buildPrompt(job, inputs, sender);
 
-    const oaResp = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 1500,
-        temperature: 0.7,
-        response_format: { type: 'json_object' },
-      }),
-    });
+    // Call OpenAI, retrying once on transient failure: a non-2xx
+    // response, a missing/empty content body, or a truncated JSON
+    // payload. The user previously saw "generation failed" and a
+    // manual click of Regenerate worked — that's the textbook signal
+    // for "first response was lossy, second worked." Build that retry
+    // in so the user doesn't have to.
+    const callOpenAI = async () => {
+      const r = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [{ role: 'user', content: prompt }],
+          // 2500 (was 1500). gpt-4o-mini occasionally truncates the
+          // 5-output JSON envelope at ~1500 tokens with long company
+          // descriptions, producing unparseable JSON. The cost delta
+          // is negligible.
+          max_tokens: 2500,
+          temperature: 0.7,
+          response_format: { type: 'json_object' },
+        }),
+      });
+      const status = r.status;
+      let bodyText = '';
+      try { bodyText = await r.text(); } catch {}
+      if (!r.ok) {
+        return { ok: false as const, status, error: `OpenAI ${status}: ${bodyText.slice(0, 500)}` };
+      }
+      let data: any;
+      try { data = JSON.parse(bodyText); } catch {
+        return { ok: false as const, status, error: 'OpenAI returned non-JSON envelope', raw: bodyText.slice(0, 500) };
+      }
+      const choice = data?.choices?.[0];
+      const finishReason = choice?.finish_reason;
+      const content = (choice?.message?.content || '').trim();
+      if (!content) {
+        return { ok: false as const, status, error: `OpenAI returned empty content (finish_reason=${finishReason || 'unknown'})` };
+      }
+      try {
+        return { ok: true as const, parsed: JSON.parse(content) as ScriptOutputs };
+      } catch {
+        return { ok: false as const, status, error: `OpenAI returned non-JSON content (finish_reason=${finishReason || 'unknown'})`, raw: content.slice(0, 500) };
+      }
+    };
 
-    if (!oaResp.ok) {
-      const errText = await oaResp.text();
-      return new Response(JSON.stringify({ error: `OpenAI ${oaResp.status}: ${errText}` }), {
+    let attempt = await callOpenAI();
+    if (!attempt.ok) {
+      // One quick retry — transient truncation / empty body usually
+      // succeeds on the second try at the same temperature.
+      attempt = await callOpenAI();
+    }
+
+    if (!attempt.ok) {
+      return new Response(JSON.stringify({ error: attempt.error, raw: (attempt as any).raw }), {
         status: 502, headers: { ...corsHeaders(req), 'Content-Type': 'application/json' },
       });
     }
 
-    const data = await oaResp.json();
-    const content = data?.choices?.[0]?.message?.content?.trim() || '';
-    let parsed: ScriptOutputs;
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-      return new Response(JSON.stringify({ error: 'OpenAI returned non-JSON content', raw: content }), {
-        status: 502, headers: { ...corsHeaders(req), 'Content-Type': 'application/json' },
-      });
-    }
-
-    return new Response(JSON.stringify({ outputs: parsed, prompt }), {
+    return new Response(JSON.stringify({ outputs: attempt.parsed, prompt }), {
       status: 200, headers: { ...corsHeaders(req), 'Content-Type': 'application/json' },
     });
   } catch (e: any) {

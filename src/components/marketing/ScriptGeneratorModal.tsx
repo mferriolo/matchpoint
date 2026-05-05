@@ -783,14 +783,70 @@ export function ScriptGeneratorModal({
                   outputs={outputs}
                 />
 
-                <OutputBlock title="Cold Call" body={outputs.coldCall} />
+                <OutputBlock
+                  title="Cold Call"
+                  body={outputs.coldCall}
+                  extraAction={(() => {
+                    const c = companyContacts.find(x => x.id === sendContactId);
+                    const phone = c ? (c.phone_work || c.phone_cell || c.phone_home || '') : '';
+                    if (!phone) return null;
+                    return (
+                      <a
+                        href={`tel:${phone.replace(/[^\d+]/g, '')}`}
+                        onClick={async () => {
+                          try { await navigator.clipboard.writeText(outputs.coldCall); } catch {}
+                        }}
+                        className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-[#911406] text-white hover:bg-[#7a1005]"
+                      >
+                        <Phone className="w-3 h-3" />
+                        Call
+                      </a>
+                    );
+                  })()}
+                />
                 <OutputBlock
                   title={`Email — ${outputs.email.subject}`}
                   body={outputs.email.body}
                   copyText={`Subject: ${outputs.email.subject}\n\n${outputs.email.body}`}
                   copyLabel="Copy Email"
+                  extraAction={(() => {
+                    const c = companyContacts.find(x => x.id === sendContactId);
+                    const to = c?.email || '';
+                    const href = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(outputs.email.subject)}&body=${encodeURIComponent(outputs.email.body)}`;
+                    return (
+                      <a
+                        href={href}
+                        title={to ? `Send to ${to}` : 'Opens your mail client; type the recipient manually'}
+                        className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-[#911406] text-white hover:bg-[#7a1005]"
+                      >
+                        <Mail className="w-3 h-3" />
+                        Send Email
+                      </a>
+                    );
+                  })()}
                 />
-                <OutputBlock title="LinkedIn" body={outputs.linkedin} />
+                <OutputBlock
+                  title="LinkedIn"
+                  body={outputs.linkedin}
+                  extraAction={(() => {
+                    const c = companyContacts.find(x => x.id === sendContactId);
+                    if (!c?.linkedin_url) return null;
+                    return (
+                      <a
+                        href={c.linkedin_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={async () => {
+                          try { await navigator.clipboard.writeText(outputs.linkedin); } catch {}
+                        }}
+                        className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-[#911406] text-white hover:bg-[#7a1005]"
+                      >
+                        <Linkedin className="w-3 h-3" />
+                        Open LinkedIn
+                      </a>
+                    );
+                  })()}
+                />
                 <OutputBlock title="Voicemail" body={outputs.voicemail} copyLabel="Copy Voicemail" />
                 <OutputBlock title="Objection Response" body={outputs.objectionResponse} />
               </>
@@ -875,17 +931,25 @@ function OutputBlock({
   body,
   copyText,
   copyLabel,
+  extraAction,
 }: {
   title: string;
   body: string;
   copyText?: string;
   copyLabel?: string;
+  /** Optional button rendered alongside Copy — used by the email /
+   *  call / linkedin variants to host a mailto / tel / linkedin
+   *  launcher right next to the Copy button. */
+  extraAction?: React.ReactNode;
 }) {
   return (
     <div className="rounded-md border border-gray-200 bg-white">
-      <div className="flex items-center justify-between px-3 py-2 border-b bg-gray-50">
-        <div className="text-xs font-semibold text-gray-700">{title}</div>
-        <CopyButton text={copyText ?? body} label={copyLabel || 'Copy'} />
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b bg-gray-50">
+        <div className="text-xs font-semibold text-gray-700 truncate">{title}</div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <CopyButton text={copyText ?? body} label={copyLabel || 'Copy'} />
+          {extraAction}
+        </div>
       </div>
       <pre className="px-3 py-2 text-xs text-gray-800 whitespace-pre-wrap font-sans">{body}</pre>
     </div>
