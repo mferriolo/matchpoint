@@ -459,43 +459,40 @@ export function OutreachWorkspace({
     setContacts(prev => prev.map(x => x.id === c.id ? { ...x, outreach_status: status, last_outreach_at: now } : x));
   };
 
-  const launchEmail = (c: ContactRow) => {
-    if (!c.email) {
-      toast({ title: 'No email on file' });
-      return;
-    }
+  // Build the channel hrefs declaratively so the launchers can be real
+  // <a> tags. Using an anchor (vs. window.open(_, '_self')) is more
+  // reliable for mailto: / tel: — the browser hands the URL to the OS
+  // without unloading the page or tripping popup blockers.
+  const buildMailtoHref = (c: ContactRow): string => {
+    if (!c.email) return '';
     const subject = editedSubject || outputs?.email.subject || '';
     const body = editedBody || outputs?.email.body || '';
-    const href = `mailto:${encodeURIComponent(c.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-    window.open(href, '_self');
+    return `mailto:${encodeURIComponent(c.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  };
+  const buildTelHref = (c: ContactRow): string => {
+    const phone = preferredPhone(c);
+    if (!phone) return '';
+    return `tel:${phone.replace(/[^\d+]/g, '')}`;
+  };
+
+  const onLaunchEmail = async (c: ContactRow) => {
+    // The browser handles the actual mailto navigation via the anchor's
+    // href; this side-effect just records that we kicked off outreach.
     markContacted(c, 'Cold');
   };
 
-  const launchLinkedIn = async (c: ContactRow) => {
-    if (!c.linkedin_url) {
-      toast({ title: 'No LinkedIn on file' });
-      return;
-    }
+  const onLaunchLinkedIn = async (c: ContactRow) => {
     const msg = outputs?.linkedin || '';
     if (msg) {
-      try { await navigator.clipboard.writeText(msg); } catch {}
+      try { await navigator.clipboard.writeText(msg); toast({ title: 'LinkedIn message copied to clipboard' }); } catch {}
     }
-    window.open(c.linkedin_url, '_blank');
-    if (msg) toast({ title: 'LinkedIn opened, message copied to clipboard' });
     markContacted(c, 'Cold');
   };
 
-  const launchPhone = async (c: ContactRow) => {
-    const phone = preferredPhone(c);
-    if (!phone) {
-      toast({ title: 'No phone on file' });
-      return;
-    }
+  const onLaunchPhone = async (c: ContactRow) => {
     if (outputs?.coldCall) {
-      try { await navigator.clipboard.writeText(outputs.coldCall); } catch {}
+      try { await navigator.clipboard.writeText(outputs.coldCall); toast({ title: 'Cold-call opener copied to clipboard' }); } catch {}
     }
-    window.open(`tel:${phone}`, '_self');
-    if (outputs?.coldCall) toast({ title: 'Cold-call script copied to clipboard' });
     markContacted(c, 'Cold');
   };
 
@@ -655,28 +652,31 @@ export function OutreachWorkspace({
                   </div>
                 </div>
 
-                {/* Channel launch buttons */}
+                {/* Channel launchers — real anchors so the browser
+                    handles mailto: / tel: natively (popup-blocker-safe
+                    and won't unload the page mid-edit). */}
                 <div className="grid grid-cols-3 gap-2">
-                  <ChannelLauncher
+                  <ChannelLink
                     label="Email"
                     icon={<Mail className="w-4 h-4" />}
-                    enabled={!!selected.email}
+                    href={buildMailtoHref(selected)}
                     detail={selected.email || 'No email'}
-                    onClick={() => launchEmail(selected)}
+                    onClick={() => onLaunchEmail(selected)}
                   />
-                  <ChannelLauncher
+                  <ChannelLink
                     label="LinkedIn"
                     icon={<Linkedin className="w-4 h-4" />}
-                    enabled={!!selected.linkedin_url}
+                    href={selected.linkedin_url || ''}
+                    target="_blank"
                     detail={selected.linkedin_url ? 'Opens profile + copies message' : 'No LinkedIn'}
-                    onClick={() => launchLinkedIn(selected)}
+                    onClick={() => onLaunchLinkedIn(selected)}
                   />
-                  <ChannelLauncher
+                  <ChannelLink
                     label="Call"
                     icon={<Phone className="w-4 h-4" />}
-                    enabled={!!preferredPhone(selected)}
+                    href={buildTelHref(selected)}
                     detail={preferredPhone(selected) || 'No phone'}
-                    onClick={() => launchPhone(selected)}
+                    onClick={() => onLaunchPhone(selected)}
                   />
                 </div>
 
@@ -753,32 +753,44 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-function ChannelLauncher({
-  label, icon, enabled, detail, onClick,
+function ChannelLink({
+  label, icon, href, target, detail, onClick,
 }: {
   label: string;
   icon: React.ReactNode;
-  enabled: boolean;
+  href: string;
+  target?: string;
   detail: string;
-  onClick: () => void;
+  onClick?: () => void;
 }) {
+  if (!href) {
+    return (
+      <div
+        aria-disabled="true"
+        className="flex flex-col items-start gap-1 p-3 rounded-md border border-gray-100 bg-gray-50 text-gray-400 cursor-not-allowed text-left"
+      >
+        <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider">
+          {icon}
+          {label}
+        </div>
+        <div className="text-[11px] truncate w-full">{detail}</div>
+      </div>
+    );
+  }
   return (
-    <button
-      type="button"
-      disabled={!enabled}
+    <a
+      href={href}
+      target={target}
+      rel={target === '_blank' ? 'noopener noreferrer' : undefined}
       onClick={onClick}
-      className={`flex flex-col items-start gap-1 p-3 rounded-md border text-left transition-colors ${
-        enabled
-          ? 'border-gray-200 hover:border-[#911406]/50 hover:bg-red-50 text-gray-800'
-          : 'border-gray-100 bg-gray-50 text-gray-400 cursor-not-allowed'
-      }`}
+      className="flex flex-col items-start gap-1 p-3 rounded-md border border-gray-200 hover:border-[#911406]/50 hover:bg-red-50 text-gray-800 text-left transition-colors"
     >
       <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider">
         {icon}
         {label}
       </div>
       <div className="text-[11px] truncate w-full">{detail}</div>
-    </button>
+    </a>
   );
 }
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { X, Loader2, Wand2, Copy, Check, Save, RotateCw, History, Trash2 } from 'lucide-react';
+import { X, Loader2, Wand2, Copy, Check, Save, RotateCw, History, Trash2, Mail, Linkedin, Phone } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -31,6 +31,11 @@ interface ContactRow {
   last_name?: string | null;
   title?: string | null;
   suffix?: string | null;
+  email?: string | null;
+  linkedin_url?: string | null;
+  phone_work?: string | null;
+  phone_cell?: string | null;
+  phone_home?: string | null;
 }
 
 /** Map a free-text contact title to one of the AUDIENCE_OPTIONS values,
@@ -320,6 +325,8 @@ export function ScriptGeneratorModal({
   const [savedScripts, setSavedScripts] = useState<SavedScriptRow[]>([]);
   const [activeScriptId, setActiveScriptId] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [companyContacts, setCompanyContacts] = useState<ContactRow[]>([]);
+  const [sendContactId, setSendContactId] = useState<string | null>(null);
 
   const loadSavedScripts = async (jobId: string) => {
     const { data } = await supabase
@@ -356,19 +363,27 @@ export function ScriptGeneratorModal({
     // marketing_contacts whenever the company has a contact on record.
     // Bail early if neither identifier is set so we don't issue an
     // unfiltered query.
+    setCompanyContacts([]);
+    setSendContactId(null);
+
     const cancelled = { v: false };
     (async () => {
       const hasId = !!job.company_id;
       const hasName = !!(job.company_name && job.company_name.trim());
       if (!hasId && !hasName) return;
-      let q = supabase.from('marketing_contacts').select('id, first_name, last_name, title, suffix');
+      let q = supabase
+        .from('marketing_contacts')
+        .select('id, first_name, last_name, title, suffix, email, linkedin_url, phone_work, phone_cell, phone_home');
       if (hasId) q = q.eq('company_id', job.company_id);
       else q = q.eq('company_name', job.company_name);
       const { data, error } = await q;
       if (cancelled.v) return;
       if (error || !data || data.length === 0) return;
-      const best = pickBestContact(data as ContactRow[]);
+      const rows = data as ContactRow[];
+      setCompanyContacts(rows);
+      const best = pickBestContact(rows);
       if (!best) return;
+      setSendContactId(best.id);
       const audience = audienceFromTitle(best.title || '');
       const hiringName = formatHiringManagerName(best);
       setForm(prev => ({
@@ -761,6 +776,13 @@ export function ScriptGeneratorModal({
                   {savedAt && <span className="text-[11px] text-emerald-700">Saved</span>}
                 </div>
 
+                <SendBlock
+                  contacts={companyContacts}
+                  selectedContactId={sendContactId}
+                  onSelect={setSendContactId}
+                  outputs={outputs}
+                />
+
                 <OutputBlock title="Cold Call" body={outputs.coldCall} />
                 <OutputBlock
                   title={`Email — ${outputs.email.subject}`}
@@ -866,6 +888,132 @@ function OutputBlock({
         <CopyButton text={copyText ?? body} label={copyLabel || 'Copy'} />
       </div>
       <pre className="px-3 py-2 text-xs text-gray-800 whitespace-pre-wrap font-sans">{body}</pre>
+    </div>
+  );
+}
+
+/** Inline send section: contact picker + three real channel launchers
+ *  (mailto / LinkedIn / tel) so the user can ship directly from the
+ *  Generate Script modal without bouncing through the Outreach
+ *  Workspace just to copy/paste into a separate email tool. The links
+ *  use real <a> tags so the browser handles mailto: / tel: natively
+ *  (more reliable than window.open with _self, which can trigger
+ *  "navigate away" warnings or get swallowed by popup blockers). */
+function SendBlock({
+  contacts,
+  selectedContactId,
+  onSelect,
+  outputs,
+}: {
+  contacts: ContactRow[];
+  selectedContactId: string | null;
+  onSelect: (id: string) => void;
+  outputs: ScriptOutputs;
+}) {
+  const selected = contacts.find(c => c.id === selectedContactId) || null;
+
+  if (contacts.length === 0) {
+    return (
+      <div className="rounded-md border border-dashed border-gray-300 bg-gray-50 p-3 text-xs text-gray-600">
+        No contacts on file for this company yet — add a contact to enable
+        one-click email / LinkedIn / call from this screen. Until then,
+        use the Copy buttons below.
+      </div>
+    );
+  }
+
+  const phone = selected ? (selected.phone_work || selected.phone_cell || selected.phone_home || '') : '';
+  const mailtoHref = selected?.email
+    ? `mailto:${encodeURIComponent(selected.email)}?subject=${encodeURIComponent(outputs.email.subject)}&body=${encodeURIComponent(outputs.email.body)}`
+    : '';
+  const linkedinHref = selected?.linkedin_url || '';
+  const telHref = phone ? `tel:${phone.replace(/[^\d+]/g, '')}` : '';
+
+  const fullName = selected
+    ? [selected.first_name, selected.last_name].filter(Boolean).join(' ').trim() || '(unnamed)'
+    : '';
+
+  const copyAndOpenLinkedIn = async () => {
+    if (outputs.linkedin) {
+      try { await navigator.clipboard.writeText(outputs.linkedin); } catch {}
+    }
+  };
+  const copyColdCall = async () => {
+    if (outputs.coldCall) {
+      try { await navigator.clipboard.writeText(outputs.coldCall); } catch {}
+    }
+  };
+
+  return (
+    <div className="rounded-md border border-gray-200 bg-white">
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b bg-gray-50 flex-wrap">
+        <div className="text-xs font-semibold text-gray-700">Send</div>
+        {contacts.length > 1 ? (
+          <select
+            value={selectedContactId || ''}
+            onChange={e => onSelect(e.target.value)}
+            className="h-7 text-xs rounded border border-input bg-background px-2 max-w-[260px]"
+          >
+            {contacts.map(c => {
+              const name = [c.first_name, c.last_name].filter(Boolean).join(' ').trim() || '(unnamed)';
+              return <option key={c.id} value={c.id}>{name}{c.title ? ` — ${c.title}` : ''}</option>;
+            })}
+          </select>
+        ) : (
+          <div className="text-[11px] text-gray-600">{fullName}{selected?.title ? ` · ${selected.title}` : ''}</div>
+        )}
+      </div>
+      <div className="grid grid-cols-3 gap-2 p-3">
+        {/* mailto — real anchor so the browser opens the user's mail client */}
+        {mailtoHref ? (
+          <a
+            href={mailtoHref}
+            className="flex flex-col items-start gap-1 p-3 rounded-md border border-gray-200 hover:border-[#911406]/50 hover:bg-red-50 text-gray-800 text-left"
+          >
+            <span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider"><Mail className="w-4 h-4" /> Email</span>
+            <span className="text-[11px] truncate w-full">{selected?.email}</span>
+          </a>
+        ) : (
+          <div className="flex flex-col items-start gap-1 p-3 rounded-md border border-gray-100 bg-gray-50 text-gray-400 text-left cursor-not-allowed">
+            <span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider"><Mail className="w-4 h-4" /> Email</span>
+            <span className="text-[11px]">No email on file</span>
+          </div>
+        )}
+        {/* LinkedIn — opens profile in new tab; copies the LinkedIn variant to clipboard */}
+        {linkedinHref ? (
+          <a
+            href={linkedinHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={copyAndOpenLinkedIn}
+            className="flex flex-col items-start gap-1 p-3 rounded-md border border-gray-200 hover:border-[#911406]/50 hover:bg-red-50 text-gray-800 text-left"
+          >
+            <span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider"><Linkedin className="w-4 h-4" /> LinkedIn</span>
+            <span className="text-[11px] truncate w-full">Opens profile + copies message</span>
+          </a>
+        ) : (
+          <div className="flex flex-col items-start gap-1 p-3 rounded-md border border-gray-100 bg-gray-50 text-gray-400 text-left cursor-not-allowed">
+            <span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider"><Linkedin className="w-4 h-4" /> LinkedIn</span>
+            <span className="text-[11px]">No LinkedIn on file</span>
+          </div>
+        )}
+        {/* Phone — tel: link, copies the cold-call opener */}
+        {telHref ? (
+          <a
+            href={telHref}
+            onClick={copyColdCall}
+            className="flex flex-col items-start gap-1 p-3 rounded-md border border-gray-200 hover:border-[#911406]/50 hover:bg-red-50 text-gray-800 text-left"
+          >
+            <span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider"><Phone className="w-4 h-4" /> Call</span>
+            <span className="text-[11px] truncate w-full">{phone}</span>
+          </a>
+        ) : (
+          <div className="flex flex-col items-start gap-1 p-3 rounded-md border border-gray-100 bg-gray-50 text-gray-400 text-left cursor-not-allowed">
+            <span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider"><Phone className="w-4 h-4" /> Call</span>
+            <span className="text-[11px]">No phone on file</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
