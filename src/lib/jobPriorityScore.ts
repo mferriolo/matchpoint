@@ -75,6 +75,41 @@ function perDiemLocumsPenalty(jobTitle: string | null | undefined): number {
   return 0;
 }
 
+interface ContactForBonus {
+  title?: string | null;
+}
+
+/** Contact-coverage bonus mirroring marketing_company_contact_bonus.
+ *  0 contacts → -10, 1–2 → 0, 3+ → +5, 3+ with all 3 categories → +10. */
+export function contactCoverageBonus(contacts: ContactForBonus[] | null | undefined): number {
+  if (!contacts || contacts.length === 0) return -10;
+  if (contacts.length <= 2) return 0;
+  let exec = false, clinical = false, hr = false;
+  for (const c of contacts) {
+    const t = (c.title || '').toLowerCase();
+    if (!t) continue;
+    if (
+      /\b(ceo|coo|cmo|cfo|president|founder|operating partner|chief medical officer|chief operating|chief executive|chief financial)\b/.test(t)
+      || /vp .*operations/.test(t)
+    ) exec = true;
+    if (
+      t.includes('medical director')
+      || /vp .*clinical/.test(t)
+      || t.includes('chief clinical')
+      || t.includes('chief of medicine')
+    ) clinical = true;
+    if (
+      t.includes('talent acquisition')
+      || /head of ta\b/.test(t)
+      || /\bhr\b/.test(t)
+      || t.includes('human resources')
+      || t.includes('recruiter')
+      || t.includes('recruiting manager')
+    ) hr = true;
+  }
+  return exec && clinical && hr ? 10 : 5;
+}
+
 export function priorityScore(args: {
   /** Authoritative posting date — what the source site shows. Preferred
    *  over lastSeenAt and createdAt because users can correct it manually
@@ -86,13 +121,20 @@ export function priorityScore(args: {
   createdAt?: string | Date | null;
   jobTitle?: string | null;
   companyType?: string | null;
+  /** When known, a list of contacts at this job's company. Drives the
+   *  contact-coverage bonus that mirrors the SQL side. Pass undefined
+   *  to skip — useful when callers don't have the contact list handy. */
+  companyContacts?: ContactForBonus[];
 }): PriorityBreakdown {
   const recency  = recencyScore(args.datePosted ?? args.lastSeenAt ?? args.createdAt);
   const role     = roleScore(args.jobTitle);
   const category = categoryScore(args.companyType);
   const base     = (recency + role + category) / 3;
   const penalty  = perDiemLocumsPenalty(args.jobTitle);
-  const total    = Math.max(0, base - penalty);
+  const bonus    = args.companyContacts !== undefined
+    ? contactCoverageBonus(args.companyContacts)
+    : 0;
+  const total    = Math.max(0, Math.min(100, base - penalty + bonus));
   return {
     total: Math.round(total * 100) / 100,
     recency,
