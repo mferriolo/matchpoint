@@ -431,7 +431,15 @@ export function OutreachWorkspace({
         },
         inputs,
       };
-      const { data, error } = await supabase.functions.invoke('generate-job-script', { body: payload });
+      // 45s client guard so a hung upstream doesn't leave the
+      // workspace stuck in Drafting… forever. Edge function caps
+      // OpenAI at 30s + retry-on-transient, so 45s is the natural
+      // ceiling.
+      const ac = new AbortController();
+      const guard = setTimeout(() => ac.abort(), 45_000);
+      const result = await supabase.functions.invoke('generate-job-script', { body: payload, signal: ac.signal as any })
+        .finally(() => clearTimeout(guard));
+      const { data, error } = result;
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
       const raw = data.outputs as ScriptOutputs;

@@ -496,7 +496,15 @@ export function ScriptGeneratorModal({
         },
         inputs: form,
       };
-      const { data, error } = await supabase.functions.invoke('generate-job-script', { body: payload });
+      // Belt-and-suspenders timeout. The edge function caps OpenAI at
+      // 30s with a retry only on transient failure, so the worst-case
+      // there is ~35s. Add 10s of breathing room for network round
+      // trip; bail if we go past 45s so the UI doesn't sit forever.
+      const ac = new AbortController();
+      const guard = setTimeout(() => ac.abort(), 45_000);
+      const result = await supabase.functions.invoke('generate-job-script', { body: payload, signal: ac.signal as any })
+        .finally(() => clearTimeout(guard));
+      const { data, error } = result;
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
       if (!data?.outputs) throw new Error('No outputs returned');

@@ -183,60 +183,82 @@ Deno.serve(async (req) => {
 
     const prompt = buildPrompt(job, inputs, sender);
 
-    // Call OpenAI, retrying once on transient failure: a non-2xx
-    // response, a missing/empty content body, or a truncated JSON
-    // payload. The user previously saw "generation failed" and a
-    // manual click of Regenerate worked — that's the textbook signal
-    // for "first response was lossy, second worked." Build that retry
-    // in so the user doesn't have to.
-    const callOpenAI = async () => {
-      const r = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: [{ role: 'user', content: prompt }],
-          // 2500 (was 1500). gpt-4o-mini occasionally truncates the
-          // 5-output JSON envelope at ~1500 tokens with long company
-          // descriptions, producing unparseable JSON. The cost delta
-          // is negligible.
-          max_tokens: 2500,
-          temperature: 0.7,
-          response_format: { type: 'json_object' },
-        }),
-      });
+    // Hard wall-clock cap per OpenAI call. Without this, a slow
+    // upstream response can stretch into minutes — and a retry on
+    // failure compounds the wait. With a 30s fetch-level abort, the
+    // worst case is bounded at ~30s for a single call (or ~35s if we
+    // retry after a fast non-timeout failure like JSON.parse).
+    const callOpenAI = async (): Promise<
+      | { ok: true; parsed: ScriptOutputs }
+      | { ok: false; status: number; error: string; raw?: string; transient: boolean }
+    > => {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 30_000);
+      let r: Response;
+      try {
+        r = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+          signal: ac.signal,
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            messages: [{ role: 'user', content: prompt }],
+            // 2500 (was 1500). gpt-4o-mini occasionally truncates the
+            // 5-output JSON envelope at ~1500 tokens with long company
+            // descriptions, producing unparseable JSON.
+            max_tokens: 2500,
+            temperature: 0.7,
+            response_format: { type: 'json_object' },
+          }),
+        });
+      } catch (e: any) {
+        clearTimeout(timer);
+        const aborted = e?.name === 'AbortError';
+        return {
+          ok: false, status: 0,
+          error: aborted ? 'OpenAI request timed out after 30s' : `Fetch error: ${e?.message || String(e)}`,
+          // Do NOT retry timeouts — if the upstream is slow, the
+          // retry will just take another 30s.
+          transient: !aborted && false,
+        };
+      }
+      clearTimeout(timer);
       const status = r.status;
       let bodyText = '';
       try { bodyText = await r.text(); } catch {}
       if (!r.ok) {
-        return { ok: false as const, status, error: `OpenAI ${status}: ${bodyText.slice(0, 500)}` };
+        // 5xx and rate-limit (429) are worth one retry; auth and
+        // bad-request usually aren't.
+        const transient = status >= 500 || status === 429;
+        return { ok: false, status, error: `OpenAI ${status}: ${bodyText.slice(0, 500)}`, transient };
       }
       let data: any;
       try { data = JSON.parse(bodyText); } catch {
-        return { ok: false as const, status, error: 'OpenAI returned non-JSON envelope', raw: bodyText.slice(0, 500) };
+        return { ok: false, status, error: 'OpenAI returned non-JSON envelope', raw: bodyText.slice(0, 500), transient: true };
       }
       const choice = data?.choices?.[0];
       const finishReason = choice?.finish_reason;
       const content = (choice?.message?.content || '').trim();
       if (!content) {
-        return { ok: false as const, status, error: `OpenAI returned empty content (finish_reason=${finishReason || 'unknown'})` };
+        return { ok: false, status, error: `OpenAI returned empty content (finish_reason=${finishReason || 'unknown'})`, transient: true };
       }
       try {
-        return { ok: true as const, parsed: JSON.parse(content) as ScriptOutputs };
+        return { ok: true, parsed: JSON.parse(content) as ScriptOutputs };
       } catch {
-        return { ok: false as const, status, error: `OpenAI returned non-JSON content (finish_reason=${finishReason || 'unknown'})`, raw: content.slice(0, 500) };
+        return { ok: false, status, error: `OpenAI returned non-JSON content (finish_reason=${finishReason || 'unknown'})`, raw: content.slice(0, 500), transient: true };
       }
     };
 
     let attempt = await callOpenAI();
-    if (!attempt.ok) {
-      // One quick retry — transient truncation / empty body usually
-      // succeeds on the second try at the same temperature.
+    // Only retry on transient failures (5xx, 429, empty content,
+    // truncated JSON). NEVER retry timeouts or 4xx — that path turns a
+    // 30s wait into a 60s wait.
+    if (!attempt.ok && attempt.transient) {
       attempt = await callOpenAI();
     }
 
     if (!attempt.ok) {
-      return new Response(JSON.stringify({ error: attempt.error, raw: (attempt as any).raw }), {
+      return new Response(JSON.stringify({ error: attempt.error, raw: attempt.raw }), {
         status: 502, headers: { ...corsHeaders(req), 'Content-Type': 'application/json' },
       });
     }
