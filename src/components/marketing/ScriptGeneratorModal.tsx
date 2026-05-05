@@ -428,14 +428,38 @@ export function ScriptGeneratorModal({
   };
 
   const loadSender = async (): Promise<{ first_name?: string; last_name?: string; title?: string; company?: string }> => {
+    // Primary source: admin_users. The Users tab in Admin lets the
+    // operator edit Title and Company per row, so messaging always
+    // reflects the latest value without a separate Settings round-trip.
+    // Pick the most recently active admin first; fall back to any
+    // active row; final fallback is system_settings (legacy + safety
+    // net for installs that haven't seeded admin_users yet).
+    const { data: admins } = await supabase
+      .from('admin_users')
+      .select('first_name, last_name, name, title, company, role, status, last_login, created_at')
+      .eq('status', 'active')
+      .order('role', { ascending: false })       // admin > manager > user
+      .order('last_login', { ascending: false, nullsFirst: false } as any)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    const row: any = (admins && admins[0]) || null;
+    if (row) {
+      const fn = (row.first_name || '').trim() || (row.name ? String(row.name).split(' ')[0] : '');
+      const ln = (row.last_name  || '').trim() || (row.name ? String(row.name).split(' ').slice(1).join(' ') : '');
+      const t  = (row.title   || '').trim();
+      const co = (row.company || '').trim();
+      if (fn || ln || t || co) {
+        return { first_name: fn || undefined, last_name: ln || undefined, title: t || undefined, company: co || undefined };
+      }
+    }
+
+    // Legacy fallback — original Settings tab keys.
     const { data } = await supabase
       .from('system_settings')
       .select('key, value')
       .in('key', ['outreach.sender_first_name', 'outreach.sender_last_name', 'outreach.sender_title', 'outreach.sender_company']);
     const out: Record<string, string> = {};
     for (const r of data || []) {
-      // jsonb may come back unwrapped or as a JSON-encoded string
-      // ("Matthew" with literal quotes). Strip surrounding quotes.
       let raw: any = (r as any).value;
       if (typeof raw === 'string' && raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
         try { raw = JSON.parse(raw); } catch {}
