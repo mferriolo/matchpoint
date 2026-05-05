@@ -30,7 +30,15 @@ const SystemSettings = () => {
     'integrations.zoom_enabled': true,
     'integrations.twilio_enabled': true,
     'integrations.openai_api_key': '',
-    'chatgpt.client_name_redact': true
+    'chatgpt.client_name_redact': true,
+    // Outreach sender identity. Used by the script generator and the
+    // Outreach Workspace so generated emails / call openers / LinkedIn
+    // messages sign off as the actual user instead of "Best regards,
+    // [your name]" placeholders.
+    'outreach.sender_first_name': '',
+    'outreach.sender_last_name': '',
+    'outreach.sender_title': '',
+    'outreach.sender_company': '',
   });
 
   const [loading, setLoading] = useState(false);
@@ -77,7 +85,11 @@ const SystemSettings = () => {
       'integrations.zoom_enabled': 'Enable Zoom integration',
       'integrations.twilio_enabled': 'Enable Twilio integration',
       'integrations.openai_api_key': 'OpenAI API key for AI features',
-      'chatgpt.client_name_redact': 'Redact client names in ChatGPT prompts'
+      'chatgpt.client_name_redact': 'Redact client names in ChatGPT prompts',
+      'outreach.sender_first_name': 'Sender first name (used in generated outreach messages)',
+      'outreach.sender_last_name': 'Sender last name (used in generated outreach messages)',
+      'outreach.sender_title': 'Sender job title (used in generated outreach messages)',
+      'outreach.sender_company': 'Sender company name (used in generated outreach messages)',
     };
     return descriptions[key] || '';
   };
@@ -162,6 +174,51 @@ const SystemSettings = () => {
                   />
                 </div>
               )}
+            </div>
+          </div>
+
+          <Separator />
+
+          <div>
+            <h3 className="text-lg font-semibold mb-4">Outreach Sender</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Used to sign generated outreach messages so emails / call openers /
+              LinkedIn notes go out under your name and title — no more "Best
+              regards, [your name]" placeholders.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <Label>First Name</Label>
+                <Input
+                  placeholder="Matthew"
+                  value={settings['outreach.sender_first_name'] || ''}
+                  onChange={e => updateSetting('outreach.sender_first_name', e.target.value)}
+                />
+              </div>
+              <div>
+                <Label>Last Name</Label>
+                <Input
+                  placeholder="Ferriolo"
+                  value={settings['outreach.sender_last_name'] || ''}
+                  onChange={e => updateSetting('outreach.sender_last_name', e.target.value)}
+                />
+              </div>
+              <div>
+                <Label>Title</Label>
+                <Input
+                  placeholder="Managing Partner"
+                  value={settings['outreach.sender_title'] || ''}
+                  onChange={e => updateSetting('outreach.sender_title', e.target.value)}
+                />
+              </div>
+              <div>
+                <Label>Company</Label>
+                <Input
+                  placeholder="MedCentric"
+                  value={settings['outreach.sender_company'] || ''}
+                  onChange={e => updateSetting('outreach.sender_company', e.target.value)}
+                />
+              </div>
             </div>
           </div>
 

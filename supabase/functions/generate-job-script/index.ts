@@ -61,6 +61,13 @@ interface FormInputs {
   avoidLanguage?: string;
 }
 
+interface SenderIdentity {
+  first_name?: string;
+  last_name?: string;
+  title?: string;
+  company?: string;
+}
+
 interface ScriptOutputs {
   coldCall: string;
   email: { subject: string; body: string };
@@ -73,7 +80,7 @@ function val(v?: string | null): string {
   return (v || '').trim();
 }
 
-function buildPrompt(job: JobContext, f: FormInputs): string {
+function buildPrompt(job: JobContext, f: FormInputs, sender: SenderIdentity): string {
   const audience = f.audience === 'Other' ? val(f.audienceOther) || 'a senior decision-maker' : f.audience;
   const problem = f.problem === 'Other' ? val(f.problemOther) || 'an unfilled critical role' : f.problem;
   const service = f.service === 'Other' ? val(f.serviceOther) || 'specialized healthcare recruiting' : f.service;
@@ -115,7 +122,17 @@ function buildPrompt(job: JobContext, f: FormInputs): string {
   if (val(f.avoidLanguage)) constraints.push(`Avoid this language: ${val(f.avoidLanguage)}`);
   if (val(f.caseStudy)) constraints.push(`Reference this proof point or case study where it fits: ${val(f.caseStudy)}`);
 
-  return `You are writing a Problem/Solution outreach script for MedCentric, a specialized healthcare recruiting firm. The recipient is a ${audience}. The MedCentric service being pitched is ${service}. The primary business problem to lead with is: ${problem}. Tone: ${f.tone}. Urgency: ${f.urgency}. Likely objection to address (if any): ${objection || 'none'}.
+  const senderName = [val(sender.first_name), val(sender.last_name)].filter(Boolean).join(' ');
+  const senderTitle = val(sender.title);
+  const senderCompany = val(sender.company) || 'MedCentric';
+  const signoffLines: string[] = [];
+  if (senderName)    signoffLines.push(`Sender name: ${senderName}`);
+  if (senderTitle)   signoffLines.push(`Sender title: ${senderTitle}`);
+  if (senderCompany) signoffLines.push(`Sender company: ${senderCompany}`);
+
+  return `You are writing a Problem/Solution outreach script for ${senderCompany}, a specialized healthcare recruiting firm. The recipient is a ${audience}. The service being pitched is ${service}. The primary business problem to lead with is: ${problem}. Tone: ${f.tone}. Urgency: ${f.urgency}. Likely objection to address (if any): ${objection || 'none'}.
+
+${signoffLines.length > 0 ? `Sender identity (use verbatim in greetings and sign-offs — never use placeholder names like "[Your Name]"):\n${signoffLines.map(s => `  - ${s}`).join('\n')}\n` : ''}
 
 Use a Danny Cahill-inspired recruiting style: lead with a specific, likely business pain, make it feel urgent and concrete, then position MedCentric as the practical solution. Be commercial — every line should earn its place.
 
@@ -124,6 +141,7 @@ ${known.map(k => `  - ${k}`).join('\n')}
 
 Constraints:
 ${constraints.map(c => `  - ${c}`).join('\n')}
+${senderName ? `  - Sign every script (cold call close, email signature, voicemail, LinkedIn) as ${senderName}${senderTitle ? `, ${senderTitle}` : ''}${senderCompany ? `, ${senderCompany}` : ''}. Do not use [Your Name] / [Your Title] / [Your Company] placeholders.` : ''}
 
 Return STRICT JSON matching this exact shape, no prose outside the JSON:
 {
@@ -146,6 +164,7 @@ Deno.serve(async (req) => {
     const body = await req.json();
     const job: JobContext = body.job || {};
     const inputs: FormInputs = body.inputs || {};
+    const sender: SenderIdentity = body.sender || {};
 
     const apiKey = Deno.env.get('OPENAI_API_KEY');
     if (!apiKey) {
@@ -154,7 +173,7 @@ Deno.serve(async (req) => {
       });
     }
 
-    const prompt = buildPrompt(job, inputs);
+    const prompt = buildPrompt(job, inputs, sender);
 
     const oaResp = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',

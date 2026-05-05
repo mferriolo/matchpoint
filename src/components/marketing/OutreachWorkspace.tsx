@@ -302,10 +302,29 @@ export function OutreachWorkspace({
 
   const selected = ranked.find(r => r.c.id === selectedContactId)?.c || null;
 
+  const loadSender = async (): Promise<{ first_name?: string; last_name?: string; title?: string; company?: string }> => {
+    const { data } = await supabase
+      .from('system_settings')
+      .select('key, value')
+      .in('key', ['outreach.sender_first_name', 'outreach.sender_last_name', 'outreach.sender_title', 'outreach.sender_company']);
+    const out: Record<string, string> = {};
+    for (const r of data || []) {
+      const raw = (r as any).value;
+      const v = typeof raw === 'string' ? raw : (raw == null ? '' : String(raw));
+      const key = (r as any).key as string;
+      if (key === 'outreach.sender_first_name') out.first_name = v;
+      else if (key === 'outreach.sender_last_name') out.last_name = v;
+      else if (key === 'outreach.sender_title') out.title = v;
+      else if (key === 'outreach.sender_company') out.company = v;
+    }
+    return out;
+  };
+
   const generate = async () => {
     if (!job || !selected) return;
     setGenerating(true);
     try {
+      const sender = await loadSender();
       // Tailor the form inputs to the selected contact. Mirrors the
       // mapping used in ScriptGeneratorModal's auto-fill logic.
       const title = (selected.title || '').toLowerCase();
@@ -360,6 +379,7 @@ export function OutreachWorkspace({
       })();
 
       const payload = {
+        sender,
         job: {
           company_name: job.company_name,
           job_title: job.job_title,
