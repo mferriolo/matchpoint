@@ -309,7 +309,13 @@ export function OutreachWorkspace({
       .in('key', ['outreach.sender_first_name', 'outreach.sender_last_name', 'outreach.sender_title', 'outreach.sender_company']);
     const out: Record<string, string> = {};
     for (const r of data || []) {
-      const raw = (r as any).value;
+      // jsonb may come back as the raw JS value (string) OR, in some
+      // supabase-js paths, as a JSON-encoded string ("Matthew" with
+      // literal quotes). Strip surrounding quotes defensively.
+      let raw: any = (r as any).value;
+      if (typeof raw === 'string' && raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
+        try { raw = JSON.parse(raw); } catch {}
+      }
       const v = typeof raw === 'string' ? raw : (raw == null ? '' : String(raw));
       const key = (r as any).key as string;
       if (key === 'outreach.sender_first_name') out.first_name = v;
@@ -319,6 +325,35 @@ export function OutreachWorkspace({
     }
     return out;
   };
+
+  /** Belt-and-suspenders scrubber: replace any remaining bracketed
+   *  placeholders with the sender's real values. Runs on every output
+   *  string after the model returns. */
+  const scrubPlaceholders = (s: string, sender: { first_name?: string; last_name?: string; title?: string; company?: string }): string => {
+    if (!s) return s;
+    const fullName = [sender.first_name, sender.last_name].filter(Boolean).join(' ').trim();
+    const title = (sender.title || '').trim();
+    const company = (sender.company || '').trim();
+    let out = s;
+    if (fullName) {
+      out = out.replace(/\[your name\]/gi, fullName).replace(/\[name\]/gi, fullName);
+    }
+    if (title) {
+      out = out.replace(/\[your title\]/gi, title).replace(/\[title\]/gi, title);
+    }
+    if (company) {
+      out = out.replace(/\[your company\]/gi, company).replace(/\[company\]/gi, company);
+    }
+    return out;
+  };
+
+  const applyScrub = (out: ScriptOutputs, sender: { first_name?: string; last_name?: string; title?: string; company?: string }): ScriptOutputs => ({
+    coldCall: scrubPlaceholders(out.coldCall, sender),
+    email: { subject: scrubPlaceholders(out.email.subject, sender), body: scrubPlaceholders(out.email.body, sender) },
+    linkedin: scrubPlaceholders(out.linkedin, sender),
+    voicemail: scrubPlaceholders(out.voicemail, sender),
+    objectionResponse: scrubPlaceholders(out.objectionResponse, sender),
+  });
 
   const generate = async () => {
     if (!job || !selected) return;
@@ -399,7 +434,8 @@ export function OutreachWorkspace({
       const { data, error } = await supabase.functions.invoke('generate-job-script', { body: payload });
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
-      const out = data.outputs as ScriptOutputs;
+      const raw = data.outputs as ScriptOutputs;
+      const out = applyScrub(raw, sender);
       setOutputs(out);
       setEditedSubject(out.email.subject);
       setEditedBody(out.email.body);

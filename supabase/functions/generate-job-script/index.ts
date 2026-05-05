@@ -132,7 +132,15 @@ function buildPrompt(job: JobContext, f: FormInputs, sender: SenderIdentity): st
 
   return `You are writing a Problem/Solution outreach script for ${senderCompany}, a specialized healthcare recruiting firm. The recipient is a ${audience}. The service being pitched is ${service}. The primary business problem to lead with is: ${problem}. Tone: ${f.tone}. Urgency: ${f.urgency}. Likely objection to address (if any): ${objection || 'none'}.
 
-${signoffLines.length > 0 ? `Sender identity (use verbatim in greetings and sign-offs — never use placeholder names like "[Your Name]"):\n${signoffLines.map(s => `  - ${s}`).join('\n')}\n` : ''}
+${signoffLines.length > 0 ? `SENDER IDENTITY — use these exact strings, do not paraphrase, do not invent placeholders:
+${signoffLines.map(s => `  - ${s}`).join('\n')}
+HARD RULES for sender identity (every output must satisfy these):
+  1. Output must NOT contain any bracketed placeholder string. The literal substrings "[Your Name]", "[Your name]", "[your name]", "[Your Title]", "[Your title]", "[Your Company]", "[Your company]", "[Name]", "[Title]", "[Company]", "[name]", "[title]", "[company]" are FORBIDDEN.
+  2. The cold call MUST open with "Hi, this is ${senderName}${senderTitle ? `, ${senderTitle}` : ''} from ${senderCompany}." (or a near-paraphrase that still names ${senderName} and ${senderCompany} verbatim).
+  3. The voicemail MUST identify the caller as ${senderName} from ${senderCompany} in the first sentence.
+  4. The email body MUST end with the sender block on its own lines: "${senderName}${senderTitle ? `\\n${senderTitle}` : ''}${senderCompany ? `\\n${senderCompany}` : ''}".
+  5. The LinkedIn message MUST be signed "— ${senderName}" or sign off with "${senderName}, ${senderCompany}".
+` : ''}
 
 Use a Danny Cahill-inspired recruiting style: lead with a specific, likely business pain, make it feel urgent and concrete, then position MedCentric as the practical solution. Be commercial — every line should earn its place.
 
