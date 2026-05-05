@@ -1460,7 +1460,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
         null;
       const score = typeof j.priority_score === 'number'
         ? j.priority_score
-        : priorityScore({ datePosted: j.date_posted, lastSeenAt: j.last_seen_at, createdAt: j.created_at, jobTitle: j.job_title, companyType: ct }).total;
+        : priorityScore({ datePosted: j.date_posted, lastSeenAt: j.last_seen_at, createdAt: j.created_at, jobTitle: j.job_title, companyType: ct, description: j.description }).total;
       const keys: string[] = [];
       if (j.company_id) keys.push(`id:${j.company_id}`);
       if (j.company_name) keys.push(`name:${String(j.company_name).toLowerCase().trim()}`);

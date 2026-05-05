@@ -79,6 +79,14 @@ interface ContactForBonus {
   title?: string | null;
 }
 
+/** +3 when a job has a substantive (>=80 char) scraped description.
+ *  Mirrors marketing_job_has_description_bonus in SQL — keep in sync. */
+export function hasDescriptionBonus(description: string | null | undefined): number {
+  const s = (description || '').trim();
+  if (s.length < 80) return 0;
+  return 3;
+}
+
 /** Contact-coverage bonus mirroring marketing_company_contact_bonus.
  *  0 contacts → -10, 1–2 → 0, 3+ → +5, 3+ with all 3 categories → +10. */
 export function contactCoverageBonus(contacts: ContactForBonus[] | null | undefined): number {
@@ -125,6 +133,9 @@ export function priorityScore(args: {
    *  contact-coverage bonus that mirrors the SQL side. Pass undefined
    *  to skip — useful when callers don't have the contact list handy. */
   companyContacts?: ContactForBonus[];
+  /** When known, the job's scraped description. Drives the
+   *  has-description bonus mirror. */
+  description?: string | null;
 }): PriorityBreakdown {
   const recency  = recencyScore(args.datePosted ?? args.lastSeenAt ?? args.createdAt);
   const role     = roleScore(args.jobTitle);
@@ -134,7 +145,8 @@ export function priorityScore(args: {
   const bonus    = args.companyContacts !== undefined
     ? contactCoverageBonus(args.companyContacts)
     : 0;
-  const total    = Math.max(0, Math.min(100, base - penalty + bonus));
+  const descBonus = hasDescriptionBonus(args.description);
+  const total    = Math.max(0, Math.min(100, base - penalty + bonus + descBonus));
   return {
     total: Math.round(total * 100) / 100,
     recency,

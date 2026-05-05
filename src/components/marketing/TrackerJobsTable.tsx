@@ -269,6 +269,7 @@ export function TrackerJobsTable({
       createdAt: j.created_at,
       jobTitle: j.job_title,
       companyType: j._companyType,
+      description: j.description,
     }).total;
   };
 
