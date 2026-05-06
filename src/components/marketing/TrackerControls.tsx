@@ -1731,101 +1731,11 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
         })}
       </div>
 
-      {/* Companies and Roles Section */}
-      <div className="bg-white rounded-xl border shadow-sm">
-        <div className="p-4 border-b flex items-center justify-between flex-wrap gap-3">
-          <div>
-            <h3 className="font-bold text-gray-900 text-lg">Jobs</h3>
-            <p className="text-xs text-gray-500 mt-0.5">
-              {activeFilter === 'all_roles' && 'All open jobs across tracked companies'}
-              {activeFilter === 'new_roles' && 'Jobs discovered in the most recent tracker run'}
-              {activeFilter === 'new_companies' && 'Jobs at companies added during the most recent run'}
-              {activeFilter === 'contacts_added' && 'Jobs at companies with recently added contacts'}
-              <span className="ml-1 text-gray-400">· priority jobs highlighted, click a title for details</span>
-            </p>
-          </div>
-          <div className="flex items-center gap-3 flex-wrap">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <Input placeholder="Search companies or roles..." value={searchText} onChange={e => setSearchText(e.target.value)} className="pl-9 w-64" />
-            </div>
-            {(() => {
-              const blockedCount = sortedRecords.filter(r => (r as any).is_blocked).length;
-              if (blockedCount === 0) return null;
-              return (
-                <button
-                  type="button"
-                  onClick={() => setShowBlocked(v => !v)}
-                  className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors font-medium ${
-                    showBlocked
-                      ? 'bg-gray-900 text-white border-gray-900 hover:bg-gray-800'
-                      : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
-                  }`}
-                >
-                  <Ban className="w-3.5 h-3.5" />
-                  {showBlocked ? 'Hide blocked' : `Show blocked (${blockedCount})`}
-                </button>
-              );
-            })()}
-            <span className="text-sm text-gray-500 whitespace-nowrap">{sortedRecords.length} {sortedRecords.length === 1 ? 'company' : 'companies'}</span>
-          </div>
-        </div>
-
-        {loading ? (
-          <div className="flex items-center justify-center py-16">
-            <Loader2 className="w-6 h-6 animate-spin text-gray-400" />
-          </div>
-        ) : (() => {
-          // Flatten openJobs from every visible (sortedRecords) company
-          // into one list. Decorate each row with the company-level
-          // priority flag so the table can highlight priority rows
-          // whether the flag lives on the job or on the company.
-          const flatJobs: TrackerJobsTableRow[] = [];
-          for (const rec of sortedRecords) {
-            const isBlocked = !!(rec as any).is_blocked;
-            // Blocked companies are hidden from the table by default; the
-            // "Show blocked" toggle in the header flips them back in with
-            // a muted/strikethrough row style.
-            if (isBlocked && !showBlocked) continue;
-            const src: any[] = (rec as any).openJobs || [];
-            for (const j of src) {
-              flatJobs.push({
-                ...j,
-                _companyIsHighPriority: (rec as any).is_high_priority,
-                _companyIsBlocked: isBlocked,
-                _companyType: (rec as any).company_type,
-                _company: rec,
-              });
-            }
-          }
-          const jobs = activeFilter === 'new_roles'
-            ? flatJobs.filter(j => j.is_net_new)
-            : flatJobs;
-          if (jobs.length === 0) {
-            return (
-              <div className="text-center py-16 text-gray-500">
-                <Briefcase className="w-8 h-8 mx-auto mb-2 text-gray-300" />
-                <p className="font-medium">No jobs match this filter</p>
-                <p className="text-sm mt-1">
-                  {activeFilter === 'new_roles' && 'No new roles were added in the most recent tracker run.'}
-                  {activeFilter === 'new_companies' && 'No new companies were added in the most recent tracker run.'}
-                  {activeFilter === 'contacts_added' && 'No new contacts were added in the most recent tracker run.'}
-                  {activeFilter === 'all_roles' && 'No jobs found. Run the tracker to discover new roles.'}
-                </p>
-              </div>
-            );
-          }
-          return (
-            <TrackerJobsTable
-              jobs={jobs}
-              jobTypeOptions={allJobTypes.map(jt => jt.name)}
-              trackerRuns={runHistory}
-              companies={companies}
-              onDataRefresh={onComplete}
-            />
-          );
-        })()}
-      </div>
+      {/* The full Jobs list under the filter tiles was removed — the
+          tiles themselves are now the Tracker's primary surface, and
+          the actual job table lives on the Jobs tab. Tracker stays
+          focused on "what changed in the last run" tiles + run
+          history below. */}
 
       {/* Run History */}
       {runHistory.length > 0 && (
