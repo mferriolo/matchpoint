@@ -72,8 +72,6 @@ interface ScriptOutputs {
   coldCall: string;
   email: { subject: string; body: string };
   linkedin: string;
-  voicemail: string;
-  objectionResponse: string;
   // Follow-Up Email is a separate message variant for the second
   // (or third) touch on the same contact. Frames as a polite nudge,
   // references the prior outreach, restates the value briefly, and
@@ -164,8 +162,6 @@ Return STRICT JSON matching this exact shape, no prose outside the JSON:
     "body": "string — 5-9 short lines: opener, problem statement, why-it-matters, solution + proof point, CTA. Plain prose, no greeting like 'Dear' unless a hiring manager name is provided."
   },
   "linkedin": "string — 4-7 short lines, more casual than the email, same structure",
-  "voicemail": "string — under 30 seconds spoken (~70 words), name + reason for call + ask for callback",
-  "objectionResponse": "string — 2-4 sentence rebuttal tailored to the listed objection(s); if none listed, write a generic 'why we earn the conversation' rebuttal",
   "followUpEmail": {
     "subject": "string — short, references that this is a follow-up. Examples: 'Following up on the {role} search', 'Re: {Company} {role}'. Avoid 'Just checking in'.",
     "body": "string — 4-6 short lines: a one-line bump referencing the prior message, one line restating the specific problem the open role likely creates, one line reaffirming the proof point, and the same CTA. Tone is patient, not pushy. No greeting if no hiring manager name is provided."
@@ -212,10 +208,12 @@ Deno.serve(async (req) => {
           body: JSON.stringify({
             model: 'gpt-4o-mini',
             messages: [{ role: 'user', content: prompt }],
-            // 2500 (was 1500). gpt-4o-mini occasionally truncates the
-            // 5-output JSON envelope at ~1500 tokens with long company
-            // descriptions, producing unparseable JSON.
-            max_tokens: 2500,
+            // 3000. The 4-output JSON envelope (cold call + email +
+            // linkedin + follow-up email) sits well under this; the
+            // headroom absorbs long descriptions / sender notes /
+            // hard sender-identity contract lines without truncating
+            // the JSON mid-string.
+            max_tokens: 3000,
             temperature: 0.7,
             response_format: { type: 'json_object' },
           }),

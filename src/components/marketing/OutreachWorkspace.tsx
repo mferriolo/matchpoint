@@ -46,8 +46,6 @@ interface ScriptOutputs {
   coldCall: string;
   email: { subject: string; body: string };
   linkedin: string;
-  voicemail: string;
-  objectionResponse: string;
   followUpEmail: { subject: string; body: string };
 }
 
@@ -521,8 +519,6 @@ export function OutreachWorkspace({
     coldCall: scrubPlaceholders(out.coldCall, sender),
     email: { subject: scrubPlaceholders(out.email.subject, sender), body: scrubPlaceholders(out.email.body, sender) },
     linkedin: scrubPlaceholders(out.linkedin, sender),
-    voicemail: scrubPlaceholders(out.voicemail, sender),
-    objectionResponse: scrubPlaceholders(out.objectionResponse, sender),
     followUpEmail: out.followUpEmail
       ? { subject: scrubPlaceholders(out.followUpEmail.subject, sender), body: scrubPlaceholders(out.followUpEmail.body, sender) }
       : { subject: '', body: '' },
