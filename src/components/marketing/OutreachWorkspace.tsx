@@ -48,7 +48,101 @@ interface ScriptOutputs {
   linkedin: string;
   voicemail: string;
   objectionResponse: string;
+  followUpEmail: { subject: string; body: string };
 }
+
+type MessageType = 'email' | 'followUpEmail' | 'linkedin' | 'coldCall';
+
+const MESSAGE_TYPE_LABEL: Record<MessageType, string> = {
+  email:         'Email',
+  followUpEmail: 'Follow-Up Email',
+  linkedin:      'LinkedIn',
+  coldCall:      'Cold Call Script',
+};
+
+// ===========================================================
+// Customize form — option lists (same set as the legacy script modal)
+// ===========================================================
+
+const AUDIENCE_OPTIONS = [
+  'CEO / Founder',
+  'COO / Chief of Operations',
+  'Chief Medical Officer',
+  'VP of Clinical Operations',
+  'Head of Talent Acquisition',
+  'Recruiting Manager',
+  'Practice Administrator',
+  'Regional Medical Director',
+  'Private Equity Operating Partner',
+  'Other',
+];
+
+const PROBLEM_OPTIONS = [
+  'Role has likely been open too long',
+  'Internal recruiting team may be overwhelmed',
+  'Hard-to-find passive candidate market',
+  'Growth may be delayed by this open role',
+  'Clinical leadership gap',
+  'Bad hire risk is high',
+  'Geographic market is difficult',
+  'Specialty or model-specific experience is hard to find',
+  'Other',
+];
+
+const SERVICE_OPTIONS = [
+  'Direct hire contingency search',
+  'Retained executive search',
+  'RPO / embedded recruiting support',
+  'Market mapping',
+  'Hard-to-fill provider search',
+  'Clinical leadership search',
+  'Other',
+];
+
+const URGENCY_OPTIONS = ['Low urgency', 'Moderate urgency', 'High urgency', 'Very high urgency', 'Unknown'];
+
+const TONE_OPTIONS = [
+  'Direct and bold',
+  'Warm and consultative',
+  'Executive and polished',
+  'Scrappy and entrepreneurial',
+  'Mission-driven healthcare',
+  'MedCentric-branded professional tone',
+];
+
+const PROOF_OPTIONS = [
+  'Experience recruiting clinicians and clinical leaders',
+  'Experience with value-based care organizations',
+  'Experience with PACE / frail elderly care',
+  'Experience helping startups build clinical teams',
+  'Ability to access passive candidates',
+  'Ability to support hard-to-fill searches',
+  'Speed and focus compared with internal recruiting teams',
+  'Other',
+];
+
+const CTA_OPTIONS = [
+  'Schedule a 15-minute introductory call',
+  'Set up a job intake conversation',
+  'Discuss the open role',
+  'Review our search process',
+  'Explore a recruiting partnership',
+  'Permission to send qualified candidates',
+  'Other',
+];
+
+const OBJECTION_OPTIONS = [
+  'We already have an internal recruiting team',
+  'We are not using agencies right now',
+  'We already have vendors',
+  'Send me information',
+  'We are not hiring right now',
+  'Your fee is too high',
+  'We tried recruiters before and it did not work',
+  'We only work retained',
+  'We only work contingency',
+  'Budget is tight',
+];
 
 // ===========================================================
 // Outreach scoring (the recommender)
@@ -260,6 +354,32 @@ export function OutreachWorkspace({
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const [editedSubject, setEditedSubject] = useState('');
   const [editedBody, setEditedBody] = useState('');
+  const [editedFollowUpSubject, setEditedFollowUpSubject] = useState('');
+  const [editedFollowUpBody, setEditedFollowUpBody] = useState('');
+  const [messageType, setMessageType] = useState<MessageType>('email');
+  const [customizeOpen, setCustomizeOpen] = useState(false);
+
+  // Customize form — same dimensions the standalone Generate Script
+  // modal exposed, all in one place. Auto-fill audience and hiring
+  // manager name from the selected contact when the modal opens.
+  const [audience, setAudience] = useState('Chief Medical Officer');
+  const [audienceOther, setAudienceOther] = useState('');
+  const [problem, setProblem] = useState('Role has likely been open too long');
+  const [problemOther, setProblemOther] = useState('');
+  const [service, setService] = useState('Direct hire contingency search');
+  const [serviceOther, setServiceOther] = useState('');
+  const [urgency, setUrgency] = useState('Moderate urgency');
+  const [tone, setTone] = useState('MedCentric-branded professional tone');
+  const [proof, setProof] = useState('Experience recruiting clinicians and clinical leaders');
+  const [proofOther, setProofOther] = useState('');
+  const [cta, setCta] = useState('Schedule a 15-minute introductory call');
+  const [ctaOther, setCtaOther] = useState('');
+  const [objections, setObjections] = useState<string[]>([]);
+  const [customOpener, setCustomOpener] = useState('');
+  const [companyInsight, setCompanyInsight] = useState('');
+  const [hiringManagerName, setHiringManagerName] = useState('');
+  const [notes, setNotes] = useState('');
+  const [avoidLanguage, setAvoidLanguage] = useState('');
 
   const reloadContacts = async (j: ScriptJobInput) => {
     if (!j.company_id && !j.company_name) {
@@ -282,6 +402,9 @@ export function OutreachWorkspace({
     setSelectedContactId(null);
     setEditedSubject('');
     setEditedBody('');
+    setEditedFollowUpSubject('');
+    setEditedFollowUpBody('');
+    setMessageType('email');
     reloadContacts(job);
   }, [job?.id]);
 
@@ -301,6 +424,33 @@ export function OutreachWorkspace({
   }, [ranked, selectedContactId]);
 
   const selected = ranked.find(r => r.c.id === selectedContactId)?.c || null;
+
+  // Whenever the selected contact changes, refresh the audience +
+  // hiring-manager-name fields so the customize panel reflects the
+  // current target. The user can still override these in the form.
+  useEffect(() => {
+    if (!selected) return;
+    const t = (selected.title || '').toLowerCase();
+    let nextAudience = audience;
+    if (/\bcmo\b|chief medical officer/.test(t)) nextAudience = 'Chief Medical Officer';
+    else if (/operating partner|private equity/.test(t)) nextAudience = 'Private Equity Operating Partner';
+    else if (/\bceo\b|chief executive|founder|president/.test(t)) nextAudience = 'CEO / Founder';
+    else if (/\bcoo\b|chief operating|chief of operations/.test(t)) nextAudience = 'COO / Chief of Operations';
+    else if (/vp .*clinical|vice president .*clinical/.test(t)) nextAudience = 'VP of Clinical Operations';
+    else if (/medical director/.test(t)) nextAudience = 'Regional Medical Director';
+    else if (/practice administrator|practice manager/.test(t)) nextAudience = 'Practice Administrator';
+    else if (/talent acquisition|head of ta|director of ta/.test(t)) nextAudience = 'Head of Talent Acquisition';
+    else if (/recruit/.test(t)) nextAudience = 'Recruiting Manager';
+    setAudience(nextAudience);
+
+    const isPhys = /\bcmo\b|chief medical officer|medical director/.test(t)
+      || /\bm\.?d\.?\b|\bd\.?o\.?\b/.test(((selected as any).suffix || '').toLowerCase());
+    const hiringName = isPhys && selected.last_name
+      ? `Dr. ${selected.last_name}`
+      : (selected.first_name || selected.last_name || '');
+    setHiringManagerName(hiringName);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedContactId]);
 
   const loadSender = async (): Promise<{ first_name?: string; last_name?: string; title?: string; company?: string }> => {
     // Primary source: admin_users (edited from Admin → Users tab so
@@ -373,6 +523,9 @@ export function OutreachWorkspace({
     linkedin: scrubPlaceholders(out.linkedin, sender),
     voicemail: scrubPlaceholders(out.voicemail, sender),
     objectionResponse: scrubPlaceholders(out.objectionResponse, sender),
+    followUpEmail: out.followUpEmail
+      ? { subject: scrubPlaceholders(out.followUpEmail.subject, sender), body: scrubPlaceholders(out.followUpEmail.body, sender) }
+      : { subject: '', body: '' },
   });
 
   const generate = async () => {
@@ -380,49 +533,34 @@ export function OutreachWorkspace({
     setGenerating(true);
     try {
       const sender = await loadSender();
-      // Tailor the form inputs to the selected contact. Mirrors the
-      // mapping used in ScriptGeneratorModal's auto-fill logic.
-      const title = (selected.title || '').toLowerCase();
-      let audience = 'Chief Medical Officer';
-      if (/\bcmo\b|chief medical officer/.test(title)) audience = 'Chief Medical Officer';
-      else if (/\bceo\b|chief executive|founder|president/.test(title)) audience = 'CEO / Founder';
-      else if (/\bcoo\b|chief operating|chief of operations/.test(title)) audience = 'COO / Chief of Operations';
-      else if (/operating partner|private equity/.test(title)) audience = 'Private Equity Operating Partner';
-      else if (/medical director/.test(title)) audience = 'Regional Medical Director';
-      else if (/vp .*clinical|vice president .*clinical/.test(title)) audience = 'VP of Clinical Operations';
-      else if (/practice administrator|practice manager/.test(title)) audience = 'Practice Administrator';
-      else if (/talent acquisition|head of ta|director of ta/.test(title)) audience = 'Head of Talent Acquisition';
-      else if (/recruit/.test(title)) audience = 'Recruiting Manager';
 
-      const isPhys = /\bcmo\b|chief medical officer|medical director/.test(title) ||
-                     /\bm\.?d\.?\b|\bd\.?o\.?\b/.test((selected.suffix || '').toLowerCase());
-      const hiringName = isPhys && selected.last_name
-        ? `Dr. ${selected.last_name}`
-        : (selected.first_name || selected.last_name || '');
-
+      // Build the customize-form payload from controlled state. The
+      // form auto-fills audience + hiringManagerName whenever a
+      // contact is picked, so even users who never open the Customize
+      // panel get a contact-tailored prompt.
       const inputs = {
         audience,
-        audienceOther: '',
-        problem: 'Role has likely been open too long',
-        problemOther: '',
-        service: 'Direct hire contingency search',
-        serviceOther: '',
+        audienceOther,
+        problem,
+        problemOther,
+        service,
+        serviceOther,
         companyType: job.company_type || '',
         roleCategory: job.job_type || '',
-        urgency: 'Moderate urgency',
-        tone: 'MedCentric-branded professional tone',
-        proof: 'Experience recruiting clinicians and clinical leaders',
-        proofOther: '',
-        cta: 'Schedule a 15-minute introductory call',
-        ctaOther: '',
-        objections: [],
-        customOpener: '',
+        urgency,
+        tone,
+        proof,
+        proofOther,
+        cta,
+        ctaOther,
+        objections,
+        customOpener,
         specificPain: '',
-        companyInsight: '',
-        hiringManagerName: hiringName,
+        companyInsight,
+        hiringManagerName,
         caseStudy: '',
-        notes: '',
-        avoidLanguage: '',
+        notes,
+        avoidLanguage,
       };
 
       const ageDays = (() => {
@@ -467,6 +605,8 @@ export function OutreachWorkspace({
       setOutputs(out);
       setEditedSubject(out.email.subject);
       setEditedBody(out.email.body);
+      setEditedFollowUpSubject(out.followUpEmail?.subject || '');
+      setEditedFollowUpBody(out.followUpEmail?.body || '');
     } catch (err: any) {
       toast({ title: 'Generation failed', description: err.message || String(err), variant: 'destructive' });
     } finally {
@@ -652,7 +792,7 @@ export function OutreachWorkspace({
             )}
           </div>
 
-          {/* RIGHT: message + send */}
+          {/* RIGHT: message type tabs + customize + active message */}
           <div className="overflow-y-auto">
             {!selected ? (
               <div className="p-8 text-center text-sm text-gray-500">
@@ -660,6 +800,7 @@ export function OutreachWorkspace({
               </div>
             ) : (
               <div className="p-5 space-y-4">
+                {/* Contact header + Generate */}
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <div>
                     <div className="text-sm font-bold text-gray-900">{fullName(selected)}</div>
@@ -680,38 +821,102 @@ export function OutreachWorkspace({
                   </div>
                 </div>
 
-                {/* Channel launchers — real anchors so the browser
-                    handles mailto: / tel: natively (popup-blocker-safe
-                    and won't unload the page mid-edit). */}
-                <div className="grid grid-cols-3 gap-2">
-                  <ChannelLink
-                    label="Email"
-                    icon={<Mail className="w-4 h-4" />}
-                    href={buildMailtoHref(selected)}
-                    detail={selected.email || 'No email'}
-                    onClick={() => onLaunchEmail(selected)}
-                  />
-                  <ChannelLink
-                    label="LinkedIn"
-                    icon={<Linkedin className="w-4 h-4" />}
-                    href={selected.linkedin_url || ''}
-                    target="_blank"
-                    detail={selected.linkedin_url ? 'Opens profile + copies message' : 'No LinkedIn'}
-                    onClick={() => onLaunchLinkedIn(selected)}
-                  />
-                  <ChannelLink
-                    label="Call"
-                    icon={<Phone className="w-4 h-4" />}
-                    href={buildTelHref(selected)}
-                    detail={preferredPhone(selected) || 'No phone'}
-                    onClick={() => onLaunchPhone(selected)}
-                  />
+                {/* Message type tabs — Email default, plus the three
+                    other variants the user picks between. The contents
+                    of all four tabs come from a single edge-function
+                    call so switching tabs is instant. */}
+                <div className="flex gap-1 border-b border-gray-200">
+                  {(['email', 'followUpEmail', 'linkedin', 'coldCall'] as const).map(t => (
+                    <button
+                      key={t}
+                      onClick={() => setMessageType(t)}
+                      className={`px-3 py-1.5 text-xs font-semibold rounded-t-md border-b-2 transition-colors ${
+                        messageType === t
+                          ? 'border-[#911406] text-[#911406] bg-red-50/40'
+                          : 'border-transparent text-gray-500 hover:text-gray-800 hover:bg-gray-50'
+                      }`}
+                    >
+                      {MESSAGE_TYPE_LABEL[t]}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Collapsible Customize panel — same dropdowns the
+                    standalone script generator exposed, all in one
+                    place. Closed by default to keep the UI focused;
+                    audience + hiring manager auto-fill from the
+                    selected contact regardless of whether it's open. */}
+                <div className="rounded-md border border-gray-200 bg-white">
+                  <button
+                    type="button"
+                    onClick={() => setCustomizeOpen(o => !o)}
+                    className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                  >
+                    <span>Customize message</span>
+                    <span className="text-[10px] text-gray-500">{customizeOpen ? 'Hide' : 'Show'}</span>
+                  </button>
+                  {customizeOpen && (
+                    <div className="border-t border-gray-100 p-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                      <FormSelect label="Audience" value={audience} options={AUDIENCE_OPTIONS} onChange={setAudience} />
+                      {audience === 'Other' && (
+                        <FormText label="Specify audience" value={audienceOther} onChange={setAudienceOther} />
+                      )}
+                      <FormText label="Hiring manager name" value={hiringManagerName} onChange={setHiringManagerName} />
+                      <FormSelect label="Primary problem" value={problem} options={PROBLEM_OPTIONS} onChange={setProblem} />
+                      {problem === 'Other' && (
+                        <FormText label="Specify problem" value={problemOther} onChange={setProblemOther} />
+                      )}
+                      <FormSelect label="Service to pitch" value={service} options={SERVICE_OPTIONS} onChange={setService} />
+                      {service === 'Other' && (
+                        <FormText label="Specify service" value={serviceOther} onChange={setServiceOther} />
+                      )}
+                      <FormSelect label="Urgency" value={urgency} options={URGENCY_OPTIONS} onChange={setUrgency} />
+                      <FormSelect label="Tone" value={tone} options={TONE_OPTIONS} onChange={setTone} />
+                      <FormSelect label="Proof point" value={proof} options={PROOF_OPTIONS} onChange={setProof} />
+                      {proof === 'Other' && (
+                        <FormText label="Specify proof" value={proofOther} onChange={setProofOther} />
+                      )}
+                      <FormSelect label="Call to action" value={cta} options={CTA_OPTIONS} onChange={setCta} />
+                      {cta === 'Other' && (
+                        <FormText label="Specify CTA" value={ctaOther} onChange={setCtaOther} />
+                      )}
+                      <div className="md:col-span-2">
+                        <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Objections to address (up to 3)</Label>
+                        <div className="mt-1 grid grid-cols-1 md:grid-cols-2 gap-1">
+                          {OBJECTION_OPTIONS.map(o => {
+                            const checked = objections.includes(o);
+                            return (
+                              <label key={o} className="flex items-center gap-2 text-xs cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => {
+                                    setObjections(prev => {
+                                      if (prev.includes(o)) return prev.filter(x => x !== o);
+                                      if (prev.length >= 3) { toast({ title: 'Pick up to 3 objections' }); return prev; }
+                                      return [...prev, o];
+                                    });
+                                  }}
+                                  className="w-3.5 h-3.5 rounded border-gray-300"
+                                />
+                                <span>{o}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <FormText label="Custom opening line (optional)" value={customOpener} onChange={setCustomOpener} />
+                      <FormText label="Company insight (optional)" value={companyInsight} onChange={setCompanyInsight} />
+                      <FormText label="Notes (optional)" value={notes} onChange={setNotes} />
+                      <FormText label="Language to avoid (optional)" value={avoidLanguage} onChange={setAvoidLanguage} />
+                    </div>
+                  )}
                 </div>
 
                 {!outputs && !generating && (
                   <div className="rounded-md border border-dashed border-gray-300 bg-gray-50 p-6 text-center text-sm text-gray-500">
                     <Info className="w-4 h-4 mx-auto mb-2" />
-                    Click <span className="font-semibold">Draft message</span> to generate an outreach message tailored to {fullName(selected)}.
+                    Click <span className="font-semibold">Draft message</span> to generate a {MESSAGE_TYPE_LABEL[messageType].toLowerCase()} tailored to {fullName(selected)}.
                   </div>
                 )}
 
@@ -721,33 +926,59 @@ export function OutreachWorkspace({
                   </div>
                 )}
 
-                {outputs && (
-                  <>
-                    {/* Email — editable */}
-                    <div className="rounded-md border border-gray-200 bg-white">
-                      <div className="flex items-center justify-between px-3 py-2 border-b bg-gray-50">
-                        <div className="text-xs font-semibold text-gray-700">Email</div>
-                        <CopyBtn text={`Subject: ${editedSubject}\n\n${editedBody}`} label="Copy email" />
-                      </div>
-                      <div className="p-3 space-y-2">
-                        <div>
-                          <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Subject</Label>
-                          <Input value={editedSubject} onChange={e => setEditedSubject(e.target.value)} className="mt-1 text-sm" />
-                        </div>
-                        <div>
-                          <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Body</Label>
-                          <Textarea value={editedBody} onChange={e => setEditedBody(e.target.value)} rows={9} className="mt-1 text-sm font-sans" />
-                        </div>
-                      </div>
-                    </div>
+                {outputs && messageType === 'email' && (
+                  <EmailPanel
+                    label="Email"
+                    subject={editedSubject}
+                    body={editedBody}
+                    onSubjectChange={setEditedSubject}
+                    onBodyChange={setEditedBody}
+                    sendHref={selected.email
+                      ? `mailto:${encodeURIComponent(selected.email)}?subject=${encodeURIComponent(editedSubject)}&body=${encodeURIComponent(editedBody)}`
+                      : ''}
+                    sendDetail={selected.email || 'No email on file'}
+                    onSend={() => onLaunchEmail(selected)}
+                  />
+                )}
 
-                    {/* LinkedIn */}
-                    <OutputBlock title="LinkedIn message" body={outputs.linkedin} />
-                    {/* Voicemail / Cold call */}
-                    <OutputBlock title="Cold call opener" body={outputs.coldCall} />
-                    <OutputBlock title="Voicemail" body={outputs.voicemail} />
-                    <OutputBlock title="If you hit an objection" body={outputs.objectionResponse} />
-                  </>
+                {outputs && messageType === 'followUpEmail' && (
+                  <EmailPanel
+                    label="Follow-Up Email"
+                    subject={editedFollowUpSubject}
+                    body={editedFollowUpBody}
+                    onSubjectChange={setEditedFollowUpSubject}
+                    onBodyChange={setEditedFollowUpBody}
+                    sendHref={selected.email
+                      ? `mailto:${encodeURIComponent(selected.email)}?subject=${encodeURIComponent(editedFollowUpSubject)}&body=${encodeURIComponent(editedFollowUpBody)}`
+                      : ''}
+                    sendDetail={selected.email || 'No email on file'}
+                    onSend={() => onLaunchEmail(selected)}
+                  />
+                )}
+
+                {outputs && messageType === 'linkedin' && (
+                  <SimplePanel
+                    label="LinkedIn Message"
+                    body={outputs.linkedin}
+                    sendHref={selected.linkedin_url || ''}
+                    sendLabel="Open LinkedIn"
+                    sendIcon={<Linkedin className="w-3.5 h-3.5" />}
+                    sendDetail={selected.linkedin_url ? 'Opens profile + copies message' : 'No LinkedIn on file'}
+                    target="_blank"
+                    onSend={() => onLaunchLinkedIn(selected)}
+                  />
+                )}
+
+                {outputs && messageType === 'coldCall' && (
+                  <SimplePanel
+                    label="Cold Call Script"
+                    body={outputs.coldCall}
+                    sendHref={buildTelHref(selected)}
+                    sendLabel="Call"
+                    sendIcon={<Phone className="w-3.5 h-3.5" />}
+                    sendDetail={preferredPhone(selected) || 'No phone on file'}
+                    onSend={() => onLaunchPhone(selected)}
+                  />
                 )}
 
                 {/* Status controls */}
@@ -819,6 +1050,127 @@ function ChannelLink({
       </div>
       <div className="text-[11px] truncate w-full">{detail}</div>
     </a>
+  );
+}
+
+function FormSelect({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (v: string) => void }) {
+  return (
+    <div>
+      <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">{label}</Label>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        className="mt-1 block w-full h-8 text-xs rounded-md border border-input bg-background px-2 focus:outline-none focus:ring-1 focus:ring-ring"
+      >
+        {options.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </div>
+  );
+}
+
+function FormText({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <div>
+      <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">{label}</Label>
+      <Input value={value} onChange={e => onChange(e.target.value)} className="mt-1 h-8 text-xs" />
+    </div>
+  );
+}
+
+function EmailPanel({
+  label, subject, body, onSubjectChange, onBodyChange, sendHref, sendDetail, onSend,
+}: {
+  label: string;
+  subject: string;
+  body: string;
+  onSubjectChange: (v: string) => void;
+  onBodyChange: (v: string) => void;
+  sendHref: string;
+  sendDetail: string;
+  onSend: () => void;
+}) {
+  const copyText = `Subject: ${subject}\n\n${body}`;
+  return (
+    <div className="rounded-md border border-gray-200 bg-white">
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b bg-gray-50 flex-wrap">
+        <div className="text-xs font-semibold text-gray-700">{label}</div>
+        <div className="flex items-center gap-2">
+          <CopyBtn text={copyText} label="Copy" />
+          {sendHref ? (
+            <a
+              href={sendHref}
+              onClick={onSend}
+              className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-[#911406] text-white hover:bg-[#7a1005]"
+              title={sendDetail}
+            >
+              <Mail className="w-3.5 h-3.5" />
+              Send
+            </a>
+          ) : (
+            <span
+              className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-gray-200 text-gray-500 cursor-not-allowed"
+              title={sendDetail}
+            >
+              <Mail className="w-3.5 h-3.5" />
+              Send
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="p-3 space-y-2">
+        <div>
+          <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Subject</Label>
+          <Input value={subject} onChange={e => onSubjectChange(e.target.value)} className="mt-1 text-sm" />
+        </div>
+        <div>
+          <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Body</Label>
+          <Textarea value={body} onChange={e => onBodyChange(e.target.value)} rows={9} className="mt-1 text-sm font-sans" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SimplePanel({
+  label, body, sendHref, sendLabel, sendIcon, sendDetail, target, onSend,
+}: {
+  label: string;
+  body: string;
+  sendHref: string;
+  sendLabel: string;
+  sendIcon: React.ReactNode;
+  sendDetail: string;
+  target?: string;
+  onSend: () => void;
+}) {
+  return (
+    <div className="rounded-md border border-gray-200 bg-white">
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b bg-gray-50 flex-wrap">
+        <div className="text-xs font-semibold text-gray-700">{label}</div>
+        <div className="flex items-center gap-2">
+          <CopyBtn text={body} label="Copy" />
+          {sendHref ? (
+            <a
+              href={sendHref}
+              target={target}
+              rel={target === '_blank' ? 'noopener noreferrer' : undefined}
+              onClick={onSend}
+              className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-[#911406] text-white hover:bg-[#7a1005]"
+              title={sendDetail}
+            >
+              {sendIcon}
+              {sendLabel}
+            </a>
+          ) : (
+            <span className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-gray-200 text-gray-500 cursor-not-allowed" title={sendDetail}>
+              {sendIcon}
+              {sendLabel}
+            </span>
+          )}
+        </div>
+      </div>
+      <pre className="px-3 py-2 text-xs text-gray-800 whitespace-pre-wrap font-sans">{body}</pre>
+    </div>
   );
 }
 

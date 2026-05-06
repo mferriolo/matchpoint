@@ -4,7 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ExternalLink, Star,
-  Briefcase, Users, Globe, ShieldCheck, Ban, Undo2, Loader2, Wand2,
+  Briefcase, Users, Globe, ShieldCheck, Ban, Undo2, Loader2, Send,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useToast } from '@/hooks/use-toast';
@@ -12,7 +12,8 @@ import JobPriorityBadge from './JobPriorityBadge';
 import { priorityScore } from '@/lib/jobPriorityScore';
 import EditJobModal, { EditJobRow } from './EditJobModal';
 import { DateRangeFilter, DateRange, inDateRange } from './DateRangeFilter';
-import { ScriptGeneratorModal, ScriptJobInput } from './ScriptGeneratorModal';
+import type { ScriptJobInput } from './ScriptGeneratorModal';
+import { OutreachWorkspace } from './OutreachWorkspace';
 import { Pencil } from 'lucide-react';
 
 // Each row is a marketing_jobs row. The parent decorates each job with a
@@ -662,7 +663,7 @@ export function TrackerJobsTable({
           setSelectedJob(null);
         }}
       />
-      <ScriptGeneratorModal job={scriptJob} onClose={() => setScriptJob(null)} />
+      <OutreachWorkspace job={scriptJob} onClose={() => setScriptJob(null)} />
       <CompanyDetailDialog
         company={selectedCompany}
         onClose={() => setSelectedCompany(null)}
@@ -710,10 +711,10 @@ function JobDetailDialog({ job, onClose, onEdit, onGenerateScript }: { job: Trac
                     <button
                       onClick={() => onGenerateScript(job)}
                       className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded border border-[#911406]/30 text-[#911406] hover:bg-red-50"
-                      title="Generate Problem/Solution outreach script"
+                      title="Open outreach — contacts, draft, and send"
                     >
-                      <Wand2 className="w-3.5 h-3.5" />
-                      Generate Script
+                      <Send className="w-3.5 h-3.5" />
+                      Outreach
                     </button>
                   )}
                 </div>

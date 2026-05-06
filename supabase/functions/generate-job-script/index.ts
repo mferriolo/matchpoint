@@ -74,6 +74,11 @@ interface ScriptOutputs {
   linkedin: string;
   voicemail: string;
   objectionResponse: string;
+  // Follow-Up Email is a separate message variant for the second
+  // (or third) touch on the same contact. Frames as a polite nudge,
+  // references the prior outreach, restates the value briefly, and
+  // ends with the same CTA.
+  followUpEmail: { subject: string; body: string };
 }
 
 function val(v?: string | null): string {
@@ -156,11 +161,15 @@ Return STRICT JSON matching this exact shape, no prose outside the JSON:
   "coldCall": "string — under 90 seconds spoken, conversational, opens with a hook, names the role and likely problem, ends with the CTA",
   "email": {
     "subject": "string — short, specific, no clickbait, ideally references the role or company",
-    "body": "string — 5-9 short lines: opener, problem statement, why-it-matters, MedCentric solution + proof point, CTA. Plain prose, no greeting like 'Dear' unless a hiring manager name is provided."
+    "body": "string — 5-9 short lines: opener, problem statement, why-it-matters, solution + proof point, CTA. Plain prose, no greeting like 'Dear' unless a hiring manager name is provided."
   },
   "linkedin": "string — 4-7 short lines, more casual than the email, same structure",
   "voicemail": "string — under 30 seconds spoken (~70 words), name + reason for call + ask for callback",
-  "objectionResponse": "string — 2-4 sentence rebuttal tailored to the listed objection(s); if none listed, write a generic 'why MedCentric earns the conversation' rebuttal"
+  "objectionResponse": "string — 2-4 sentence rebuttal tailored to the listed objection(s); if none listed, write a generic 'why we earn the conversation' rebuttal",
+  "followUpEmail": {
+    "subject": "string — short, references that this is a follow-up. Examples: 'Following up on the {role} search', 'Re: {Company} {role}'. Avoid 'Just checking in'.",
+    "body": "string — 4-6 short lines: a one-line bump referencing the prior message, one line restating the specific problem the open role likely creates, one line reaffirming the proof point, and the same CTA. Tone is patient, not pushy. No greeting if no hiring manager name is provided."
+  }
 }`;
 }
 
