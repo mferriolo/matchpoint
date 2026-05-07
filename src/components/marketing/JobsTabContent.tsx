@@ -7,7 +7,7 @@ import {
   Download, Loader2, X, Archive, RotateCcw, Filter, ShieldCheck,
   CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Trash2,
   Link2, Star, Zap, Building2, Briefcase, Ban, Eye, EyeOff, Pencil,
-  Calendar, FileText, Minus, Columns3, Send
+  Calendar, FileText, Minus, Columns3, Send, Sparkles
 } from 'lucide-react';
 
 
@@ -51,6 +51,10 @@ interface JobsTabContentProps {
   companies?: any[];
   loading: boolean;
   onRefresh: () => void;
+  // Most recent tracker run id + started_at — drives the "New (last run)"
+  // quick filter. Both nullable for the no-runs-yet case.
+  lastRunId?: string | null;
+  lastRunStartedAt?: string | null;
 }
 
 // Sort keys mirror the Tracker's jobs table. Legacy keys (job_category,
@@ -173,7 +177,7 @@ const MAX_CONSECUTIVE_ERRORS = 10; // Stop if too many consecutive errors
 
 // ---- Main Component ----
 
-const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], loading, onRefresh }) => {
+const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], loading, onRefresh, lastRunId = null, lastRunStartedAt = null }) => {
   const { toast } = useToast();
   const [subTab, setSubTab] = useState<'open' | 'closed'>('open');
   const [searchTerm, setSearchTerm] = useState('');
@@ -184,6 +188,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
   const [movingJobId, setMovingJobId] = useState<string | null>(null);
   const [togglingPriorityId, setTogglingPriorityId] = useState<string | null>(null);
   const [filterHighPriority, setFilterHighPriority] = useState(false);
+  const [filterNewLastRun, setFilterNewLastRun] = useState(false);
 
   // Tracker uses user-configured job_types (from the `job_types` table)
   // instead of the Jobs tab's legacy five-bucket classifier. Load them
@@ -396,6 +401,14 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
     () => baseJobs.filter((j: any) => j.high_priority || j._companyIsHighPriority).length,
     [baseJobs]
   );
+  const newLastRunCount = useMemo(() => {
+    if (!lastRunId && !lastRunStartedAt) return 0;
+    return baseJobs.filter((j: any) => {
+      if (j.tracker_run_id) return j.tracker_run_id === lastRunId;
+      if (lastRunStartedAt) return j.created_at && j.created_at >= lastRunStartedAt;
+      return false;
+    }).length;
+  }, [baseJobs, lastRunId, lastRunStartedAt]);
 
   // Apply filters and search
   const filteredJobs = useMemo(() => {
@@ -404,6 +417,19 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       if (!showBlocked && (j.is_blocked || j._companyIsBlocked)) return false;
       // High priority quick-filter (job-level OR company-level, matching Tracker).
       if (filterHighPriority && !(j.high_priority || j._companyIsHighPriority)) return false;
+      // "New (last run)" — match jobs whose tracker_run_id is the most
+      // recent run id. Falls back to created_at >= run.started_at for
+      // legacy rows missing tracker_run_id.
+      if (filterNewLastRun) {
+        if (!lastRunId && !lastRunStartedAt) return false;
+        if (j.tracker_run_id) {
+          if (j.tracker_run_id !== lastRunId) return false;
+        } else if (lastRunStartedAt) {
+          if (!(j.created_at && j.created_at >= lastRunStartedAt)) return false;
+        } else {
+          return false;
+        }
+      }
       if (searchTerm) {
         const s = searchTerm.toLowerCase();
         const matchesSearch =
@@ -432,7 +458,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       if (!inDateRange(j.created_at, filterDateFound)) return false;
       return true;
     });
-  }, [baseJobs, searchTerm, filterPriorityBucket, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource, filterHasDescription, filterDatePosted, filterDateFound, filterHighPriority, showBlocked]);
+  }, [baseJobs, searchTerm, filterPriorityBucket, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource, filterHasDescription, filterDatePosted, filterDateFound, filterHighPriority, filterNewLastRun, lastRunId, lastRunStartedAt, showBlocked]);
 
 
   // Sort
@@ -1071,6 +1097,30 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
               : 'bg-gray-100 text-gray-500'
           }`}>
             {highPriorityCount}
+          </span>
+        </button>
+
+        {/* New (last run) Quick Filter */}
+        <button
+          onClick={() => setFilterNewLastRun(prev => !prev)}
+          disabled={!lastRunId && !lastRunStartedAt}
+          className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border font-medium transition-all ${
+            filterNewLastRun
+              ? 'bg-blue-100 text-blue-800 border-blue-400 shadow-sm ring-1 ring-blue-300'
+              : 'bg-white text-gray-500 border-gray-200 hover:bg-blue-50 hover:text-blue-700 hover:border-blue-300'
+          } disabled:opacity-40 disabled:cursor-not-allowed`}
+          title={!lastRunStartedAt
+            ? 'No tracker runs yet'
+            : filterNewLastRun
+              ? 'Show all jobs'
+              : `Show only jobs added in the most recent run (${new Date(lastRunStartedAt).toLocaleString()})`}
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+          New
+          <span className={`text-xs px-1.5 py-0.5 rounded-full ${
+            filterNewLastRun ? 'bg-blue-200 text-blue-900' : 'bg-gray-100 text-gray-500'
+          }`}>
+            {newLastRunCount}
           </span>
         </button>
 

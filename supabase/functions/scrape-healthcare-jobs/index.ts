@@ -1361,11 +1361,18 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           let co = coMap.get(j.company.toLowerCase().trim());
           let cid = co?.id;
           if (!cid) {
-            const { data: nc } = await supabase.from('marketing_companies').insert({
+            // v152: capture .error so company-insert failures aren't
+            // silently dropped on the floor (previous version only kept
+            // .data, so a constraint/RLS error left cid undefined and
+            // the row was skipped without explanation).
+            const { data: nc, error: ncErr } = await supabase.from('marketing_companies').insert({
               company_name: j.company, industry: cat, company_type: cat, website: '', status: 'New',
               source: 'Google Jobs Direct', is_recurring_source: true, role_types_hired: nt,
               last_searched_at: new Date().toISOString()
             }).select('*').single();
+            if (ncErr) {
+              log('deduplicating', `COMPANY INSERT FAILED for "${j.company}": ${ncErr.message}${ncErr.code ? ` [${ncErr.code}]` : ''}`);
+            }
             if (nc) { cid = nc.id; coMap.set(j.company.toLowerCase().trim(), nc); coAdded++; newCos.push(j.company); log('deduplicating', `NEW COMPANY: ${j.company} (${cat})`); }
           } else {
             const u: any = {};
@@ -1398,7 +1405,15 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             url_check_result: (j._verifyReason || '').substring(0, 500),
             last_url_check: new Date().toISOString()
           }, { onConflict: 'dedup_key', ignoreDuplicates: true });
-          if (!error) { added++; roleB[nt] = (roleB[nt] || 0) + 1; }
+          if (!error) {
+            added++;
+            roleB[nt] = (roleB[nt] || 0) + 1;
+          } else {
+            // v152: previously these were silently dropped (only
+            // counted on success). When 52/52 inserts fail the run
+            // shows "0 jobs added" with zero diagnosis.
+            log('deduplicating', `JOB UPSERT FAILED for "${nt}" at "${j.company}" (${j.city || '?'}, ${j.state || '?'}): ${error.message}${(error as any).code ? ` [${(error as any).code}]` : ''}${(error as any).details ? ` — ${(error as any).details}` : ''}`);
+          }
           if (processedInsert % 10 === 0) await progress.updateStep('deduplicating', { items_processed: processedInsert, sub_step: `Inserted ${added}/${foundJobs.length} jobs (${coAdded} new companies)` });
         }
         log('deduplicating', `Added ${added} jobs from direct Google Jobs discovery, ${coAdded} new companies`);

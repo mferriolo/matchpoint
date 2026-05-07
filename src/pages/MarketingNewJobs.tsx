@@ -589,6 +589,18 @@ const DesktopMarketingNewJobs: React.FC = () => {
 
 
 
+  // Most recent tracker run, used to power the "New (last run)" quick
+  // filter on Jobs / Companies / Contacts tabs. We pull only id +
+  // started_at — that's all the filter needs. Companies don't have
+  // tracker_run_id set on insert, so we fall back to created_at >=
+  // started_at, matching the same logic used in TrackerControls.
+  const [lastRunMeta, setLastRunMeta] = useState<{ id: string; started_at: string } | null>(null);
+  const lastRunId = lastRunMeta?.id || null;
+  const lastRunStartedAt = lastRunMeta?.started_at || null;
+
+  const [filterNewCompanies, setFilterNewCompanies] = useState(false);
+  const [filterNewContacts, setFilterNewContacts] = useState(false);
+
   // Companies tab state
   const [filterHighPriorityCompanies, setFilterHighPriorityCompanies] = useState(false);
   const [togglingCompanyPriorityId, setTogglingCompanyPriorityId] = useState<string | null>(null);
@@ -986,12 +998,19 @@ const DesktopMarketingNewJobs: React.FC = () => {
       const results = await Promise.allSettled([
         supabase.from('marketing_jobs').select('*').order('priority_score', { ascending: false }),
         supabase.from('marketing_companies').select('*').order('open_roles_count', { ascending: false }),
-        supabase.from('marketing_contacts').select('*').order('created_at', { ascending: false })
+        supabase.from('marketing_contacts').select('*').order('created_at', { ascending: false }),
+        supabase.from('tracker_runs').select('id, started_at').order('started_at', { ascending: false }).limit(1).maybeSingle(),
       ]);
 
       const jobsResult = results[0];
       const companiesResult = results[1];
       const contactsResult = results[2];
+      const runResult = results[3];
+
+      if (runResult.status === 'fulfilled' && !runResult.value.error) {
+        const r = runResult.value.data as any;
+        if (r?.id && r?.started_at) setLastRunMeta({ id: r.id, started_at: r.started_at });
+      }
 
       if (jobsResult.status === 'fulfilled') {
         if (jobsResult.value.error) {
@@ -1128,6 +1147,14 @@ const DesktopMarketingNewJobs: React.FC = () => {
         // Hide blocked companies unless the user opts in via the toggle.
         if (!showBlockedCompanies && c.is_blocked) return false;
         if (filterHighPriorityCompanies && !c.is_high_priority) return false;
+        // "New (last run)" quick filter. Companies inserted by the
+        // tracker don't get tracker_run_id stamped, so we fall back to
+        // created_at >= run.started_at — same heuristic TrackerControls
+        // uses for its post-run summary cards.
+        if (filterNewCompanies) {
+          if (!lastRunStartedAt) return false;
+          if (!(c.created_at && c.created_at >= lastRunStartedAt)) return false;
+        }
         if (filterCompanyCategory.size > 0 && !filterCompanyCategory.has(c.company_type || '')) return false;
         if (!searchCompanies) return true;
         const s = searchCompanies.toLowerCase();
@@ -1151,9 +1178,21 @@ const DesktopMarketingNewJobs: React.FC = () => {
         const cmp = aVal.toString().localeCompare(bVal.toString());
         return companySortDir === 'asc' ? cmp : -cmp;
       });
-  }, [companies, searchCompanies, filterHighPriorityCompanies, filterCompanyCategory, showBlockedCompanies, companySortField, companySortDir]);
+  }, [companies, searchCompanies, filterHighPriorityCompanies, filterNewCompanies, lastRunStartedAt, filterCompanyCategory, showBlockedCompanies, companySortField, companySortDir]);
 
   const highPriorityCompanyCount = useMemo(() => companies.filter(c => c.is_high_priority).length, [companies]);
+  const newCompanyCount = useMemo(() => {
+    if (!lastRunStartedAt) return 0;
+    return companies.filter(c => c.created_at && c.created_at >= lastRunStartedAt).length;
+  }, [companies, lastRunStartedAt]);
+  const newContactCount = useMemo(() => {
+    if (!lastRunId && !lastRunStartedAt) return 0;
+    return contacts.filter(c => {
+      if (c.tracker_run_id) return c.tracker_run_id === lastRunId;
+      if (lastRunStartedAt) return c.created_at && c.created_at >= lastRunStartedAt;
+      return false;
+    }).length;
+  }, [contacts, lastRunId, lastRunStartedAt]);
 
   // Company-name normalization for merge-candidate detection. Strips
   // generic corporate / healthcare suffixes iteratively until nothing
@@ -1524,6 +1563,19 @@ const DesktopMarketingNewJobs: React.FC = () => {
         const t = c.created_at ? new Date(c.created_at).getTime() : 0;
         if (!t || t <= previousVisitRef.current) return false;
       }
+      // "New (last run)" — same heuristic TrackerControls uses: prefer
+      // tracker_run_id when present, else fall back to created_at >=
+      // run.started_at for older contacts that pre-date that column.
+      if (filterNewContacts) {
+        if (!lastRunId && !lastRunStartedAt) return false;
+        if (c.tracker_run_id) {
+          if (c.tracker_run_id !== lastRunId) return false;
+        } else if (lastRunStartedAt) {
+          if (!(c.created_at && c.created_at >= lastRunStartedAt)) return false;
+        } else {
+          return false;
+        }
+      }
       // "Any phone" cross-column check: filter option labels map to
       // presence semantics — Has data = any of the 3 phones populated,
       // No data = all 3 empty.
@@ -1573,6 +1625,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
       filterPhoneWorkPresence, filterPhoneHomePresence, filterPhoneCellPresence,
       filterLinkedInPresence, filterAnyPhonePresence, filterConfidence,
       filterOutreachStatus, filterOutreachAge, newSinceLastVisit,
+      filterNewContacts, lastRunId, lastRunStartedAt,
       contactPriorityByCompany]);
 
   // Options shown in the Confidence column's filter popover. Stringified
@@ -1845,6 +1898,8 @@ const DesktopMarketingNewJobs: React.FC = () => {
               companies={companies}
               loading={loading}
               onRefresh={loadData}
+              lastRunId={lastRunId}
+              lastRunStartedAt={lastRunStartedAt}
             />
           </TabsContent>
 
@@ -1886,6 +1941,30 @@ const DesktopMarketingNewJobs: React.FC = () => {
                       : 'bg-gray-100 text-gray-500'
                   }`}>
                     {highPriorityCompanyCount}
+                  </span>
+                </button>
+
+                {/* New (last run) Quick Filter */}
+                <button
+                  onClick={() => setFilterNewCompanies(prev => !prev)}
+                  disabled={!lastRunStartedAt}
+                  className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border font-medium transition-all ${
+                    filterNewCompanies
+                      ? 'bg-blue-100 text-blue-800 border-blue-400 shadow-sm ring-1 ring-blue-300'
+                      : 'bg-white text-gray-500 border-gray-200 hover:bg-blue-50 hover:text-blue-700 hover:border-blue-300'
+                  } disabled:opacity-40 disabled:cursor-not-allowed`}
+                  title={!lastRunStartedAt
+                    ? 'No tracker runs yet'
+                    : filterNewCompanies
+                      ? 'Show all companies'
+                      : `Show only companies added in the most recent run (${new Date(lastRunStartedAt).toLocaleString()})`}
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  New
+                  <span className={`text-xs px-1.5 py-0.5 rounded-full ${
+                    filterNewCompanies ? 'bg-blue-200 text-blue-900' : 'bg-gray-100 text-gray-500'
+                  }`}>
+                    {newCompanyCount}
                   </span>
                 </button>
 
@@ -2449,6 +2528,26 @@ const DesktopMarketingNewJobs: React.FC = () => {
                     </button>
                   );
                 })()}
+                <span className="text-gray-300">·</span>
+                {/* New (last run) — distinct from "since last visit": this
+                    one filters to contacts produced by the most recent
+                    tracker run, regardless of whether the user has visited
+                    since. */}
+                <button
+                  onClick={() => setFilterNewContacts(v => !v)}
+                  disabled={!lastRunId && !lastRunStartedAt}
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-xs ${
+                    filterNewContacts
+                      ? 'bg-blue-100 border-blue-300 text-blue-800'
+                      : 'bg-white border-gray-200 text-gray-600 hover:bg-blue-50 hover:border-blue-200'
+                  } disabled:opacity-40 disabled:cursor-not-allowed`}
+                  title={!lastRunStartedAt
+                    ? 'No tracker runs yet'
+                    : `${newContactCount} contact${newContactCount === 1 ? '' : 's'} from the most recent run (${new Date(lastRunStartedAt).toLocaleString()})`}
+                >
+                  <Sparkles className="w-3 h-3" />
+                  {filterNewContacts ? `Showing ${newContactCount} new` : `New (last run) (${newContactCount})`}
+                </button>
                 <span className="text-gray-300">·</span>
                 <Popover open={savedViewsOpen} onOpenChange={setSavedViewsOpen}>
                   <PopoverTrigger asChild>
