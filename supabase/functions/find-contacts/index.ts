@@ -711,9 +711,20 @@ Deno.serve(async (req) => {
         .neq('status', 'Closed');
       const activeIds = new Set((openJobs || []).map(j => j.company_id).filter(Boolean));
       const activeNames = new Set((openJobs || []).map(j => (j.company_name || '').toLowerCase().trim()));
+      // Optional explicit company-ids filter. Lets the UI restrict a
+      // mode='all' sweep to a specific subset (e.g. only companies
+      // discovered in the last tracker run) without losing the
+      // open-jobs / not-blocked / priority-ordering plumbing. When
+      // supplied we also force-restart, on the assumption that the
+      // caller knows exactly which companies they want re-processed.
+      const companyIdFilter: Set<string> | null = Array.isArray(body.companyIds) && body.companyIds.length > 0
+        ? new Set(body.companyIds.filter((x: any) => typeof x === 'string'))
+        : null;
+      const explicitIdsBypassResume = companyIdFilter !== null;
       targets = (companies || [])
         .filter(c => !c.is_blocked)
         .filter(c => activeIds.has(c.id) || activeNames.has((c.company_name || '').toLowerCase().trim()))
+        .filter(c => companyIdFilter === null || companyIdFilter.has(c.id))
         .map(c => ({ id: c.id, company_name: c.company_name, website: c.website }));
 
       // Resume-from-last: skip companies that ANY prior mode='all' run
@@ -722,7 +733,7 @@ Deno.serve(async (req) => {
       // retry doesn't silently rescan the earlier successful companies.
       // Lets the user re-click "Find All" after any failure and only
       // pay API costs for companies that still need work.
-      if (!forceRestart) {
+      if (!forceRestart && !explicitIdsBypassResume) {
         const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
         const { data: priorRuns } = await supabase.from('contact_runs')
           .select('id, per_item, started_at, status, items_processed')

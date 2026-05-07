@@ -801,14 +801,24 @@ const DesktopMarketingNewJobs: React.FC = () => {
   // Kick off a find-contacts run. The edge function returns a run_id
   // immediately and continues processing in the background. We then
   // poll the contact_runs row every 2s until it hits completed/failed.
-  const handleFindContacts = async (opts: { mode: 'all'; forceRestart?: boolean } | { mode: 'company'; companyId: string; companyName?: string }) => {
+  const handleFindContacts = async (opts:
+    | { mode: 'all'; forceRestart?: boolean; companyIds?: string[] }
+    | { mode: 'company'; companyId: string; companyName?: string }
+  ) => {
     const isAll = opts.mode === 'all';
     if (!isAll) setFindingContactsForId(opts.companyId);
     try {
       // forceRestart:true tells find-contacts to skip the 24h
       // resume-from-last lookup and process EVERY eligible company.
+      // companyIds (mode='all' only) restricts the sweep to a specific
+      // subset — used by "Find Contacts (New)" to target just the
+      // companies added in the most recent tracker run.
       const body = isAll
-        ? { mode: 'all', forceRestart: !!(opts as { forceRestart?: boolean }).forceRestart }
+        ? {
+            mode: 'all',
+            forceRestart: !!(opts as { forceRestart?: boolean }).forceRestart,
+            ...((opts as { companyIds?: string[] }).companyIds && { companyIds: (opts as { companyIds?: string[] }).companyIds }),
+          }
         : { mode: 'company', companyId: opts.companyId };
       const { data, error } = await supabase.functions.invoke('find-contacts', { body });
       if (error) {
@@ -1181,10 +1191,11 @@ const DesktopMarketingNewJobs: React.FC = () => {
   }, [companies, searchCompanies, filterHighPriorityCompanies, filterNewCompanies, lastRunStartedAt, filterCompanyCategory, showBlockedCompanies, companySortField, companySortDir]);
 
   const highPriorityCompanyCount = useMemo(() => companies.filter(c => c.is_high_priority).length, [companies]);
-  const newCompanyCount = useMemo(() => {
-    if (!lastRunStartedAt) return 0;
-    return companies.filter(c => c.created_at && c.created_at >= lastRunStartedAt).length;
+  const newCompanyIds = useMemo(() => {
+    if (!lastRunStartedAt) return [] as string[];
+    return companies.filter(c => c.created_at && c.created_at >= lastRunStartedAt).map(c => c.id).filter(Boolean);
   }, [companies, lastRunStartedAt]);
+  const newCompanyCount = newCompanyIds.length;
   const newContactCount = useMemo(() => {
     if (!lastRunId && !lastRunStartedAt) return 0;
     return contacts.filter(c => {
@@ -1896,6 +1907,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
             <JobsTabContent
               jobs={jobs}
               companies={companies}
+              contacts={contacts}
               loading={loading}
               onRefresh={loadData}
               lastRunId={lastRunId}
@@ -2607,8 +2619,29 @@ const DesktopMarketingNewJobs: React.FC = () => {
                   {findingContactsAll ? (
                     <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Finding contacts…</>
                   ) : (
-                    <><Users className="w-4 h-4 mr-2" /> Find Contacts</>
+                    <><Users className="w-4 h-4 mr-2" /> Find Contacts (All)</>
                   )}
+                </Button>
+                {/* Find Contacts for the companies added in the most
+                    recent tracker run only — restricts the sweep to
+                    the new-company id set so the user can quickly
+                    enrich just-discovered targets without paying
+                    SerpAPI/OpenAI for the entire active list. The
+                    edge fn auto-bypasses the 24h resume filter when
+                    companyIds is supplied. */}
+                <Button
+                  onClick={() => handleFindContacts({ mode: 'all', companyIds: newCompanyIds })}
+                  disabled={contactRunIsActive || newCompanyIds.length === 0}
+                  variant="outline"
+                  className="text-blue-700 border-blue-300 hover:bg-blue-50 hover:text-blue-800 hover:border-blue-400 disabled:opacity-50"
+                  title={!lastRunStartedAt
+                    ? 'No tracker runs yet'
+                    : newCompanyIds.length === 0
+                      ? 'No new companies in the most recent run'
+                      : `Find contacts for the ${newCompanyIds.length} compan${newCompanyIds.length === 1 ? 'y' : 'ies'} added in the most recent tracker run`}
+                >
+                  <Sparkles className="w-4 h-4 mr-2" />
+                  Find Contacts (New {newCompanyIds.length})
                 </Button>
                 {/* Escape hatch: bypass the 24h resume-from-last skip
                     set and re-scan every eligible company. Confirm

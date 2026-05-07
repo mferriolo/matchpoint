@@ -49,6 +49,7 @@ import { useToast } from '@/hooks/use-toast';
 interface JobsTabContentProps {
   jobs: any[];
   companies?: any[];
+  contacts?: any[];
   loading: boolean;
   onRefresh: () => void;
   // Most recent tracker run id + started_at — drives the "New (last run)"
@@ -181,7 +182,7 @@ const MAX_CONSECUTIVE_ERRORS = 10; // Stop if too many consecutive errors
 
 // ---- Main Component ----
 
-const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], loading, onRefresh, lastRunId = null, lastRunStartedAt = null }) => {
+const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], contacts = [], loading, onRefresh, lastRunId = null, lastRunStartedAt = null }) => {
   const { toast } = useToast();
   const [subTab, setSubTab] = useState<'open' | 'closed'>('open');
   const [searchTerm, setSearchTerm] = useState('');
@@ -413,6 +414,27 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       return false;
     }).length;
   }, [baseJobs, lastRunId, lastRunStartedAt]);
+
+  // Distinct contacts whose company appears in the currently-visible
+  // jobs (post-filter, post-search). Match by company_id first; fall
+  // back to company_name (lowercased) for legacy contact rows that
+  // never got a company_id assigned. Surfaced in the toolbar so the
+  // user can see how the filter narrows the addressable contact pool.
+  const filteredContactsCount = useMemo(() => {
+    if (!contacts.length || !sortedJobs.length) return 0;
+    const ids = new Set<string>();
+    const names = new Set<string>();
+    for (const j of sortedJobs) {
+      if (j.company_id) ids.add(String(j.company_id));
+      if (j.company_name) names.add(String(j.company_name).toLowerCase().trim());
+    }
+    let n = 0;
+    for (const c of contacts) {
+      if (c.company_id && ids.has(String(c.company_id))) { n++; continue; }
+      if (c.company_name && names.has(String(c.company_name).toLowerCase().trim())) { n++; }
+    }
+    return n;
+  }, [contacts, sortedJobs]);
 
   // Apply filters and search
   const filteredJobs = useMemo(() => {
@@ -1177,6 +1199,9 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
         <span className="text-sm text-gray-500">
           {sortedJobs.length} of {baseJobs.length} jobs
           {blockedInTab > 0 && !showBlocked && <span className="text-gray-400"> ({blockedInTab} blocked hidden)</span>}
+          {contacts.length > 0 && (
+            <span className="text-gray-400"> · {filteredContactsCount} contact{filteredContactsCount === 1 ? '' : 's'}</span>
+          )}
         </span>
 
         {/* Show / Hide Blocked toggle */}
