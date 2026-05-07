@@ -799,24 +799,18 @@ async function autoPrioritize(logFn: (step: string, msg: string) => void, progre
 // BATCH UPDATE SUMMARIES
 // ============================================================
 async function updateSummariesBatch(logFn: (step: string, msg: string) => void, progress?: ReturnType<typeof createProgressTracker>) {
+  // v86: replaced the per-row update loop with a single-statement RPC.
+  // The previous loop fired ~509 individual UPDATEs in 20-way Promise.all
+  // batches; one stalled request inside a batch (pool starvation, lock,
+  // flaky pooler conn) hung the entire step at the chunk boundary
+  // (e.g. 180/509). The RPC recomputes all rows in one SQL pass.
   logFn('updating_summaries', 'Updating company counts');
-  if (progress) await progress.updateStep('updating_summaries', { sub_step: 'Fetching all companies...' });
+  if (progress) await progress.updateStep('updating_summaries', { sub_step: 'Recomputing all company counts...' });
   try {
-    const { data: allCos } = await supabase.from('marketing_companies').select('id');
-    if (!allCos || allCos.length === 0) { logFn('updating_summaries', 'No companies to update'); return; }
-    if (progress) await progress.updateStep('updating_summaries', { sub_step: 'Counting open jobs per company...', items_total: allCos.length, items_processed: 0 });
-    const { data: openJobs } = await supabase.from('marketing_jobs').select('company_id, job_title').eq('status', 'Open').not('is_closed', 'eq', true);
-    const { data: allContacts } = await supabase.from('marketing_contacts').select('company_id');
-    const jobCountMap = new Map<string, number>(), mdCmoMap = new Map<string, boolean>(), contactCountMap = new Map<string, number>();
-    for (const j of (openJobs || [])) { if (!j.company_id) continue; jobCountMap.set(j.company_id, (jobCountMap.get(j.company_id) || 0) + 1); const title = (j.job_title || '').toLowerCase(); if (title.includes('medical director') || title.includes('chief medical')) mdCmoMap.set(j.company_id, true); }
-    for (const c of (allContacts || [])) { if (!c.company_id) continue; contactCountMap.set(c.company_id, (contactCountMap.get(c.company_id) || 0) + 1); }
-    const now = new Date().toISOString(); let updated = 0;
-    for (let i = 0; i < allCos.length; i += 20) {
-      const chunk = allCos.slice(i, i + 20);
-      await Promise.all(chunk.map(c => supabase.from('marketing_companies').update({ open_roles_count: jobCountMap.get(c.id) || 0, contact_count: contactCountMap.get(c.id) || 0, has_md_cmo: mdCmoMap.get(c.id) || false, updated_at: now }).eq('id', c.id)));
-      updated += chunk.length;
-      if (progress) await progress.updateStep('updating_summaries', { items_processed: updated, sub_step: `Updated ${updated}/${allCos.length} companies...` });
-    }
+    const { data, error } = await supabase.rpc('refresh_marketing_company_counts');
+    if (error) { logFn('updating_summaries', `ERROR: ${error.message}`); return; }
+    const updated = typeof data === 'number' ? data : 0;
+    if (progress) await progress.updateStep('updating_summaries', { items_total: updated, items_processed: updated, sub_step: `Updated ${updated} companies` });
     logFn('updating_summaries', `Updated ${updated} companies`);
   } catch (err) { logFn('updating_summaries', `ERROR: ${(err as Error).message}`); }
 }
