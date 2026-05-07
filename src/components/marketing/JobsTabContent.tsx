@@ -944,7 +944,45 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
 
     await Promise.all(Array.from({ length: SCRUB_CONCURRENCY }, () => worker()));
 
-    // Step 3: Cleanup queue
+    // Step 3: Actually close the jobs the AI flagged as DEAD. The edge
+    // function intentionally only writes url_status='flagged_dead' on
+    // a DEAD verdict (the comment in verify-job-links/index.ts cites
+    // false-positive concerns). The dialog has been promising "X jobs
+    // closed and moved to Closed Jobs" forever, but nothing was
+    // actually moving them. Do the bulk close here, post-verification,
+    // chunked at 100 ids/call to stay under PostgREST URL length
+    // limits. Skipped on abort so a half-complete run doesn't close
+    // the wrong subset.
+    let actuallyClosedCount = 0;
+    if (closedIds.length > 0 && !scrubAbortRef.current) {
+      setScrubCurrentJob(`Closing ${closedIds.length} jobs...`);
+      const closedAt = new Date().toISOString();
+      for (let i = 0; i < closedIds.length; i += 100) {
+        const chunk = closedIds.slice(i, i + 100);
+        const { error } = await supabase
+          .from('marketing_jobs')
+          .update({
+            is_closed: true,
+            status: 'Closed',
+            closed_at: closedAt,
+            closed_reason: 'Auto-scrubbed: no longer hiring (verify-job-links DEAD verdict)',
+            updated_at: closedAt,
+          })
+          .in('id', chunk);
+        if (error) {
+          console.error('Bulk close failed for chunk:', error.message);
+          toast({
+            title: 'Some jobs could not be closed',
+            description: error.message,
+            variant: 'destructive',
+          });
+          break;
+        }
+        actuallyClosedCount += chunk.length;
+      }
+    }
+
+    // Step 4: Cleanup queue
     if (scrubRunIdRef.current) {
       try {
         await supabase.functions.invoke('verify-job-links', {
@@ -959,6 +997,8 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
     // Done
     if (scrubAbortRef.current) {
       toast({ title: 'Scrub cancelled', description: `Stopped after processing ${processed} of ${totalJobs} jobs` });
+    } else if (actuallyClosedCount > 0) {
+      toast({ title: `${actuallyClosedCount} job${actuallyClosedCount === 1 ? '' : 's'} moved to Closed` });
     }
 
     setIsScrubbing(false);
