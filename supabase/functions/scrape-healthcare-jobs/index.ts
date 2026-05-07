@@ -1144,6 +1144,13 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         if (HEALTHCARE_BOARDS.length > 0 && effectiveRoles.length > 0) {
           telem.startStep('discover_healthcare_boards', HEALTHCARE_BOARDS.length);
           log('searching_sources', `Phase D: ${HEALTHCARE_BOARDS.length} healthcare-specific boards via SerpAPI site: queries`);
+          // v151: flush sub_step + in-memory logs *before* the board loop so
+          // the UI shows "Phase D: starting" instead of staying frozen on the
+          // last Phase B/C message ("84/84 queries…") for the duration of
+          // Phase D. Without this, `progress.updateStep` is never called
+          // between Phase C end and Phase A start, and a hang in Phase D
+          // looked indistinguishable from "Phase B/C still running."
+          await progress.updateStep('searching_sources', { sub_step: `Phase D: starting ${HEALTHCARE_BOARDS.length} healthcare-board queries...` });
           const foundJobsBefore = foundJobs.length;
           let dCalls = 0, dErrors = 0;
           const perBoardCounts: Record<string, number> = {};
@@ -1152,12 +1159,24 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             .map(r => `"${_cleanRoleLabel(r)}"`)
             .filter(s => s.length > 2)
             .join(' OR ');
+          // Per-phase wall-clock budget. The global 25-min cutoff is too
+          // coarse — a stuck Phase D could swallow 10+ min before the
+          // global guard kicks in on the *next* iteration. 3 min is plenty
+          // for 8 boards × ~18s SerpAPI timeout + courtesy pauses.
+          const PHASE_D_BUDGET_MS = 3 * 60 * 1000;
+          const phaseDStart = Date.now();
           if (roleClause) {
-            for (const board of HEALTHCARE_BOARDS) {
+            for (let bi = 0; bi < HEALTHCARE_BOARDS.length; bi++) {
+              const board = HEALTHCARE_BOARDS[bi];
               if (Date.now() - runStartMs > 25 * 60 * 1000) {
-                log('searching_sources', `Phase D: time budget exhausted after ${dCalls} board queries`);
+                log('searching_sources', `Phase D: global time budget exhausted after ${dCalls} board queries`);
                 break;
               }
+              if (Date.now() - phaseDStart > PHASE_D_BUDGET_MS) {
+                log('searching_sources', `Phase D: phase budget exhausted after ${dCalls} board queries (${(Date.now() - phaseDStart) / 1000}s)`);
+                break;
+              }
+              await progress.updateStep('searching_sources', { sub_step: `Phase D: board ${bi + 1}/${HEALTHCARE_BOARDS.length} (${board.split('.')[0]})...` });
               const before = foundJobs.length;
               const r = await searchSerpApiBroad(`(${roleClause}) site:${board}`);
               dCalls++;
@@ -1178,6 +1197,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           const breakdown = Object.entries(perBoardCounts).filter(([,n]) => n > 0).map(([b,n]) => `${b.split('.')[0]}:${n}`).join(' ') || '(no matches)';
           log('searching_sources', `Phase D complete: ${dAdded} found jobs added from ${dCalls} board queries [${breakdown}], ${dErrors} errors`);
           telem.endStep(dAdded, `${HEALTHCARE_BOARDS.length} boards × OR'd roles, ${dAdded} found jobs added [${breakdown}], ${dErrors} errors`);
+          await progress.updateStep('searching_sources', { sub_step: `Phase D complete: ${dAdded} jobs from ${dCalls} board queries` });
         }
 
         // ---------- Phase A: Direct career-page scraping (v148 reorder) ----------
@@ -1213,16 +1233,37 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           // value for the entire career-page sweep (~5 min in deep mode) and
           // the UI looks frozen even though scraping is progressing.
           const phaseAStartProcessed = processed;
+          // v151: also push a sub_step update so the UI flips to "Phase A:
+          // starting…" *before* the first batch resolves. Previously the bar
+          // stayed on the post-Phase-D message during the entire first batch
+          // (~20s in fast mode, longer in deep), making a slow first batch
+          // look like a hang.
           await progress.updateStep('searching_sources', {
             items_total: totalUnits + careerTargets.length,
+            sub_step: `Phase A: starting on ${careerTargets.length} career pages...`,
           });
           let cpFetched = 0, cpErrors = 0;
           const cpJobsBefore = foundJobs.length;
           const atsCounts: Record<string, number> = {};
-          const PHASE_A_CONCURRENCY = 5;
+          // v151: deep mode scrapes every priority company with a careers_url
+          // (up to 80), and one stuck site can block its 3-way batch slot for
+          // the full 20s timeout. Drop concurrency from 5→3 in deep mode so a
+          // burst of slow scrapes is less likely to saturate the worker's
+          // outbound connection budget. Fast mode keeps 5 (it scrapes far
+          // fewer pages).
+          const PHASE_A_CONCURRENCY = deepScan ? 3 : 5;
+          // Phase-level wall-clock budget. Without this, a pathologically
+          // slow ATS could chew through the global 25-min budget while
+          // never tripping the per-iteration check.
+          const PHASE_A_BUDGET_MS = (deepScan ? 8 : 4) * 60 * 1000;
+          const phaseAStart = Date.now();
           for (let i = 0; i < careerTargets.length; i += PHASE_A_CONCURRENCY) {
             if (Date.now() - runStartMs > 25 * 60 * 1000) {
               log('searching_sources', `Career-page time budget exhausted after ${cpFetched} fetches`);
+              break;
+            }
+            if (Date.now() - phaseAStart > PHASE_A_BUDGET_MS) {
+              log('searching_sources', `Phase A: phase budget exhausted after ${cpFetched} fetches (${Math.round((Date.now() - phaseAStart) / 1000)}s)`);
               break;
             }
             const batch = careerTargets.slice(i, i + PHASE_A_CONCURRENCY);
