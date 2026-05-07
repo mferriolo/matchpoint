@@ -178,6 +178,19 @@ const SCRUB_CONCURRENCY = 3;
 const INTER_JOB_DELAY_MS = 50;
 const MAX_CONSECUTIVE_ERRORS = 10; // Stop if too many consecutive errors
 
+// Compact duration formatter for the scrub progress panel. Renders ms
+// as "Xm YYs" once we cross the minute mark, "Ys" below, and just
+// returns "—" for non-finite or negative inputs (callers use that to
+// hide the label entirely until ETA is meaningful).
+function formatScrubDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const total = Math.round(ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  if (m === 0) return `${s}s`;
+  return `${m}m ${s.toString().padStart(2, '0')}s`;
+}
+
 
 
 // ---- Main Component ----
@@ -238,7 +251,18 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
   const [scrubDeadRunning, setScrubDeadRunning] = useState(0);
   const [scrubErrorRunning, setScrubErrorRunning] = useState(0);
   const [scrubUrlsFound, setScrubUrlsFound] = useState(0);
+  // Scrub timer: start time set when handleScrubDeadLinks fires, nowMs
+  // ticks every 1s while isScrubbing so the elapsed/ETA labels update
+  // live without re-rendering the whole table.
+  const [scrubStartMs, setScrubStartMs] = useState<number | null>(null);
+  const [scrubNowMs, setScrubNowMs] = useState<number>(Date.now());
   const scrubAbortRef = useRef(false);
+
+  useEffect(() => {
+    if (!isScrubbing) return;
+    const id = setInterval(() => setScrubNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [isScrubbing]);
 
   // Results dialog
   const [showResultsDialog, setShowResultsDialog] = useState(false);
@@ -807,6 +831,9 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
     setShowConfirmDialog(false);
     setIsScrubbing(true);
     scrubAbortRef.current = false;
+    const startedAt = Date.now();
+    setScrubStartMs(startedAt);
+    setScrubNowMs(startedAt);
 
     const jobsToCheck = openJobs;
     const totalJobs = jobsToCheck.length;
@@ -1354,8 +1381,29 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
             <p className="text-xs text-orange-600 truncate max-w-[60%]">
               Checking: {scrubCurrentJob}
             </p>
-            <span className="text-xs font-medium text-orange-700">
-              {scrubProgress} / {scrubTotal} jobs ({progressPercent}%)
+            <span className="text-xs font-medium text-orange-700 flex items-center gap-2 tabular-nums">
+              <span>{scrubProgress} / {scrubTotal} jobs ({progressPercent}%)</span>
+              {scrubStartMs !== null && (() => {
+                const elapsed = scrubNowMs - scrubStartMs;
+                // ETA only meaningful once we have a positive throughput
+                // estimate. Wait until 5 items have come back so an
+                // outlier first batch doesn't anchor a wildly wrong ETA.
+                const etaMs = scrubProgress >= 5 && scrubTotal > scrubProgress
+                  ? (elapsed / scrubProgress) * (scrubTotal - scrubProgress)
+                  : null;
+                return (
+                  <>
+                    <span className="text-orange-400">·</span>
+                    <span title="Elapsed">{formatScrubDuration(elapsed)}</span>
+                    {etaMs !== null && (
+                      <>
+                        <span className="text-orange-400">·</span>
+                        <span title="Estimated time remaining" className="text-orange-600">~{formatScrubDuration(etaMs)} left</span>
+                      </>
+                    )}
+                  </>
+                );
+              })()}
             </span>
           </div>
         </div>

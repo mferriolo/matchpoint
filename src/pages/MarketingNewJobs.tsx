@@ -46,6 +46,18 @@ function formatAgo(ms: number): string {
   return `${h}h ago`;
 }
 
+// Compact "Xm YYs" / "Ys" formatter for the live progress panels.
+// Matches the shape used by the Tracker so all three scans format
+// elapsed/ETA the same way.
+function formatRunDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const total = Math.round(ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  if (m === 0) return `${s}s`;
+  return `${m}m ${s.toString().padStart(2, '0')}s`;
+}
+
 
 
 
@@ -584,6 +596,15 @@ const DesktopMarketingNewJobs: React.FC = () => {
   const [showContactRunResult, setShowContactRunResult] = useState(false);
   const contactRunIsActive = !!contactRun && contactRun.status === 'running';
   const findingContactsAll = contactRunIsActive && contactRun?.mode === 'all';
+
+  // Live tick for the contact-run elapsed/ETA labels. 1s cadence, only
+  // active while a run is in flight so we don't churn renders forever.
+  const [contactRunNowMs, setContactRunNowMs] = useState<number>(Date.now());
+  useEffect(() => {
+    if (!contactRunIsActive) return;
+    const id = setInterval(() => setContactRunNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [contactRunIsActive]);
 
 
 
@@ -3063,6 +3084,30 @@ const DesktopMarketingNewJobs: React.FC = () => {
                           <span>{contactRun.duplicates_skipped} duplicates skipped</span>
                         </>
                       )}
+                      {contactRun.started_at && (() => {
+                        const startMs = new Date(contactRun.started_at).getTime();
+                        const elapsed = contactRunNowMs - startMs;
+                        const processed = contactRun.items_processed || 0;
+                        const total = contactRun.items_total || 0;
+                        // Defer ETA until at least 3 items resolve so a
+                        // slow first item doesn't anchor a wildly long
+                        // estimate; same idea as the scrub panel.
+                        const etaMs = processed >= 3 && total > processed
+                          ? (elapsed / processed) * (total - processed)
+                          : null;
+                        return (
+                          <>
+                            <span>·</span>
+                            <span title="Elapsed">{formatRunDuration(elapsed)}</span>
+                            {etaMs !== null && (
+                              <>
+                                <span>·</span>
+                                <span title="Estimated time remaining" className="text-emerald-700">~{formatRunDuration(etaMs)} left</span>
+                              </>
+                            )}
+                          </>
+                        );
+                      })()}
                       <button
                         onClick={async () => {
                           if (!contactRun?.id) return;
