@@ -761,23 +761,46 @@ export function OutreachWorkspace({
               <ul className="divide-y divide-gray-100">
                 {ranked.map((r, idx) => {
                   const active = r.c.id === selectedContactId;
+                  // The active message tab requires a specific channel:
+                  // email/followUpEmail → email, linkedin → linkedin_url,
+                  // coldCall → any phone. Contacts missing that channel
+                  // can still be picked (the user might want to draft now
+                  // and reach them later), but they're rendered in low
+                  // contrast so the recruiter sees who's actually
+                  // reachable for the message type they're composing.
+                  const hasChannel =
+                    messageType === 'email' || messageType === 'followUpEmail' ? !!r.c.email :
+                    messageType === 'linkedin' ? !!r.c.linkedin_url :
+                    messageType === 'coldCall' ? !!preferredPhone(r.c) :
+                    true;
+                  const channelLabel =
+                    messageType === 'email' || messageType === 'followUpEmail' ? 'email' :
+                    messageType === 'linkedin' ? 'LinkedIn' :
+                    messageType === 'coldCall' ? 'phone' :
+                    '';
                   return (
                     <li
                       key={r.c.id}
-                      className={`p-3 cursor-pointer ${active ? 'bg-red-50/60 border-l-2 border-l-[#911406]' : 'hover:bg-gray-50 border-l-2 border-l-transparent'}`}
+                      className={`p-3 cursor-pointer ${active ? 'bg-red-50/60 border-l-2 border-l-[#911406]' : 'hover:bg-gray-50 border-l-2 border-l-transparent'} ${!hasChannel && !active ? 'opacity-50' : ''}`}
                       onClick={() => setSelectedContactId(r.c.id)}
+                      title={!hasChannel ? `No ${channelLabel} on file — click to draft anyway` : undefined}
                     >
                       <div className="flex items-start gap-2">
                         <div className="flex flex-col items-center w-8 flex-shrink-0">
-                          <div className="text-[11px] font-bold text-gray-900">{r.score}</div>
-                          {idx === 0 && <Star className="w-3 h-3 text-amber-500 fill-amber-500" />}
+                          <div className={`text-[11px] font-bold ${hasChannel ? 'text-gray-900' : 'text-gray-400'}`}>{r.score}</div>
+                          {idx === 0 && <Star className={`w-3 h-3 ${hasChannel ? 'text-amber-500 fill-amber-500' : 'text-gray-300 fill-gray-300'}`} />}
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="text-sm font-semibold text-gray-900">{fullName(r.c)}</span>
+                            <span className={`text-sm font-semibold ${hasChannel ? 'text-gray-900' : 'text-gray-500'}`}>{fullName(r.c)}</span>
                             <StatusBadge status={r.c.outreach_status} />
+                            {!hasChannel && (
+                              <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">
+                                no {channelLabel}
+                              </span>
+                            )}
                           </div>
-                          {r.c.title && <div className="text-xs text-gray-700 truncate">{r.c.title}</div>}
+                          {r.c.title && <div className={`text-xs truncate ${hasChannel ? 'text-gray-700' : 'text-gray-400'}`}>{r.c.title}</div>}
                           <div className="flex items-center gap-1 mt-1.5 text-[11px] text-gray-500">
                             {r.c.email && <span title={r.c.email}><Mail className="w-3 h-3" /></span>}
                             {r.c.linkedin_url && <span><Linkedin className="w-3 h-3" /></span>}
