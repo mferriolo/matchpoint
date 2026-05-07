@@ -871,17 +871,33 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
     // STEP 1: LOAD
     await progress.startStep('loading', 'Loading existing master dataset...');
     log('loading', 'Loading existing master dataset');
-    const { data: mJ } = await supabase.from('marketing_jobs').select('*');
+    // v153: only load OPEN, non-closed jobs into the dedup map. Closed
+    // jobs are excluded — they're a large fraction of marketing_jobs and
+    // we only need the dedup map to recognize "is this listing still
+    // active in our system?". Re-discovering a closed job is fine: the
+    // DB unique index on dedup_key (uq_marketing_jobs_dedup_key) catches
+    // it at insert time and ignoreDuplicates silently skips. We also
+    // only select the four columns that feed the dedup key + the id —
+    // no point pulling 1MB of description text into memory.
+    const { data: mJ } = await supabase
+      .from('marketing_jobs')
+      .select('id, company_name, job_title, city, state')
+      .eq('status', 'Open')
+      .not('is_closed', 'eq', true);
     const { data: mC } = await supabase.from('marketing_companies').select('*');
     const { data: mT } = await supabase.from('marketing_contacts').select('*');
     const allJ = mJ || [], allC = mC || [], allT = mT || [];
-    if (allJ.length > 0) await supabase.from('marketing_jobs').update({ is_net_new: false }).eq('is_net_new', true);
-    log('loading', `Loaded ${allJ.length} jobs, ${allC.length} companies, ${allT.length} contacts`);
-    await progress.completeStep('loading', `Loaded ${allJ.length} jobs, ${allC.length} companies, ${allT.length} contacts`);
+    // is_net_new reset is unconditional — a fresh run wipes the badge on
+    // every previously-net-new row regardless of how many open jobs we
+    // loaded. The condition was "if (allJ.length > 0)" but that was
+    // load-coupled in a way that no longer makes sense now that allJ is
+    // a filtered subset (and the equality predicate already targets just
+    // the rows that need the update).
+    await supabase.from('marketing_jobs').update({ is_net_new: false }).eq('is_net_new', true);
+    log('loading', `Loaded ${allJ.length} open jobs, ${allC.length} companies, ${allT.length} contacts`);
+    await progress.completeStep('loading', `Loaded ${allJ.length} open jobs, ${allC.length} companies, ${allT.length} contacts`);
 
-    // jKeys intentionally includes blocked jobs so that the dedup check
-    // catches AI re-discoveries of jobs the user explicitly blocked.
-    // We also retain the row id alongside the dk so that, when a dupe
+    // We retain the row id alongside the dk so that, when a dupe
     // hits, we can mark that row as last_seen_at = now() at end of run
     // (drives the recency component of priority_score). Without this,
     // a long-running listing would never refresh its recency score.
@@ -896,13 +912,14 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
     const reseenIds = new Set<string>();
     const coMap = new Map(allC.map(c => [(c.company_name||'').toLowerCase().trim(), c]));
     const ctKeys = new Set(allT.map(c => `${(c.first_name||'').toLowerCase().trim()}|${(c.last_name||'').toLowerCase().trim()}|${(c.company_name||'').toLowerCase().trim()}`));
-    // Blocked items the user has explicitly excluded from future scraping.
-    // Used to skip URL revalidation, drop AI-found jobs whose company
-    // is blocked, and prune blocked companies from Pass 2 / Pass 3.
-    const blockedJobIds = new Set(allJ.filter(j => j.is_blocked).map(j => j.id));
+    // Blocked-company names guard the discovery + insertion paths.
+    // (Job-level blocks are enforced by the DB unique index on dedup_key
+    // — if a blocked job is re-discovered, ignoreDuplicates skips it
+    // silently. We no longer maintain a Set of blocked job ids since it
+    // was only ever surfaced in a log line.)
     const blockedCompanyNames = new Set(allC.filter(c => c.is_blocked).map(c => (c.company_name||'').toLowerCase().trim()));
     const recSrc = allC.filter(c => (c.is_recurring_source || c.careers_url || c.job_board_url) && !c.is_blocked);
-    log('loading', `${recSrc.length} recurring company career sources, ${blockedJobIds.size} jobs / ${blockedCompanyNames.size} companies blocked`);
+    log('loading', `${recSrc.length} recurring company career sources, ${blockedCompanyNames.size} companies blocked`);
 
     // (Former STEP 2: URL VALIDATION removed in v78 — v75 telemetry showed
     // it was a no-op. A real fetch()-based URL checker can be added later
