@@ -180,20 +180,26 @@ async function handleProcessNext(body: any): Promise<Response> {
   const start = Date.now();
   const runId = body.run_id;
   if (!runId) return jsonResp({ error: 'run_id required' }, 400);
-  // Server-side batch parallelism. Each item still spends ~5–10s on
-  // SerpAPI + URL probes + OpenAI; running them concurrently inside one
-  // edge invocation cuts total wall-clock by ~batchSize× without adding
-  // browser-side complexity. Capped at 8 to stay under the function's
-  // wall-clock budget and avoid SerpAPI/OpenAI bursts.
-  const batchSize = Math.min(Math.max(Number(body.batch_size) || 1, 1), 8);
+  // v2: cap raised 8→16 — each per-item branch (HEAD + SerpAPI + web
+  // SerpAPI) now runs in parallel inside processOneQueueItem, so the
+  // wall-clock per item is ~half what it used to be and we have budget
+  // for more parallel items per call. The client also fans out 3
+  // concurrent process-next loops which is only safe because the claim
+  // step below is now atomic via SQL RPC.
+  const batchSize = Math.min(Math.max(Number(body.batch_size) || 1, 1), 16);
   const sb = getSupabaseClient();
 
-  const { data: pending, error: fetchErr } = await sb.from('job_verification_queue').select('*').eq('run_id', runId).eq('status', 'pending').order('created_at', { ascending: true }).limit(batchSize);
+  // Atomic batch claim. claim_verification_queue_batch wraps the
+  // SELECT + UPDATE in a single statement with FOR UPDATE SKIP LOCKED,
+  // so two concurrent callers can't both grab the same rows and burn
+  // double the SerpAPI + OpenAI budget. (Migration:
+  // 20260507130000_claim_verification_queue_batch.sql.)
+  const { data: pending, error: fetchErr } = await sb.rpc('claim_verification_queue_batch', {
+    p_run_id: runId,
+    p_batch_size: batchSize,
+  });
   if (fetchErr) return jsonResp({ error: fetchErr.message }, 500);
   if (!pending?.length) return jsonResp({ done: true, message: 'No more pending jobs' });
-
-  const queueIds = pending.map((p: any) => p.id);
-  await sb.from('job_verification_queue').update({ status: 'processing', started_at: new Date().toISOString() }).in('id', queueIds);
   log('INFO', 'process', `Claimed ${pending.length} item${pending.length === 1 ? '' : 's'}`);
 
   const results = await Promise.all(pending.map((qi: any) => processOneQueueItem(sb, qi)));
@@ -216,31 +222,37 @@ async function processOneQueueItem(sb: any, qi: any): Promise<any> {
   const city = qi.city || '', state = qi.state || '';
 
   try {
-    // Check existing URL
-    let existingAlive = false;
+    // v2: HEAD existing-URL probe runs in parallel with the SerpAPI
+    // Google Jobs query — they're independent and were the dominant
+    // wait per item. Roughly halves wall-clock per queue item.
+    const serpKey = Deno.env.get("SERP_API_KEY");
+    let searchMode = serpKey ? 'serp_api+ai' : 'ai_only';
+
+    const headProbe: Promise<{ alive: boolean; status?: number }> = existingUrl?.startsWith('http')
+      ? checkUrlAlive(existingUrl).catch(() => ({ alive: false }))
+      : Promise.resolve({ alive: false });
+    const jobsProbe: Promise<SerpResult | null> = serpKey
+      ? searchSerpApiJobs(company, jobTitle, city, state).catch(() => null)
+      : Promise.resolve(null);
+
+    const [urlCheck, serpResult] = await Promise.all([headProbe, jobsProbe]);
+    const existingAlive = urlCheck.alive;
     if (existingUrl?.startsWith('http')) {
-      const uc = await checkUrlAlive(existingUrl);
-      existingAlive = uc.alive;
-      log('INFO', 'process:url', `Existing URL ${existingAlive ? 'ALIVE' : 'DEAD'} (${uc.status})`);
+      log('INFO', 'process:url', `Existing URL ${existingAlive ? 'ALIVE' : 'DEAD'} (${urlCheck.status ?? '?'})`);
     }
 
-    // SerpAPI search
-    const serpKey = Deno.env.get("SERP_API_KEY");
-    let serpResult: SerpResult | null = null;
     let serpWebUrls: string[] = [];
     let serpAnalysis: ReturnType<typeof analyzeSerpResults> | null = null;
-    let searchMode = 'ai_only';
 
-    if (serpKey) {
-      searchMode = 'serp_api+ai';
-      serpResult = await searchSerpApiJobs(company, jobTitle, city, state);
-      if (serpResult.success && serpResult.jobs.length > 0) {
-        serpAnalysis = analyzeSerpResults(serpResult.jobs, company, jobTitle);
-        log('INFO', 'process:serp', `Analysis: found=${serpAnalysis.companyFound}, exact=${serpAnalysis.exactMatch}, matching=${serpAnalysis.matching.length}`);
-      } else {
-        const webR = await searchSerpApiWeb(company, jobTitle);
-        if (webR.success) serpWebUrls = webR.urls;
-      }
+    if (serpResult?.success && serpResult.jobs.length > 0) {
+      serpAnalysis = analyzeSerpResults(serpResult.jobs, company, jobTitle);
+      log('INFO', 'process:serp', `Analysis: found=${serpAnalysis.companyFound}, exact=${serpAnalysis.exactMatch}, matching=${serpAnalysis.matching.length}`);
+    } else if (serpKey && (!serpResult?.success || serpResult.jobs.length === 0)) {
+      // Web fallback only fires when the Jobs query came back empty.
+      // Sequential by design — there's no point starting it before we
+      // know the Jobs query missed.
+      const webR = await searchSerpApiWeb(company, jobTitle).catch(() => null);
+      if (webR?.success) serpWebUrls = webR.urls;
     }
 
     // Build AI prompt with search context

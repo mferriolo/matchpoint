@@ -167,9 +167,13 @@ interface ScrubSummary {
 // Edge function processes BATCH_SIZE items in parallel per call. We
 // keep INTER_JOB_DELAY_MS small — it exists only to yield to the event
 // loop / UI, since rate-limiting is now handled by the function-side
-// concurrency cap. With BATCH_SIZE=8 a 100-job sweep does ~13 calls,
-// each taking ~5–10s in parallel rather than 100 sequential calls.
-const SCRUB_BATCH_SIZE = 8;
+// concurrency cap. With BATCH_SIZE=16 + 3 concurrent client workers a
+// 200-job sweep does ~5 round-trip waves rather than 25 sequential
+// calls. Atomic claim via claim_verification_queue_batch RPC means
+// concurrent workers can't double-charge SerpAPI/OpenAI on the same
+// row.
+const SCRUB_BATCH_SIZE = 16;
+const SCRUB_CONCURRENCY = 3;
 const INTER_JOB_DELAY_MS = 50;
 const MAX_CONSECUTIVE_ERRORS = 10; // Stop if too many consecutive errors
 
@@ -843,96 +847,102 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
       return;
     }
 
-    // Step 2: Process jobs by calling process-next in a loop. Each call
-    // claims SCRUB_BATCH_SIZE pending items and runs them in parallel
-    // server-side, so one HTTP round trip handles a batch of jobs.
+    // Step 2: SCRUB_CONCURRENCY worker loops fan out concurrent
+    // process-next calls. The DB RPC behind process-next uses
+    // FOR UPDATE SKIP LOCKED so concurrent workers atomically claim
+    // disjoint batches — no double-processing, no double-charging.
     let processed = 0;
-    while (!scrubAbortRef.current) {
-      try {
-        const { data, error } = await supabase.functions.invoke('verify-job-links', {
-          body: { action: 'process-next', run_id: scrubRunIdRef.current, batch_size: SCRUB_BATCH_SIZE }
-        });
+    let done = false;
+    let consecutiveErrorsShared = 0;
 
-        if (error) {
-          console.error('process-next error:', error);
+    const tallyResult = (result: any) => {
+      processed++;
+      allResults.push(result);
+      setScrubBatchNum(processed);
+      setScrubCurrentJob(`${result.company_name || 'Unknown'} — ${result.job_title || 'Unknown'}`);
+
+      if (result.source === 'error' || result.source === 'ai_failed' || result.source === 'config_error') {
+        errorCount++;
+        setScrubErrorRunning(errorCount);
+      } else if (result.is_live) {
+        liveCount++;
+        setScrubLiveRunning(liveCount);
+        if (result.found_url) {
+          urlsFoundCount++;
+          setScrubUrlsFound(urlsFoundCount);
+        }
+      } else {
+        deadCount++;
+        setScrubDeadRunning(deadCount);
+        closedIds.push(result.id);
+      }
+      setScrubProgress(processed);
+    };
+
+    const worker = async () => {
+      while (!done && !scrubAbortRef.current) {
+        try {
+          const { data, error } = await supabase.functions.invoke('verify-job-links', {
+            body: { action: 'process-next', run_id: scrubRunIdRef.current, batch_size: SCRUB_BATCH_SIZE }
+          });
+
+          if (error) {
+            console.error('process-next error:', error);
+            errorCount++;
+            consecutiveErrorsShared++;
+            setScrubErrorRunning(errorCount);
+
+            if (consecutiveErrorsShared >= MAX_CONSECUTIVE_ERRORS) {
+              toast({
+                title: 'Scrub stopped',
+                description: `Too many consecutive errors (${MAX_CONSECUTIVE_ERRORS}). Stopping.`,
+                variant: 'destructive'
+              });
+              done = true;
+              return;
+            }
+            await new Promise(r => setTimeout(r, 2000));
+            continue;
+          }
+
+          if (data?.done) {
+            done = true;
+            return;
+          }
+
+          consecutiveErrorsShared = 0;
+
+          const batchResults: any[] = Array.isArray(data?.results)
+            ? data.results
+            : (data?.result ? [data.result] : []);
+
+          for (const result of batchResults) tallyResult(result);
+
+          // Tiny yield to keep the UI responsive between waves.
+          if (!scrubAbortRef.current) {
+            await new Promise(r => setTimeout(r, INTER_JOB_DELAY_MS));
+          }
+        } catch (err: any) {
+          console.error('Error in process-next worker:', err);
           errorCount++;
-          consecutiveErrors++;
+          consecutiveErrorsShared++;
           setScrubErrorRunning(errorCount);
 
-          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          if (consecutiveErrorsShared >= MAX_CONSECUTIVE_ERRORS) {
             toast({
               title: 'Scrub stopped',
-              description: `Too many consecutive errors (${MAX_CONSECUTIVE_ERRORS}). Stopping.`,
+              description: `Too many consecutive errors. Stopping.`,
               variant: 'destructive'
             });
-            break;
+            done = true;
+            return;
           }
-          // Brief delay before retry
           await new Promise(r => setTimeout(r, 2000));
-          continue;
         }
-
-        // Check if we're done
-        if (data?.done) {
-          console.log('All jobs processed');
-          break;
-        }
-
-        // Reset consecutive error counter on success
-        consecutiveErrors = 0;
-
-        // results[] (batch) is the new shape; result (singleton) is kept
-        // for back-compat in case the caller is on an older edge build.
-        const batchResults: any[] = Array.isArray(data?.results)
-          ? data.results
-          : (data?.result ? [data.result] : []);
-
-        for (const result of batchResults) {
-          processed++;
-          allResults.push(result);
-          setScrubBatchNum(processed);
-          setScrubCurrentJob(`${result.company_name || 'Unknown'} — ${result.job_title || 'Unknown'}`);
-
-          if (result.source === 'error' || result.source === 'ai_failed' || result.source === 'config_error') {
-            errorCount++;
-            setScrubErrorRunning(errorCount);
-          } else if (result.is_live) {
-            liveCount++;
-            setScrubLiveRunning(liveCount);
-            if (result.found_url) {
-              urlsFoundCount++;
-              setScrubUrlsFound(urlsFoundCount);
-            }
-          } else {
-            deadCount++;
-            setScrubDeadRunning(deadCount);
-            closedIds.push(result.id);
-          }
-        }
-
-        setScrubProgress(processed);
-
-        // Tiny yield so the UI can repaint between batches.
-        if (!scrubAbortRef.current) {
-          await new Promise(r => setTimeout(r, INTER_JOB_DELAY_MS));
-        }
-      } catch (err: any) {
-        console.error('Error in process-next loop:', err);
-        errorCount++;
-        consecutiveErrors++;
-        setScrubErrorRunning(errorCount);
-
-        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-          toast({
-            title: 'Scrub stopped',
-            description: `Too many consecutive errors. Stopping.`,
-            variant: 'destructive'
-          });
-          break;
-        }
-        await new Promise(r => setTimeout(r, 2000));
       }
-    }
+    };
+
+    await Promise.all(Array.from({ length: SCRUB_CONCURRENCY }, () => worker()));
 
     // Step 3: Cleanup queue
     if (scrubRunIdRef.current) {
@@ -1140,7 +1150,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
           {showBlocked ? 'Hide blocked' : 'Show blocked'}
         </button>
 
-        {/* Scrub Dead Links Button */}
+        {/* Scrub Closed Jobs Button */}
         {subTab === 'open' && (
           <Button
             variant="outline"
@@ -1150,7 +1160,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
             className="gap-1.5 text-orange-700 border-orange-300 hover:bg-orange-50 hover:text-orange-800 hover:border-orange-400"
           >
             <Trash2 className="w-4 h-4" />
-            Scrub Dead Links
+            Scrub Closed Jobs
           </Button>
         )}
 
@@ -1628,7 +1638,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], l
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Trash2 className="w-5 h-5 text-orange-600" />
-              Scrub Dead Links
+              Scrub Closed Jobs
             </DialogTitle>
             <DialogDescription>
               This will verify all <strong>{openJobs.length} open jobs</strong> using AI analysis and URL verification.
