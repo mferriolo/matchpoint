@@ -439,27 +439,6 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
     }).length;
   }, [baseJobs, lastRunId, lastRunStartedAt]);
 
-  // Distinct contacts whose company appears in the currently-visible
-  // jobs (post-filter, post-search). Match by company_id first; fall
-  // back to company_name (lowercased) for legacy contact rows that
-  // never got a company_id assigned. Surfaced in the toolbar so the
-  // user can see how the filter narrows the addressable contact pool.
-  const filteredContactsCount = useMemo(() => {
-    if (!contacts.length || !sortedJobs.length) return 0;
-    const ids = new Set<string>();
-    const names = new Set<string>();
-    for (const j of sortedJobs) {
-      if (j.company_id) ids.add(String(j.company_id));
-      if (j.company_name) names.add(String(j.company_name).toLowerCase().trim());
-    }
-    let n = 0;
-    for (const c of contacts) {
-      if (c.company_id && ids.has(String(c.company_id))) { n++; continue; }
-      if (c.company_name && names.has(String(c.company_name).toLowerCase().trim())) { n++; }
-    }
-    return n;
-  }, [contacts, sortedJobs]);
-
   // Apply filters and search
   const filteredJobs = useMemo(() => {
     return baseJobs.filter((j: any) => {
@@ -559,6 +538,30 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
       return sortDir === 'asc' ? cmp : -cmp;
     });
   }, [filteredJobs, sortField, sortDir]);
+
+  // Distinct contacts whose company appears in the currently-visible
+  // jobs (post-filter, post-search). Match by company_id first; fall
+  // back to company_name (lowercased) for legacy contact rows that
+  // never got a company_id assigned. Surfaced in the toolbar so the
+  // user can see how the filter narrows the addressable contact pool.
+  // Must be declared AFTER sortedJobs — placing it earlier put
+  // sortedJobs in the TDZ at first render and crashed the tab with
+  // "Cannot access before initialization".
+  const filteredContactsCount = useMemo(() => {
+    if (!contacts.length || !sortedJobs.length) return 0;
+    const ids = new Set<string>();
+    const names = new Set<string>();
+    for (const j of sortedJobs) {
+      if (j.company_id) ids.add(String(j.company_id));
+      if (j.company_name) names.add(String(j.company_name).toLowerCase().trim());
+    }
+    let n = 0;
+    for (const c of contacts) {
+      if (c.company_id && ids.has(String(c.company_id))) { n++; continue; }
+      if (c.company_name && names.has(String(c.company_name).toLowerCase().trim())) { n++; }
+    }
+    return n;
+  }, [contacts, sortedJobs]);
 
   // Block-aware derived counts and select-all helper.
   const blockedInTab = useMemo(() => baseJobs.filter(j => j.is_blocked).length, [baseJobs]);
