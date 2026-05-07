@@ -190,15 +190,20 @@ Deno.serve(async (req) => {
 
     // Hard wall-clock cap per OpenAI call. Without this, a slow
     // upstream response can stretch into minutes — and a retry on
-    // failure compounds the wait. With a 30s fetch-level abort, the
-    // worst case is bounded at ~30s for a single call (or ~35s if we
-    // retry after a fast non-timeout failure like JSON.parse).
+    // failure compounds the wait. v2: bumped 30s→45s after observing
+    // gpt-4o-mini occasionally taking ~25-30s on prompts with long
+    // company_description + job_description payloads. The earlier 30s
+    // ceiling caused HTTP 502 "Generation failed" toasts on perfectly
+    // valid jobs. Client guard in OutreachWorkspace was raised to 55s
+    // in lockstep so the function can return its clean 502 before the
+    // browser bails.
+    const OPENAI_TIMEOUT_MS = 45_000;
     const callOpenAI = async (): Promise<
       | { ok: true; parsed: ScriptOutputs }
       | { ok: false; status: number; error: string; raw?: string; transient: boolean }
     > => {
       const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), 30_000);
+      const timer = setTimeout(() => ac.abort(), OPENAI_TIMEOUT_MS);
       let r: Response;
       try {
         r = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -208,12 +213,13 @@ Deno.serve(async (req) => {
           body: JSON.stringify({
             model: 'gpt-4o-mini',
             messages: [{ role: 'user', content: prompt }],
-            // 3000. The 4-output JSON envelope (cold call + email +
-            // linkedin + follow-up email) sits well under this; the
-            // headroom absorbs long descriptions / sender notes /
-            // hard sender-identity contract lines without truncating
-            // the JSON mid-string.
-            max_tokens: 3000,
+            // 1500. The 4-output JSON envelope (cold call + email +
+            // linkedin + follow-up email) lands at ~600 tokens in
+            // practice; 1500 gives 2.5× headroom while keeping
+            // worst-case generation time well under the timeout. The
+            // old 3000 ceiling was letting verbose runs drag past the
+            // wall-clock cap.
+            max_tokens: 1500,
             temperature: 0.7,
             response_format: { type: 'json_object' },
           }),
@@ -223,9 +229,9 @@ Deno.serve(async (req) => {
         const aborted = e?.name === 'AbortError';
         return {
           ok: false, status: 0,
-          error: aborted ? 'OpenAI request timed out after 30s' : `Fetch error: ${e?.message || String(e)}`,
+          error: aborted ? `OpenAI request timed out after ${Math.round(OPENAI_TIMEOUT_MS / 1000)}s` : `Fetch error: ${e?.message || String(e)}`,
           // Do NOT retry timeouts — if the upstream is slow, the
-          // retry will just take another 30s.
+          // retry will just blow another full timeout.
           transient: !aborted && false,
         };
       }
