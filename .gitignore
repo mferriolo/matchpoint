@@ -12,6 +12,14 @@ dist
 dist-ssr
 *.local
 
+# Claude Code session files — settings.local.json contains long-lived
+# bearer tokens captured from CLI examples; must not be committed.
+.claude/
+
+# Supabase local CLI state
+supabase/.temp/
+supabase/.branches/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

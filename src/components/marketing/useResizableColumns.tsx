@@ -59,6 +59,23 @@ export function useResizableColumns(
     try { window.localStorage.setItem(persistKey, JSON.stringify(widths)); } catch {}
   }, [widths, persistKey]);
 
+  // Track the active drag's listeners so unmount can detach them. If the
+  // user starts a drag and then navigates / closes the tab before the
+  // mouseup, the listeners (and the body-level userSelect/cursor styles)
+  // would otherwise stay forever and the page would be stuck with no
+  // text selection and a col-resize cursor.
+  const activeDragRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
+  useEffect(() => () => {
+    const drag = activeDragRef.current;
+    if (drag) {
+      window.removeEventListener('mousemove', drag.onMove);
+      window.removeEventListener('mouseup', drag.onUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      activeDragRef.current = null;
+    }
+  }, []);
+
   const startResize = useCallback((key: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -76,11 +93,13 @@ export function useResizableColumns(
       window.removeEventListener('mouseup', onUp);
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
+      activeDragRef.current = null;
     };
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'col-resize';
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+    activeDragRef.current = { onMove, onUp };
   }, [widths]);
 
   const reset = useCallback(() => {

@@ -173,6 +173,7 @@ Deno.serve(async (req) => {
               notes: `From Crelate (API v3). Company: ${cc.Name || searchName}`
             });
             if (!error) { totalAdded++; added++; existingCrelateIds.add(cid); existingKeys.add(dk); }
+            else console.error(`marketing_contacts insert failed for ${fn} ${ln} @ ${company.company_name}: ${error.message}${(error as any).code ? ` [${(error as any).code}]` : ''}`);
             await delay(500);
           }
           await delay(500);
@@ -181,7 +182,7 @@ Deno.serve(async (req) => {
         // Also direct contact search
         const directRes = await crelateGet('/contacts', crelateApiKey, { search: searchName, take: '20' });
         const directContacts = directRes?.Data || [];
-        
+
         for (const contact of directContacts) {
           const cid = contact.Id;
           if (!cid || existingCrelateIds.has(cid)) continue;
@@ -217,6 +218,7 @@ Deno.serve(async (req) => {
             notes: `From Crelate contact search (API v3).`
           });
           if (!error) { totalAdded++; added++; existingCrelateIds.add(cid); existingKeys.add(dk); }
+          else console.error(`marketing_contacts insert failed for ${fn} ${ln} @ ${company.company_name}: ${error.message}${(error as any).code ? ` [${(error as any).code}]` : ''}`);
           await delay(500);
         }
       } catch (e) {

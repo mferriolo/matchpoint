@@ -379,9 +379,9 @@ export function OutreachWorkspace({
   const [notes, setNotes] = useState('');
   const [avoidLanguage, setAvoidLanguage] = useState('');
 
-  const reloadContacts = async (j: ScriptJobInput) => {
+  const reloadContacts = async (j: ScriptJobInput, isCancelled: () => boolean) => {
     if (!j.company_id && !j.company_name) {
-      setContacts([]);
+      if (!isCancelled()) setContacts([]);
       return;
     }
     setLoadingContacts(true);
@@ -389,6 +389,12 @@ export function OutreachWorkspace({
     if (j.company_id) q = q.eq('company_id', j.company_id);
     else q = q.eq('company_name', j.company_name);
     const { data } = await q;
+    // Guard against the race where the user picked a different job
+    // before this query resolved — without this, an older fetch could
+    // resolve last and overwrite contacts with the wrong company's
+    // people, leaving the drawer showing stale rows under a current
+    // job's title.
+    if (isCancelled()) return;
     setContacts((data || []) as ContactRow[]);
     setLoadingContacts(false);
   };
@@ -403,7 +409,9 @@ export function OutreachWorkspace({
     setEditedFollowUpSubject('');
     setEditedFollowUpBody('');
     setMessageType('email');
-    reloadContacts(job);
+    let cancelled = false;
+    reloadContacts(job, () => cancelled);
+    return () => { cancelled = true; };
   }, [job?.id]);
 
   const ranked = useMemo<ScoredContact[]>(() => {

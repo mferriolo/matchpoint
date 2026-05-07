@@ -42,11 +42,34 @@ const HUNTER_BASE = "https://api.hunter.io/v2";
 const SERP_BASE = "https://serpapi.com/search.json";
 const LUSHA_BASE = "https://api.lusha.com";
 
+// Bounded fetch helper. The original code wrapped the JS-level promise
+// in withTimeout but never wired an AbortController into the underlying
+// fetch — meaning the socket kept reading on the upstream until TCP
+// timed out (60s+). With many concurrent enrichContact calls, the
+// runtime ran out of sockets and the function appeared hung. This
+// aborts the underlying fetch, properly releasing the connection.
+async function fetchWithTimeout(input: string, init: RequestInit & { timeoutMs?: number } = {}): Promise<Response> {
+  const { timeoutMs = 12_000, ...rest } = init;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...rest, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // Target Google result pages we'll read. LinkedIn is tried first
 // because it's the most reliable single source for a hiring contact.
 async function serpSearch(query: string, serpKey: string, num = 10): Promise<any[]> {
   const url = `${SERP_BASE}?q=${encodeURIComponent(query)}&api_key=${encodeURIComponent(serpKey)}&num=${num}&engine=google`;
-  const r = await fetch(url);
+  let r: Response;
+  try {
+    r = await fetchWithTimeout(url, { timeoutMs: 12_000 });
+  } catch (e) {
+    console.warn(`SerpAPI fetch failed for "${query}":`, (e as Error).message);
+    return [];
+  }
   if (!r.ok) {
     console.warn(`SerpAPI ${r.status} for "${query}"`);
     return [];
@@ -92,9 +115,10 @@ async function lushaEnrich(
   if (companyName) qp.set('companyName', companyName);
   if (linkedinUrl && linkedinUrl.includes('linkedin.com/in/')) qp.set('linkedinUrl', linkedinUrl);
   try {
-    const r = await fetch(`${LUSHA_BASE}/v2/person?${qp.toString()}`, {
+    const r = await fetchWithTimeout(`${LUSHA_BASE}/v2/person?${qp.toString()}`, {
       method: 'GET',
       headers: { 'api_key': lushaKey, 'Accept': 'application/json' },
+      timeoutMs: 12_000,
     });
     const txt = await r.text();
     attempts.push(`GET /v2/person?${qp.toString()} → ${r.status}: ${txt.slice(0, 200)}`);
@@ -118,10 +142,11 @@ async function lushaEnrich(
     const contactEntry: Record<string, any> = { contactId: '0', fullName };
     if (companyName) contactEntry.companies = [{ name: companyName }];
     try {
-      const r = await fetch(`${LUSHA_BASE}/v2/person`, {
+      const r = await fetchWithTimeout(`${LUSHA_BASE}/v2/person`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ contacts: [contactEntry] }),
+        timeoutMs: 12_000,
       });
       const txt = await r.text();
       attempts.push(`POST /v2/person [bulk] → ${r.status}: ${txt.slice(0, 150)}`);
@@ -241,7 +266,7 @@ Return a JSON object with ONLY fields that are DIRECTLY VERIFIABLE in the snippe
 Return JSON only, no commentary. Example: {"title":"Chief Medical Officer","linkedin_url":"https://linkedin.com/in/janedoe"}
 Return {} if you can't verify anything.`;
   try {
-    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    const r = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
       body: JSON.stringify({
@@ -251,6 +276,7 @@ Return {} if you can't verify anything.`;
         max_tokens: 500,
         response_format: { type: 'json_object' },
       }),
+      timeoutMs: 15_000,
     });
     const d = await r.json();
     const text = d.choices?.[0]?.message?.content || '{}';
@@ -305,15 +331,22 @@ async function apolloMatch(
   if (linkedinUrl && linkedinUrl.includes('linkedin.com/in/')) body.linkedin_url = linkedinUrl;
   if (domain) body.domain = domain;
   else if (companyName) body.organization_name = companyName;
-  const r = await fetch(`${APOLLO_BASE}/people/match`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Cache-Control': 'no-cache',
-      'X-Api-Key': apolloKey,
-    },
-    body: JSON.stringify(body),
-  });
+  let r: Response;
+  try {
+    r = await fetchWithTimeout(`${APOLLO_BASE}/people/match`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+        'X-Api-Key': apolloKey,
+      },
+      body: JSON.stringify(body),
+      timeoutMs: 12_000,
+    });
+  } catch (e) {
+    console.warn(`Apollo match fetch failed for ${fn} ${ln}:`, (e as Error).message);
+    return null;
+  }
   if (!r.ok) {
     const txt = await r.text();
     console.warn(`Apollo match ${r.status} for ${fn} ${ln}: ${txt.slice(0, 200)}`);
@@ -326,7 +359,13 @@ async function apolloMatch(
 async function hunterFinder(fn: string, ln: string, domain: string, hunterKey: string): Promise<{ email: string; score: number } | null> {
   if (!fn || !ln || !domain) return null;
   const url = `${HUNTER_BASE}/email-finder?domain=${encodeURIComponent(domain)}&first_name=${encodeURIComponent(fn)}&last_name=${encodeURIComponent(ln)}&api_key=${encodeURIComponent(hunterKey)}`;
-  const r = await fetch(url);
+  let r: Response;
+  try {
+    r = await fetchWithTimeout(url, { timeoutMs: 12_000 });
+  } catch (e) {
+    console.warn(`Hunter fetch failed for ${fn} ${ln}:`, (e as Error).message);
+    return null;
+  }
   if (!r.ok) return null;
   const d = await r.json();
   const email = d?.data?.email;

@@ -822,7 +822,16 @@ async function cleanupStaleRuns() {
     // moved to 30 min in TrackerControls.tsx for the same reason.
     const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
     const { data: stale } = await supabase.from('tracker_runs').select('id').eq('status', 'running').lt('started_at', cutoff);
-    if (stale && stale.length > 0) { const ids = stale.map(r => r.id); await supabase.from('tracker_runs').update({ status: 'failed', completed_at: new Date().toISOString(), current_step: 'error', error_message: 'Auto-cleaned: exceeded 30min timeout' }).in('id', ids); }
+    if (stale && stale.length > 0) {
+      const ids = stale.map(r => r.id);
+      await supabase.from('tracker_runs').update({ status: 'failed', completed_at: new Date().toISOString(), current_step: 'error', error_message: 'Auto-cleaned: exceeded 30min timeout' }).in('id', ids);
+      // Belt-and-suspenders: if a previous run crashed before its STEP 1
+      // is_net_new=false reset, the badges from that run are still on
+      // marketing_jobs. Clear them now so the UI's "New (last run)"
+      // filter doesn't surface dead state. Cheap WHERE is_net_new=true
+      // — typical row count is <100.
+      await supabase.from('marketing_jobs').update({ is_net_new: false }).eq('is_net_new', true);
+    }
   } catch (e) { console.warn('Stale run cleanup error:', e); }
 }
 

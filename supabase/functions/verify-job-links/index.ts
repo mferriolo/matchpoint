@@ -189,6 +189,19 @@ async function handleProcessNext(body: any): Promise<Response> {
   const batchSize = Math.min(Math.max(Number(body.batch_size) || 1, 1), 16);
   const sb = getSupabaseClient();
 
+  // v3: reap stuck-processing rows before each claim. If a worker
+  // crashed (Deno OOM, edge-runtime restart, network drop between
+  // claim and updateQueueItem) the row stayed status='processing'
+  // with no recovery, blocking handleStatus.is_done forever. Five
+  // minutes is well beyond the 50s/item worst case so a healthy
+  // worker won't be re-pended out from under itself.
+  const reapCutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  await sb.from('job_verification_queue')
+    .update({ status: 'pending', started_at: null })
+    .eq('run_id', runId)
+    .eq('status', 'processing')
+    .lt('started_at', reapCutoff);
+
   // Atomic batch claim. claim_verification_queue_batch wraps the
   // SELECT + UPDATE in a single statement with FOR UPDATE SKIP LOCKED,
   // so two concurrent callers can't both grab the same rows and burn
@@ -202,7 +215,34 @@ async function handleProcessNext(body: any): Promise<Response> {
   if (!pending?.length) return jsonResp({ done: true, message: 'No more pending jobs' });
   log('INFO', 'process', `Claimed ${pending.length} item${pending.length === 1 ? '' : 's'}`);
 
-  const results = await Promise.all(pending.map((qi: any) => processOneQueueItem(sb, qi)));
+  // allSettled: processOneQueueItem has its own top-level try/catch so a
+  // throw is unexpected, but if one slips through (e.g. a stray throw
+  // outside the try, or an OOM in the handler) Promise.all would kill
+  // the whole batch and leak the other 15 items as 'processing' forever.
+  // Map rejections back to a synthetic crash result so the client sees
+  // the failure and the queue row is updated to 'failed' downstream.
+  const settled = await Promise.allSettled(pending.map((qi: any) => processOneQueueItem(sb, qi)));
+  const results = await Promise.all(settled.map(async (s, idx) => {
+    if (s.status === 'fulfilled') return s.value;
+    const qi = pending[idx];
+    const msg = s.reason?.message || String(s.reason);
+    try {
+      await sb.from('job_verification_queue').update({
+        status: 'failed',
+        error_message: `Worker crashed: ${msg}`.slice(0, 1000),
+        completed_at: new Date().toISOString(),
+      }).eq('id', qi.id);
+    } catch {}
+    return {
+      id: qi.job_id,
+      job_title: qi.job_title,
+      company_name: qi.company_name,
+      is_live: false,
+      details: `Worker crashed: ${msg}`,
+      source: 'crash',
+      search_mode: 'error',
+    };
+  }));
 
   // Backward-compat: single-item callers see the same `result` field as
   // before. Batch callers also get the full `results` array.

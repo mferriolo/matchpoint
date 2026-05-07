@@ -409,7 +409,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
       setContacts(prev => prev.map(c => (ids.includes(c.id) ? { ...c, ...patch } : c)));
       toast({ title: successTitle });
       clearContactSelection();
-      loadData();
+      refreshAfterWrite();
     } catch (err: any) {
       toast({ title: 'Update failed', description: err.message || String(err), variant: 'destructive' });
     }
@@ -451,7 +451,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
       }));
       toast({ title: `Marked ${ids.length} contact${ids.length === 1 ? '' : 's'} contacted` });
       clearContactSelection();
-      loadData();
+      refreshAfterWrite();
     } catch (err: any) {
       toast({ title: 'Mark contacted failed', description: err.message || String(err), variant: 'destructive' });
     }
@@ -486,7 +486,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
       });
       clearContactSelection();
       setShowDeleteContactsConfirm(false);
-      loadData();
+      refreshAfterWrite();
     } catch (err: any) {
       toast({ title: 'Delete failed', description: err.message || String(err), variant: 'destructive' });
     } finally {
@@ -521,7 +521,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
       });
       clearContactSelection();
       setShowWipeContactsConfirm(false);
-      loadData();
+      refreshAfterWrite();
     } catch (err: any) {
       toast({ title: 'Wipe failed', description: err.message || String(err), variant: 'destructive' });
     } finally {
@@ -570,7 +570,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
     setContactMergeSelection({});
     setContactManualMergeGroup(null);
     clearContactSelection();
-    loadData();
+    refreshAfterWrite();
   };
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -722,7 +722,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
       toast({ title: 'Company updated' });
       setEditingCompany(null);
       setEditingCompanyDraft({});
-      loadData();
+      refreshAfterWrite();
     } catch (err: any) {
       toast({ title: 'Save failed', description: err.message || String(err), variant: 'destructive' });
     } finally {
@@ -811,7 +811,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
       toast({ title: 'Contact updated' });
       setEditingContact(null);
       setEditingContactDraft({});
-      loadData();
+      refreshAfterWrite();
     } catch (err: any) {
       toast({ title: 'Save failed', description: err.message || String(err), variant: 'destructive' });
     } finally {
@@ -913,7 +913,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
           // live progress panel disappears.
           setContactRunResult(data);
           setShowContactRunResult(true);
-          loadData();
+          refreshAfterWrite();
         } else if (data.status === 'failed') {
           toast({ title: 'Find Contacts failed', description: data.error_message || 'Unknown error', variant: 'destructive' });
           setFindingContactsForId(null);
@@ -922,7 +922,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
           // Reload even on failure/cancel — partial runs may have
           // already inserted rows into marketing_contacts that the user
           // would otherwise need to refresh the page to see.
-          loadData();
+          refreshAfterWrite();
         }
       } catch (e) {
         console.warn('contact_runs poll error:', e);
@@ -942,7 +942,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
       if (error) throw error;
       toast({ title: 'Category updated' });
       setEditingCompanyTypeId(null);
-      loadData();
+      refreshAfterWrite();
     } catch (err: any) {
       toast({ title: 'Error updating category', description: err.message, variant: 'destructive' });
     }
@@ -965,7 +965,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
         .eq('id', id);
       if (error) throw error;
       toast({ title: currentlyBlocked ? 'Company unblocked' : 'Company blocked from future runs' });
-      loadData();
+      refreshAfterWrite();
     } catch (err: any) {
       toast({ title: 'Error updating block flag', description: err.message, variant: 'destructive' });
     }
@@ -981,7 +981,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
       if (error) throw error;
       toast({ title: block ? `${ids.length} company(s) blocked` : `${ids.length} company(s) unblocked` });
       clearCompanySelection();
-      loadData();
+      refreshAfterWrite();
     } catch (err: any) {
       toast({ title: 'Error updating companies', description: err.message, variant: 'destructive' });
     }
@@ -996,7 +996,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
       if (error) throw error;
       toast({ title: `${ids.length} company(s) deleted` });
       clearCompanySelection();
-      loadData();
+      refreshAfterWrite();
     } catch (err: any) {
       toast({ title: 'Error deleting companies', description: err.message, variant: 'destructive' });
     }
@@ -1085,6 +1085,12 @@ const DesktopMarketingNewJobs: React.FC = () => {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  // Post-write callers should bypass the 30s freshness short-circuit so
+  // they actually see their write. The cache is there to dampen mount /
+  // dep-triggered refetch storms; it should never block reading the
+  // result of an action the user just took.
+  const refreshAfterWrite = useCallback(() => loadData({ force: true }), [loadData]);
+
   const handleExportMaster = () => {
     try {
       if (jobs.length === 0 && contacts.length === 0 && companies.length === 0) {
@@ -1126,7 +1132,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
         .eq('id', companyId);
       if (error) throw error;
       toast({ title: !currentPriority ? 'Marked as High Priority' : 'Priority removed' });
-      await loadData();
+      await refreshAfterWrite();
     } catch (err: any) {
       toast({ title: 'Error updating priority', description: err.message, variant: 'destructive' });
     } finally {
@@ -1149,7 +1155,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
           title: 'Auto-Prioritize Complete',
           description: `${data.summary.companiesMarkedHighPriority} companies and ${data.summary.jobsMarkedHighPriority} jobs marked as high priority`
         });
-        await loadData();
+        await refreshAfterWrite();
       } else {
         throw new Error(data?.error || 'Unknown error');
       }
@@ -1380,7 +1386,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
     // bulk bar disappears and the auto-detected list is shown next time.
     setManualMergeGroup(null);
     clearCompanySelection();
-    loadData();
+    refreshAfterWrite();
   };
 
   // Derived LinkedIn URL per contact — the column reads from either the
