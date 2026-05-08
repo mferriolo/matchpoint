@@ -593,19 +593,31 @@ export function OutreachWorkspace({
         },
         inputs,
       };
-      // 55s client guard so a hung upstream doesn't leave the
+      // 65s client guard so a hung upstream doesn't leave the
       // workspace stuck in Drafting… forever. Edge function caps
-      // OpenAI at 45s, so 55s leaves ~10s of headroom for the
-      // function to return its clean 502 timeout error before the
-      // browser aborts.
+      // OpenAI at 50s and may retry once on transient (empty content,
+      // empty fields) — worst case ~50s, comfortably inside 65s.
       const ac = new AbortController();
-      const guard = setTimeout(() => ac.abort(), 55_000);
+      const guard = setTimeout(() => ac.abort(), 65_000);
       const result = await supabase.functions.invoke('generate-job-script', { body: payload, signal: ac.signal as any })
         .finally(() => clearTimeout(guard));
       const { data, error } = result;
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
       const raw = data.outputs as ScriptOutputs;
+      // Defensive shape check: the function now retries on empty
+      // fields, but if both attempts come back blank we should
+      // surface a real error instead of clobbering any prior good
+      // draft with empty strings. Fixes the "Regenerate produced a
+      // blank message" path.
+      const missing: string[] = [];
+      if (!raw?.coldCall?.trim()) missing.push('cold call');
+      if (!raw?.email?.body?.trim() || !raw?.email?.subject?.trim()) missing.push('email');
+      if (!raw?.linkedin?.trim()) missing.push('LinkedIn');
+      if (!raw?.followUpEmail?.body?.trim() || !raw?.followUpEmail?.subject?.trim()) missing.push('follow-up email');
+      if (missing.length > 0) {
+        throw new Error(`Generation returned blank ${missing.join(', ')} — try again`);
+      }
       const out = applyScrub(raw, sender);
       setOutputs(out);
       setEditedSubject(out.email.subject);

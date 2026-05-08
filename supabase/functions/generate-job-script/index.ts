@@ -197,7 +197,14 @@ Deno.serve(async (req) => {
     // valid jobs. Client guard in OutreachWorkspace was raised to 55s
     // in lockstep so the function can return its clean 502 before the
     // browser bails.
-    const OPENAI_TIMEOUT_MS = 45_000;
+    // v3: bumped 45s → 50s and max_tokens 1500 → 2500 after the wild
+    // showed two regressions: (1) gpt-4o-mini still occasionally
+    // crossing 45s on heavy prompts; (2) verbose runs filling the
+    // 1500-token budget mid-generation under response_format=json_object,
+    // which closes the JSON cleanly but with one or more output fields
+    // as empty strings — the user sees a blank message instead of an
+    // error. Client guard in OutreachWorkspace bumped to 65s in lockstep.
+    const OPENAI_TIMEOUT_MS = 50_000;
     const callOpenAI = async (): Promise<
       | { ok: true; parsed: ScriptOutputs }
       | { ok: false; status: number; error: string; raw?: string; transient: boolean }
@@ -213,13 +220,14 @@ Deno.serve(async (req) => {
           body: JSON.stringify({
             model: 'gpt-4o-mini',
             messages: [{ role: 'user', content: prompt }],
-            // 1500. The 4-output JSON envelope (cold call + email +
-            // linkedin + follow-up email) lands at ~600 tokens in
-            // practice; 1500 gives 2.5× headroom while keeping
-            // worst-case generation time well under the timeout. The
-            // old 3000 ceiling was letting verbose runs drag past the
-            // wall-clock cap.
-            max_tokens: 1500,
+            // 2500. The 4-output JSON envelope lands at ~600 tokens
+            // in practice but a verbose run can push past 1500 mid-
+            // generation, and json_object mode closes the brace with
+            // empty strings for any keys not yet emitted. 2500 keeps
+            // generation comfortably under the 50s timeout while
+            // giving enough headroom that "blank message" can't be
+            // explained by truncation.
+            max_tokens: 2500,
             temperature: 0.7,
             response_format: { type: 'json_object' },
           }),
@@ -255,11 +263,36 @@ Deno.serve(async (req) => {
       if (!content) {
         return { ok: false, status, error: `OpenAI returned empty content (finish_reason=${finishReason || 'unknown'})`, transient: true };
       }
+      let parsed: ScriptOutputs;
       try {
-        return { ok: true, parsed: JSON.parse(content) as ScriptOutputs };
+        parsed = JSON.parse(content) as ScriptOutputs;
       } catch {
         return { ok: false, status, error: `OpenAI returned non-JSON content (finish_reason=${finishReason || 'unknown'})`, raw: content.slice(0, 500), transient: true };
       }
+      // Field-level shape check. Previously a JSON object with one or
+      // more fields blank (truncation, finish_reason='length',
+      // low-effort response) was returned as success; the client
+      // wrote a blank message into state, overwriting the prior
+      // good draft. Treat empties as transient so the retry-once
+      // path covers them, and surface a clear error if both attempts
+      // came back empty.
+      const empties: string[] = [];
+      if (!parsed?.coldCall || !String(parsed.coldCall).trim()) empties.push('coldCall');
+      if (!parsed?.email?.body || !String(parsed.email.body).trim()) empties.push('email.body');
+      if (!parsed?.email?.subject || !String(parsed.email.subject).trim()) empties.push('email.subject');
+      if (!parsed?.linkedin || !String(parsed.linkedin).trim()) empties.push('linkedin');
+      if (!parsed?.followUpEmail?.body || !String(parsed.followUpEmail.body).trim()) empties.push('followUpEmail.body');
+      if (!parsed?.followUpEmail?.subject || !String(parsed.followUpEmail.subject).trim()) empties.push('followUpEmail.subject');
+      if (empties.length > 0) {
+        return {
+          ok: false,
+          status,
+          error: `OpenAI returned an envelope with empty fields: ${empties.join(', ')} (finish_reason=${finishReason || 'unknown'})`,
+          raw: content.slice(0, 500),
+          transient: true,
+        };
+      }
+      return { ok: true, parsed };
     };
 
     let attempt = await callOpenAI();
