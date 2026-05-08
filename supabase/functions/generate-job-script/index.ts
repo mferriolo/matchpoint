@@ -68,6 +68,85 @@ interface SenderIdentity {
   company?: string;
 }
 
+interface RecipientIdentity {
+  first_name?: string;
+  last_name?: string;
+  title?: string;
+}
+
+// Map a free-text recipient title to a normalized role bucket and a
+// "what this person cares about" framing string. The classifier is
+// substring-based and runs in priority order — if "Chief Medical"
+// matches we stop there, even if the same title also contains
+// "Director" or "Officer". Returns null when nothing matches; the
+// prompt falls back to the generic audience framing in that case.
+function classifyRecipient(rawTitle: string): { bucket: string; framing: string } | null {
+  const t = rawTitle.toLowerCase();
+  if (!t.trim()) return null;
+  // Order matters — most specific first.
+  const rules: Array<[RegExp, string, string]> = [
+    [
+      /chief\s+medical|cmo\b|medical\s+director|chief\s+physician/,
+      'Chief Medical Officer / Medical Director',
+      "clinical quality, physician retention, peer-to-peer recruitment, the credibility cost of a long vacancy on remaining clinical leadership, and the operational risk of clinical coverage gaps. Speak as a peer to a clinical leader — they don't care about HR metrics, they care about the team and the patients.",
+    ],
+    [
+      /chief\s+nursing|cno\b|chief\s+clinical/,
+      'Chief Nursing / Clinical Officer',
+      "clinical staffing ratios, nurse retention, the impact of an unfilled clinical leadership role on bedside coverage, and quality/safety metrics. They live in clinical operations — frame the recruiting partner as someone who understands the difference between a nurse manager and a director of nursing.",
+    ],
+    [
+      /chief\s+executive|\bceo\b|president\b/,
+      'CEO / President',
+      "strategic top-line risk: cost of vacancy on revenue, the signaling effect on remaining leadership, and the board-level perception of a long-open critical role. They want a partner who can close — not someone who'll send 30 résumés. Lead with the business impact of the gap, not the recruiting process.",
+    ],
+    [
+      /chief\s+operating|\bcoo\b|chief\s+operations|vp\s+operations|vice\s+president\s+operations/,
+      'COO / VP Operations',
+      "operational throughput, productivity loss per day the role is unfilled, contract-labor burn rate, and the downstream effect on patient access / scheduling / billing. Quantify the daily cost of vacancy if you can. Frame the recruiter as a way to recover operational leverage.",
+    ],
+    [
+      /chief\s+financial|\bcfo\b|vp\s+finance|controller\b/,
+      'CFO / VP Finance',
+      "the dollar cost of vacancy: contract labor premium, lost revenue, recruiter fee vs. continued vacancy spend, and ROI on a fast hire. They want numbers. If we have any kind of fee model that's outcome-based or capped, this is the persona to mention it to.",
+    ],
+    [
+      /chief\s+human\s+resources|\bchro\b|vp\s+human\s+resources|svp\s+human\s+resources|vp\s+hr\b|head\s+of\s+(people|hr)/,
+      'CHRO / VP HR',
+      "time-to-fill benchmarks vs. industry, the strategic-vs-tactical mix of in-house TA work, and how a specialist partner reduces requisition-aging on the hardest roles. Speak as a strategic peer, not a vendor — they've been pitched a thousand times.",
+    ],
+    [
+      /talent\s+acquisition|recruit(er|ing)|sourcing|head\s+of\s+talent/,
+      'TA Lead / Recruiter',
+      "fill rates on hard-to-fill clinical roles, no-poach safety, the partnership model (we work YOUR reqs, we don't compete for your candidates), and where specialist coverage actually moves the needle vs. their in-house team. Treat them as a peer — talk shop, not pitch.",
+    ],
+    [
+      /chief\s+people|chief\s+of\s+staff|vp\s+people|head\s+of\s+people/,
+      'Chief People Officer / Chief of Staff',
+      "leadership pipeline health, retention of remaining executives during a vacancy, and the cultural cost of a prolonged search. They balance people strategy with operational execution — frame around both.",
+    ],
+    [
+      /practice\s+administrator|director\s+of\s+operations|director\s+of\s+practice|administrator\b/,
+      'Practice Administrator / Director of Operations',
+      "schedule coverage, locum spend, RVU productivity, and the practical impact of an unfilled provider role on the day-to-day. They run the building — be concrete about what fixing the role unlocks.",
+    ],
+    [
+      /director\s+of\s+(human\s+resources|hr|people|talent)/,
+      'Director of HR / Talent',
+      "requisition aging on niche roles, the in-house team's bandwidth, and what a specialist external partner adds without stepping on internal recruiters' lanes.",
+    ],
+    [
+      /vp\s+clinical|vice\s+president\s+clinical|director\s+of\s+clinical/,
+      'VP / Director Clinical',
+      "clinical leadership pipeline, the scope/credentialing nuance of the open role, and the operational risk of leaving a clinical leadership seat empty under pressure.",
+    ],
+  ];
+  for (const [re, bucket, framing] of rules) {
+    if (re.test(t)) return { bucket, framing };
+  }
+  return null;
+}
+
 interface ScriptOutputs {
   coldCall: string;
   email: { subject: string; body: string };
@@ -83,7 +162,7 @@ function val(v?: string | null): string {
   return (v || '').trim();
 }
 
-function buildPrompt(job: JobContext, f: FormInputs, sender: SenderIdentity): string {
+function buildPrompt(job: JobContext, f: FormInputs, sender: SenderIdentity, recipient: RecipientIdentity): string {
   const audience = f.audience === 'Other' ? val(f.audienceOther) || 'a senior decision-maker' : f.audience;
   const problem = f.problem === 'Other' ? val(f.problemOther) || 'an unfilled critical role' : f.problem;
   const service = f.service === 'Other' ? val(f.serviceOther) || 'specialized healthcare recruiting' : f.service;
@@ -158,6 +237,25 @@ function buildPrompt(job: JobContext, f: FormInputs, sender: SenderIdentity): st
   if (senderTitle)   signoffLines.push(`Sender title: ${senderTitle}`);
   if (senderCompany) signoffLines.push(`Sender company: ${senderCompany}`);
 
+  // Recipient role-specific framing. The substring classifier maps a
+  // raw title (e.g. "Chief Medical Officer", "VP, Talent Acquisition")
+  // to a "what this persona cares about" cue so each output speaks
+  // directly to the priorities of the role on the other end. Falls
+  // back to the generic audience bucket when nothing matches.
+  const recipientName = [val(recipient.first_name), val(recipient.last_name)].filter(Boolean).join(' ');
+  const recipientTitle = val(recipient.title);
+  const recipientClass = recipientTitle ? classifyRecipient(recipientTitle) : null;
+  const recipientBlock = recipientTitle
+    ? `RECIPIENT FRAMING — every output must speak to THIS person's priorities, not a generic audience:
+  - Recipient: ${recipientName ? `${recipientName}, ` : ''}${recipientTitle}
+${recipientClass
+        ? `  - Persona bucket: ${recipientClass.bucket}
+  - What they care about: ${recipientClass.framing}
+  - The problem statement, the proof point, and the CTA must all be framed around the recipient's perspective. A ${recipientClass.bucket} hears a different argument than a recruiter — write the version this specific recipient would respond to.`
+        : `  - This title didn't match any pre-built persona. Infer the recipient's likely priorities from the title alone and tailor the problem statement / proof point / CTA accordingly. If the title is something like "Director of X", lead with the operational consequences of the open role inside their function.`}
+`
+    : '';
+
   return `You are writing a Problem/Solution outreach script for ${senderCompany}, a specialized healthcare recruiting firm. The recipient is a ${audience}. The service being pitched is ${service}. The primary business problem to lead with is: ${problem}. Tone: ${f.tone}. Urgency: ${f.urgency}. Likely objection to address (if any): ${objection || 'none'}.
 
 ${signoffLines.length > 0 ? `SENDER IDENTITY — use these exact strings, do not paraphrase, do not invent placeholders:
@@ -169,7 +267,7 @@ HARD RULES for sender identity (every output must satisfy these):
   4. The email body MUST end with the sender block on its own lines: "${senderName}${senderTitle ? `\\n${senderTitle}` : ''}${senderCompany ? `\\n${senderCompany}` : ''}".
   5. The LinkedIn message MUST be signed "— ${senderName}" or sign off with "${senderName}, ${senderCompany}".
 ` : ''}
-
+${recipientBlock}
 Use a Danny Cahill-inspired recruiting style: lead with a specific, likely business pain, make it feel urgent and concrete, then position MedCentric as the practical solution. Be commercial — every line should earn its place.
 
 Known facts (use only what is relevant; never invent missing details):
@@ -203,6 +301,7 @@ Deno.serve(async (req) => {
     const job: JobContext = body.job || {};
     const inputs: FormInputs = body.inputs || {};
     const sender: SenderIdentity = body.sender || {};
+    const recipient: RecipientIdentity = body.recipient || {};
 
     const apiKey = Deno.env.get('OPENAI_API_KEY');
     if (!apiKey) {
@@ -211,7 +310,7 @@ Deno.serve(async (req) => {
       });
     }
 
-    const prompt = buildPrompt(job, inputs, sender);
+    const prompt = buildPrompt(job, inputs, sender, recipient);
 
     // Hard wall-clock cap per OpenAI call. Without this, a slow
     // upstream response can stretch into minutes — and a retry on

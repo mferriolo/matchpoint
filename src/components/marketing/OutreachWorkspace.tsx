@@ -575,6 +575,17 @@ export function OutreachWorkspace({
         return Math.max(0, Math.floor((Date.now() - t) / 86_400_000));
       })();
 
+      // Recipient context — the selected contact's actual title +
+      // name. The generic `audience` bucket in `inputs` (hiring_mgr /
+      // recruiter / etc.) is too coarse: a CEO and a VP of Talent
+      // Acquisition both bucket as "hiring decision-maker" but care
+      // about completely different things. Passing the raw title
+      // lets the prompt-builder pick the right framing per output.
+      const recipient = {
+        title: selected.title || '',
+        first_name: selected.first_name || '',
+        last_name: selected.last_name || '',
+      };
       const payload = {
         sender,
         job: {
@@ -591,6 +602,7 @@ export function OutreachWorkspace({
           company_description: job.company_description,
           job_description: job.description,
         },
+        recipient,
         inputs,
       };
       // 65s client guard so a hung upstream doesn't leave the
