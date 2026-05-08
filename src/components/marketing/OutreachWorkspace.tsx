@@ -333,6 +333,72 @@ function CopyBtn({ text, label = 'Copy' }: { text: string; label?: string }) {
   );
 }
 
+// Escape & < > " ' so injecting into innerHTML/clipboard HTML is safe.
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Convert plain-text body to HTML: escape, auto-link URLs (and bare
+// linkedin.com / careers pages with the http:// implied), preserve
+// newlines as <br>. Used both for the inline preview pane and for the
+// "Copy as HTML" clipboard write so pasting into Gmail/Outlook keeps
+// the links clickable.
+function bodyToHtml(body: string): string {
+  if (!body) return '';
+  const escaped = escapeHtml(body);
+  // Match http(s) URLs, ignoring common trailing punctuation that's
+  // almost certainly part of the surrounding sentence.
+  const linked = escaped.replace(
+    /(https?:\/\/[^\s<>"']+?)([.,;:!?)\]]?(?=\s|$|<))/g,
+    (_, url: string, trail: string) =>
+      `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color:#911406;text-decoration:underline;">${url}</a>${trail}`
+  );
+  return linked.replace(/\n/g, '<br>');
+}
+
+function CopyHtmlBtn({ subject, body }: { subject: string; body: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      title="Copy as HTML — paste into Gmail/Outlook compose to keep clickable links"
+      onClick={async () => {
+        const htmlBody = bodyToHtml(body);
+        const html = `<div>${htmlBody}</div>`;
+        // Plain-text fallback for clients that don't honor text/html.
+        const text = body;
+        try {
+          if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+            await navigator.clipboard.write([
+              new ClipboardItem({
+                'text/html': new Blob([html], { type: 'text/html' }),
+                'text/plain': new Blob([text], { type: 'text/plain' }),
+              }),
+            ]);
+          } else {
+            // Older Safari / Firefox without ClipboardItem — fall back
+            // to plain text. Better than failing silently.
+            await navigator.clipboard.writeText(text);
+          }
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          try { await navigator.clipboard.writeText(text); } catch {}
+        }
+      }}
+      className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 text-gray-700"
+    >
+      {copied ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+      {copied ? 'Copied HTML' : 'Copy HTML'}
+    </button>
+  );
+}
+
 // ===========================================================
 // Main component
 // ===========================================================
@@ -1142,12 +1208,17 @@ function EmailPanel({
   onSend: () => void;
 }) {
   const copyText = `Subject: ${subject}\n\n${body}`;
+  const htmlPreview = bodyToHtml(body);
   return (
     <div className="rounded-md border border-gray-200 bg-white">
       <div className="flex items-center justify-between gap-2 px-3 py-2 border-b bg-gray-50 flex-wrap">
         <div className="text-xs font-semibold text-gray-700">{label}</div>
         <div className="flex items-center gap-2">
-          <CopyBtn text={copyText} label="Copy" />
+          <CopyBtn text={copyText} label="Copy text" />
+          {/* Copy HTML writes both text/html and text/plain to the
+              clipboard, so pasting into Gmail/Outlook compose keeps
+              URLs as clickable <a href> links instead of bare text. */}
+          <CopyHtmlBtn subject={subject} body={body} />
           {sendHref ? (
             <a
               href={sendHref}
@@ -1177,6 +1248,16 @@ function EmailPanel({
         <div>
           <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Body</Label>
           <Textarea value={body} onChange={e => onBodyChange(e.target.value)} rows={9} className="mt-1 text-sm font-sans" />
+        </div>
+        {/* Live HTML preview. Updates as the user edits the textarea
+            so they can see how URLs render before sending. The actual
+            message that gets pasted/sent uses the same conversion. */}
+        <div>
+          <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Preview</Label>
+          <div
+            className="mt-1 text-sm leading-relaxed text-gray-800 border border-gray-200 rounded-md p-3 bg-white max-h-64 overflow-y-auto"
+            dangerouslySetInnerHTML={{ __html: htmlPreview || '<span class="text-gray-400">— empty —</span>' }}
+          />
         </div>
       </div>
     </div>
