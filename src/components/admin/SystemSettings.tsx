@@ -7,10 +7,9 @@ import { Switch } from '@/components/ui/switch';
 import { Separator } from '@/components/ui/separator';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { supabase } from '@/lib/supabase';
-import { Save, Settings, Video, Phone, Mail, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
+import { Save, Settings, Video, Phone } from 'lucide-react';
 import EmailTestSection from './EmailTestSection';
 import SupabaseSetupInstructions from '../SupabaseSetupInstructions';
-import { useToast } from '@/hooks/use-toast';
 
 interface Setting {
   key: string;
@@ -225,10 +224,6 @@ const SystemSettings = () => {
 
           <Separator />
 
-          <GmailConnectionPanel />
-
-          <Separator />
-
   <div>
     <h3 className="text-lg font-semibold mb-4">Integrations</h3>
     <div className="space-y-4">
@@ -310,147 +305,3 @@ const SystemSettings = () => {
 };
 
 export default SystemSettings;
-
-// =============================================================
-// Gmail OAuth connection panel
-// =============================================================
-// Calls the gmail-oauth edge function for status / disconnect, and
-// opens the OAuth start endpoint in a popup. We poll status until the
-// user finishes the consent dance in the popup, then refresh the
-// displayed connection state. Single-tenant for now: shows whichever
-// gmail account is currently stored.
-function GmailConnectionPanel() {
-  const { toast } = useToast();
-  const [loading, setLoading] = useState(true);
-  const [connecting, setConnecting] = useState(false);
-  const [connected, setConnected] = useState<{ email: string; updated_at?: string } | null>(null);
-
-  const refreshStatus = async () => {
-    setLoading(true);
-    try {
-      const { data, error } = await supabase.functions.invoke('gmail-oauth', {
-        body: { action: 'status' },
-      });
-      if (error) throw error;
-      if (data?.connected) setConnected({ email: data.email, updated_at: data.updated_at });
-      else setConnected(null);
-    } catch (e: any) {
-      console.warn('gmail status:', e?.message || e);
-      setConnected(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => { refreshStatus(); }, []);
-
-  // Surface the post-redirect query (gmail=connected | gmail=error)
-  // that gmail-oauth's callback uses on its way back into the app.
-  useEffect(() => {
-    const url = new URL(window.location.href);
-    const status = url.searchParams.get('gmail');
-    if (!status) return;
-    if (status === 'connected') {
-      const email = url.searchParams.get('email') || '';
-      toast({ title: 'Gmail connected', description: email ? `Sending as ${email}` : 'Ready to send.' });
-    } else if (status === 'error') {
-      const reason = url.searchParams.get('reason') || 'unknown';
-      toast({
-        title: 'Gmail connection failed',
-        description: `Google returned: ${reason}. Check the Cloud Console redirect URI matches the one in the function logs.`,
-        variant: 'destructive',
-      });
-    }
-    // Strip the params so a refresh doesn't re-fire the toast.
-    url.searchParams.delete('gmail');
-    url.searchParams.delete('email');
-    url.searchParams.delete('reason');
-    window.history.replaceState({}, '', url.toString());
-    refreshStatus();
-  }, []);
-
-  const startConnect = () => {
-    // Build the start URL on the function host. The function 302s to
-    // Google; Google 302s back to ?action=callback; the callback 302s
-    // the user back to APP_URL with ?gmail=connected. We open in the
-    // current tab so the redirects flow naturally — no popup window
-    // gymnastics or postMessage needed.
-    // The Supabase URL is hardcoded in src/lib/supabase.ts (same place
-    // anywhere else in the app uses it), so we mirror it here rather
-    // than read it via private supabase-js internals.
-    setConnecting(true);
-    const startUrl = `https://nrnmzvenwjqsnegxyaxz.supabase.co/functions/v1/gmail-oauth?action=start`;
-    window.location.assign(startUrl);
-  };
-
-  const disconnect = async () => {
-    if (!connected?.email) return;
-    if (!window.confirm(`Disconnect Gmail (${connected.email})? Future "Send via Gmail" buttons will fall back to mailto: until you reconnect.`)) return;
-    try {
-      const { error } = await supabase.functions.invoke('gmail-oauth', {
-        body: { action: 'disconnect', email: connected.email },
-      });
-      if (error) throw error;
-      toast({ title: 'Gmail disconnected' });
-      setConnected(null);
-    } catch (e: any) {
-      toast({ title: 'Disconnect failed', description: e?.message || String(e), variant: 'destructive' });
-    }
-  };
-
-  return (
-    <div>
-      <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-        <Mail className="w-4 h-4 text-[#911406]" />
-        Gmail Connection
-      </h3>
-      <p className="text-sm text-gray-600 mb-4">
-        Connect a Gmail account so the outreach <strong>Send via Gmail</strong> button can send HTML
-        emails directly from your inbox — preserving the role-title hyperlink without
-        needing to copy-paste into compose.
-      </p>
-      {loading ? (
-        <div className="text-sm text-gray-500 flex items-center gap-2">
-          <Loader2 className="w-4 h-4 animate-spin" /> Checking connection…
-        </div>
-      ) : connected ? (
-        <div className="flex items-center justify-between gap-3 p-3 rounded-md border border-emerald-200 bg-emerald-50/50">
-          <div className="flex items-center gap-2 min-w-0">
-            <CheckCircle2 className="w-4 h-4 text-emerald-700 flex-shrink-0" />
-            <div className="min-w-0">
-              <div className="text-sm font-medium text-gray-900 truncate">{connected.email}</div>
-              <div className="text-[11px] text-gray-500">
-                Connected{connected.updated_at ? ` · updated ${new Date(connected.updated_at).toLocaleString()}` : ''}
-              </div>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <Button variant="outline" size="sm" onClick={refreshStatus}>
-              Refresh
-            </Button>
-            <Button variant="outline" size="sm" onClick={disconnect} className="text-red-700 border-red-300 hover:bg-red-50">
-              Disconnect
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <div className="flex items-center justify-between gap-3 p-3 rounded-md border border-gray-200 bg-gray-50/50">
-          <div className="flex items-center gap-2 min-w-0">
-            <XCircle className="w-4 h-4 text-gray-500 flex-shrink-0" />
-            <div className="text-sm text-gray-700">No Gmail account connected.</div>
-          </div>
-          <Button size="sm" onClick={startConnect} disabled={connecting} className="bg-[#911406] hover:bg-[#7a1005] text-white">
-            {connecting ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Mail className="w-4 h-4 mr-1" />}
-            Connect Gmail
-          </Button>
-        </div>
-      )}
-      <p className="text-[11px] text-gray-500 mt-2">
-        Requires <code>GOOGLE_OAUTH_CLIENT_ID</code>, <code>GOOGLE_OAUTH_CLIENT_SECRET</code>, and{' '}
-        <code>APP_URL</code> set as Supabase function secrets, plus the redirect URI{' '}
-        <code className="break-all">/functions/v1/gmail-oauth?action=callback</code> registered
-        in Google Cloud Console. See <code>docs/gmail-setup.md</code> for the full setup.
-      </p>
-    </div>
-  );
-}
