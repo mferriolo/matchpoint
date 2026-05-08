@@ -147,6 +147,29 @@ function classifyRecipient(rawTitle: string): { bucket: string; framing: string 
   return null;
 }
 
+// True when the recipient's title indicates an MD / DO physician,
+// who should be addressed as "Dr. {last_name}" rather than by first
+// name. Healthcare-specific: a Chief Medical Officer / Medical
+// Director almost always holds an MD; an RN, NP, or PharmD does
+// not, by convention.
+function isPhysicianTitle(rawTitle: string): boolean {
+  const t = rawTitle.toLowerCase();
+  if (!t.trim()) return false;
+  // Explicit credentials.
+  if (/\b(m\.?\s?d\.?|d\.?\s?o\.?)\b/.test(t)) return true;
+  if (/\bphysician\b/.test(t)) return true;
+  if (/\b(dr\.?|doctor)\b/.test(t)) return true;
+  // Clinical-leadership titles that almost always require MD/DO.
+  if (/chief\s+medical\s+(officer|information\s+officer)/.test(t)) return true;
+  if (/\bcmo\b|\bcmio\b/.test(t)) return true;
+  if (/medical\s+director/.test(t)) return true;
+  if (/\bhospitalist\b/.test(t)) return true;
+  if (/\battending\b/.test(t)) return true;
+  if (/(chair(person)?|chairman|chief)\s+of\s+(medicine|surgery|pediatrics|cardiology|oncology|psychiatry|radiology|anesthesiology|neurology|emergency\s+medicine|family\s+medicine|internal\s+medicine|obstetrics|gynecology)/.test(t)) return true;
+  if (/director\s+of\s+(medicine|surgery|pediatrics|cardiology|oncology|psychiatry|radiology|anesthesiology|neurology|emergency\s+medicine)/.test(t)) return true;
+  return false;
+}
+
 interface ScriptOutputs {
   coldCall: string;
   email: { subject: string; body: string };
@@ -243,9 +266,20 @@ function buildPrompt(job: JobContext, f: FormInputs, sender: SenderIdentity, rec
   // directly to the priorities of the role on the other end. Falls
   // back to the generic audience bucket when nothing matches.
   const recipientFirst = val(recipient.first_name);
-  const recipientName = [recipientFirst, val(recipient.last_name)].filter(Boolean).join(' ');
+  const recipientLast  = val(recipient.last_name);
+  const recipientName  = [recipientFirst, recipientLast].filter(Boolean).join(' ');
   const recipientTitle = val(recipient.title);
   const recipientClass = recipientTitle ? classifyRecipient(recipientTitle) : null;
+  // Detect MD/DO physicians by title so we can address them
+  // formally ("Dr. Smith") instead of by first name. Falls back to
+  // first-name when the contact has no last name on file (rare,
+  // but the alternative — "Dr." with nothing after — would look
+  // broken).
+  const recipientIsPhysician = recipientTitle ? isPhysicianTitle(recipientTitle) : false;
+  const useDoctor = recipientIsPhysician && !!recipientLast;
+  const greeting = useDoctor
+    ? `Dr. ${recipientLast}`
+    : (recipientFirst || '');
   const recipientBlock = (recipientTitle || recipientFirst)
     ? `RECIPIENT FRAMING — every output is for ONE specific person, not a generic audience.
   - Recipient: ${recipientName || '(name not on file)'}${recipientTitle ? ` — ${recipientTitle}` : ''}
@@ -258,13 +292,20 @@ ${recipientClass
           : `  - No title on file — keep the framing generic but address the recipient by name and write to one person, not a group.`}
 
 HARD RULES for addressing the recipient (every output must satisfy):
-${recipientFirst
-        ? `  R1. The cold call MUST open by addressing the recipient: "Hi ${recipientFirst}, this is ${senderName}${senderTitle ? `, ${senderTitle}` : ''} from ${senderCompany}." — combine with the sender-identity rule above.
-  R2. The email body MUST start with "Hi ${recipientFirst}," on its own line, then a blank line, then the role-reference opener. No "Dear", no "Hello there", no group salutations.
-  R3. The follow-up email body MUST start with "Hi ${recipientFirst}," on its own line, then a blank line, then the follow-up bump.
-  R4. The LinkedIn message MUST start with "Hi ${recipientFirst}," and read like a 1:1 note, not a broadcast.
+${greeting && useDoctor
+        ? `  R1. The cold call MUST open by addressing the recipient as a physician: "Hi ${greeting}, this is ${senderName}${senderTitle ? `, ${senderTitle}` : ''} from ${senderCompany}." Use "${greeting}" verbatim — never the first name, never "Mr."/"Ms.".
+  R2. The email body MUST start with "${greeting}," on its own line, then a blank line, then the role-reference opener. No "Dear", no first-name greeting, no group salutations.
+  R3. The follow-up email body MUST start with "${greeting}," on its own line, then a blank line, then the follow-up bump.
+  R4. The LinkedIn message MUST start with "${greeting}," and read like a 1:1 note to a physician peer, not a broadcast.
+  R5. Throughout the body, when re-addressing or referring to the recipient by name, use "${greeting}" — never their first name. Use second-person singular ("you", "your team"), never "you all" or group phrasing.
+  R6. Recognize that the recipient is a physician — adjust tone to match (peer-to-peer, clinical respect, never overly familiar).`
+        : greeting
+          ? `  R1. The cold call MUST open by addressing the recipient: "Hi ${greeting}, this is ${senderName}${senderTitle ? `, ${senderTitle}` : ''} from ${senderCompany}." — combine with the sender-identity rule above.
+  R2. The email body MUST start with "Hi ${greeting}," on its own line, then a blank line, then the role-reference opener. No "Dear", no "Hello there", no group salutations.
+  R3. The follow-up email body MUST start with "Hi ${greeting}," on its own line, then a blank line, then the follow-up bump.
+  R4. The LinkedIn message MUST start with "Hi ${greeting}," and read like a 1:1 note, not a broadcast.
   R5. Use second-person singular throughout ("you", "your team") — never "you all", "your team(s)", or anything that implies a group recipient.`
-        : `  R1. With no first name on file, open every output with "Hi there," (singular, not "Hi all").
+          : `  R1. With no name on file, open every output with "Hi there," (singular, not "Hi all").
   R2. Use second-person singular throughout — never "you all" or anything that implies a group recipient.
   R3. The cold-call sender-identity rule still applies.`}
 `
