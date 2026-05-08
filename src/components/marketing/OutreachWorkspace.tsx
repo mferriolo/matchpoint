@@ -343,34 +343,98 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;');
 }
 
-// Convert plain-text body to HTML.
-//
-// When jobTitle + jobUrl are supplied, the FIRST case-insensitive
-// occurrence of jobTitle in the body is wrapped in <a href=jobUrl>.
-// That replaces the older "URL on its own line at the bottom" pattern
-// — by user request, the role title in the opener IS the link.
-//
-// Defensive cleanup: if the model ignored the new prompt and still
-// emitted the URL on its own line, strip that line before wrapping
-// so we don't get a duplicate URL alongside the wrapped title.
-//
-// Newlines → <br>. & < > " ' are escaped before any link substitution
-// so a malformed body can't inject HTML.
+// Strip lines that contain just the jobUrl (the model occasionally
+// still emits one despite the prompt) so the title-as-link isn't
+// shadowed by a redundant footer URL. Used by both the preview
+// renderer and the HTML clipboard write so the two stay in sync.
+function stripStandaloneUrl(body: string, jobUrl?: string): string {
+  if (!jobUrl) return body;
+  const escapedUrl = jobUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^[ \\t]*${escapedUrl}[\\s.,;:!?]*$`, 'gm');
+  return body.replace(re, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+// React-rendered preview. Used in EmailPanel instead of
+// dangerouslySetInnerHTML — Tailwind's anchor reset
+// (a { text-decoration: inherit }) was fighting inline styles in
+// dangerouslySetInnerHTML, leaving the title-as-link looking like
+// plain text and (in some browsers) failing to register the click.
+// React rendering with explicit Tailwind classes avoids both.
+function renderBody(body: string, jobTitle?: string, jobUrl?: string): React.ReactNode {
+  if (!body) return <span className="text-gray-400">— empty —</span>;
+  const working = stripStandaloneUrl(body, jobUrl);
+  const lines = working.split('\n');
+  const urlRe = /(https?:\/\/[^\s<>"']+?)([.,;:!?)\]]?)(?=\s|$)/g;
+
+  let titleWrapped = false;
+  return lines.map((line, lineIdx) => {
+    const segs: React.ReactNode[] = [];
+    let cursor = 0;
+
+    // First case-insensitive occurrence of the job title (across the
+    // whole body, not per line) gets wrapped as the link.
+    if (!titleWrapped && jobTitle && jobUrl) {
+      const idx = line.toLowerCase().indexOf(jobTitle.toLowerCase());
+      if (idx >= 0) {
+        if (idx > 0) segs.push(line.slice(0, idx));
+        segs.push(
+          <a
+            key={`t-${lineIdx}`}
+            href={jobUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[#911406] underline font-semibold hover:text-[#7a1005] cursor-pointer"
+          >
+            {line.slice(idx, idx + jobTitle.length)}
+          </a>
+        );
+        cursor = idx + jobTitle.length;
+        titleWrapped = true;
+      }
+    }
+
+    // Auto-link any remaining bare URLs in the rest of the line.
+    const rest = line.slice(cursor);
+    let restCursor = 0;
+    for (const m of rest.matchAll(urlRe)) {
+      const start = m.index ?? 0;
+      if (start > restCursor) segs.push(rest.slice(restCursor, start));
+      const url = m[1];
+      const trail = m[2] || '';
+      segs.push(
+        <a
+          key={`u-${lineIdx}-${start}`}
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-[#911406] underline hover:text-[#7a1005] cursor-pointer"
+        >
+          {url}
+        </a>
+      );
+      if (trail) segs.push(trail);
+      restCursor = start + m[0].length;
+    }
+    if (restCursor < rest.length) segs.push(rest.slice(restCursor));
+
+    if (segs.length === 0) segs.push(line);
+    return (
+      <React.Fragment key={lineIdx}>
+        {segs}
+        {lineIdx < lines.length - 1 && <br />}
+      </React.Fragment>
+    );
+  });
+}
+
+// Convert plain-text body to HTML for the clipboard/Copy-HTML path.
+// Same logic as renderBody but emits an HTML string so paste-into-
+// Gmail keeps the formatting. Inline styles are used here (not Tailwind
+// classes) because the destination email client won't have our
+// stylesheet — so each <a> needs to carry its own visuals.
 function bodyToHtml(body: string, jobTitle?: string, jobUrl?: string): string {
   if (!body) return '';
-  let working = body;
-
-  // Strip standalone URL lines that match jobUrl (user wanted the
-  // title-as-link pattern, not a separate URL). Tolerates trailing
-  // punctuation and surrounding whitespace.
-  if (jobUrl) {
-    const escapedUrl = jobUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const standaloneUrlLine = new RegExp(`^[ \\t]*${escapedUrl}[\\s.,;:!?]*$`, 'gm');
-    working = working.replace(standaloneUrlLine, '');
-    // Collapse any double-blanks introduced by the strip.
-    working = working.replace(/\n{3,}/g, '\n\n').trim();
-  }
-
+  const working = stripStandaloneUrl(body, jobUrl);
   let escaped = escapeHtml(working);
 
   // Wrap the first occurrence of jobTitle (case-insensitive) in a
@@ -1256,7 +1320,6 @@ function EmailPanel({
   jobUrl?: string;
 }) {
   const copyText = `Subject: ${subject}\n\n${body}`;
-  const htmlPreview = bodyToHtml(body, jobTitle, jobUrl);
   return (
     <div className="rounded-md border border-gray-200 bg-white">
       <div className="flex items-center justify-between gap-2 px-3 py-2 border-b bg-gray-50 flex-wrap">
@@ -1297,15 +1360,17 @@ function EmailPanel({
           <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Body</Label>
           <Textarea value={body} onChange={e => onBodyChange(e.target.value)} rows={9} className="mt-1 text-sm font-sans" />
         </div>
-        {/* Live HTML preview. Updates as the user edits the textarea
-            so they can see how URLs render before sending. The actual
-            message that gets pasted/sent uses the same conversion. */}
+        {/* Live preview. React-rendered (not innerHTML) so Tailwind's
+            anchor reset doesn't kill the underline + click; clicking
+            the title link opens the posting URL in a new tab. The
+            Copy-HTML clipboard path uses bodyToHtml() with inline
+            styles, since pasted-into-Gmail content won't have our
+            Tailwind stylesheet to lean on. */}
         <div>
           <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Preview</Label>
-          <div
-            className="mt-1 text-sm leading-relaxed text-gray-800 border border-gray-200 rounded-md p-3 bg-white max-h-64 overflow-y-auto"
-            dangerouslySetInnerHTML={{ __html: htmlPreview || '<span class="text-gray-400">— empty —</span>' }}
-          />
+          <div className="mt-1 text-sm leading-relaxed text-gray-800 border border-gray-200 rounded-md p-3 bg-white max-h-64 overflow-y-auto">
+            {renderBody(body, jobTitle, jobUrl)}
+          </div>
         </div>
       </div>
     </div>
