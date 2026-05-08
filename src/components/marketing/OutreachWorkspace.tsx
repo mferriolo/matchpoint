@@ -897,8 +897,18 @@ export function OutreachWorkspace({
   };
 
   const onLaunchEmail = async (c: ContactRow) => {
-    // The browser handles the actual mailto navigation via the anchor's
-    // href; this side-effect just records that we kicked off outreach.
+    // The browser handles the actual mailto navigation via the
+    // anchor's href; this side-effect records that we kicked off
+    // outreach AND tells the user the HTML body has been queued on
+    // the clipboard. mailto: bodies are plain-text-only across every
+    // major email client, so the compose window will open with our
+    // plain-text body — pasting (Cmd/Ctrl+V) replaces it with the
+    // formatted version that keeps the role-title hyperlink.
+    toast({
+      title: 'Compose opened — paste to keep the link',
+      description: 'The HTML version is on your clipboard. Press Cmd/Ctrl+V inside the compose window to swap in the formatted body with the clickable role title.',
+      duration: 6000,
+    });
     markContacted(c, 'Cold');
   };
 
@@ -1388,9 +1398,38 @@ function EmailPanel({
           {sendHref ? (
             <a
               href={sendHref}
-              onClick={onSend}
+              onClick={async () => {
+                // mailto: bodies are plain-text-only across virtually
+                // every email client, so the Send link strips our
+                // title-as-link formatting on its way to the OS.
+                // Copy the HTML version to the clipboard at the same
+                // moment so the user can paste (Cmd/Ctrl+V) inside
+                // the compose window to land the formatted version
+                // on top of the plain-text body. Best cross-client
+                // option that doesn't require a server-side send
+                // path or Gmail OAuth.
+                try {
+                  const htmlBody = bodyToHtml(body, jobTitle, jobUrl);
+                  const html = `<div>${htmlBody}</div>`;
+                  if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+                    await navigator.clipboard.write([
+                      new ClipboardItem({
+                        'text/html': new Blob([html], { type: 'text/html' }),
+                        'text/plain': new Blob([body], { type: 'text/plain' }),
+                      }),
+                    ]);
+                  } else {
+                    await navigator.clipboard.writeText(body);
+                  }
+                } catch {
+                  // Don't block the mailto navigation on a clipboard
+                  // failure — user can still send the plain-text
+                  // version manually.
+                }
+                onSend();
+              }}
               className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-[#911406] text-white hover:bg-[#7a1005]"
-              title={sendDetail}
+              title="Opens your email client and copies the HTML version to the clipboard — paste with Cmd/Ctrl+V inside compose to keep the role title as a clickable link."
             >
               <Mail className="w-3.5 h-3.5" />
               Send
