@@ -221,7 +221,7 @@ function buildPrompt(job: JobContext, f: FormInputs, sender: SenderIdentity, rec
   }
   if (jobUrl) {
     constraints.push(
-      `POSTING URL: include the posting URL ${jobUrl} in the email body, the follow-up email body, and the LinkedIn message — render it on its own line or right after the opener so the recipient can confirm the listing. Do NOT include it in the cold call (spoken). Do NOT use markdown/HTML link syntax; just the raw URL.`
+      `POSTING URL: the posting URL is ${jobUrl}. The email body and the follow-up email body MUST NOT contain the URL — the email is rendered as HTML and the recipient's client will turn the role title (${jobTitle || 'the role'}) into a clickable hyperlink to this URL. Just write the title in plain prose. Include the raw URL in the LinkedIn message body on its own line near the opener (LinkedIn doesn't render HTML links). Never include the URL in the cold call (spoken).`
     );
   }
 
@@ -282,12 +282,12 @@ Return STRICT JSON matching this exact shape, no prose outside the JSON:
   "coldCall": "string — under 90 seconds spoken, conversational. First sentence must name the open role verbatim. Then the hook, the likely problem, and the CTA. NEVER include a URL in the spoken cold call.",
   "email": {
     "subject": "string — short, specific, no clickbait, ideally references the role or company",
-    "body": "string — 5-9 short lines. First line MUST reference the open role verbatim ('I am contacting you about the role you have advertised for a {Role}…' or close paraphrase). Then problem statement, why-it-matters, solution + proof point, CTA. If a posting URL was provided, include it on its own line right after the opener — raw URL, no markdown. Plain prose, no greeting like 'Dear' unless a hiring manager name is provided."
+    "body": "string — 5-9 short lines. First line MUST reference the open role verbatim ('I am contacting you about the role you have advertised for a {Role}…' or close paraphrase). Then problem statement, why-it-matters, solution + proof point, CTA. Do NOT include the posting URL anywhere in the body — the client will hyperlink the role title to it. Plain prose, no greeting like 'Dear' unless a hiring manager name is provided."
   },
-  "linkedin": "string — 4-7 short lines, more casual than the email. Same job-title-in-first-sentence + posting-URL-on-its-own-line rules apply.",
+  "linkedin": "string — 4-7 short lines, more casual than the email. Name the role verbatim in the first sentence. If a posting URL was provided, include it on its own line near the opener (LinkedIn doesn't render HTML hyperlinks).",
   "followUpEmail": {
     "subject": "string — short, references that this is a follow-up. Examples: 'Following up on the {role} search', 'Re: {Company} {role}'. Avoid 'Just checking in'.",
-    "body": "string — 4-6 short lines: a one-line bump referencing the prior message and naming the role verbatim, one line restating the specific problem the open role likely creates, one line reaffirming the proof point, and the same CTA. If a posting URL was provided, include it on its own line near the top so the recipient can re-locate the listing. Tone is patient, not pushy. No greeting if no hiring manager name is provided."
+    "body": "string — 4-6 short lines: a one-line bump referencing the prior message and naming the role verbatim, one line restating the specific problem the open role likely creates, one line reaffirming the proof point, and the same CTA. Do NOT include the posting URL — the client will hyperlink the role title to it. Tone is patient, not pushy. No greeting if no hiring manager name is provided."
   }
 }`;
 }
@@ -344,16 +344,55 @@ Deno.serve(async (req) => {
           body: JSON.stringify({
             model: 'gpt-4o-mini',
             messages: [{ role: 'user', content: prompt }],
-            // 2500. The 4-output JSON envelope lands at ~600 tokens
-            // in practice but a verbose run can push past 1500 mid-
-            // generation, and json_object mode closes the brace with
-            // empty strings for any keys not yet emitted. 2500 keeps
-            // generation comfortably under the 50s timeout while
-            // giving enough headroom that "blank message" can't be
-            // explained by truncation.
-            max_tokens: 2500,
+            // v4: bumped 2500 → 3500 after the prompt grew with
+            // recipient persona framing + posting URL rules; the model
+            // was finishing the coldCall and stopping early under
+            // json_object mode (finish_reason='stop' with linkedin /
+            // followUpEmail still empty). Strict json_schema below
+            // forces all four keys to be populated, which fixes the
+            // structural failure; the bigger token budget keeps
+            // generation comfortable.
+            max_tokens: 3500,
             temperature: 0.7,
-            response_format: { type: 'json_object' },
+            // Strict structured output. The schema lists all four
+            // top-level keys as required and the model is required to
+            // emit each one with non-empty content. Replaces the
+            // softer json_object mode that let the model close the
+            // brace with empty strings.
+            response_format: {
+              type: 'json_schema',
+              json_schema: {
+                name: 'outreach_script',
+                strict: true,
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['coldCall', 'email', 'linkedin', 'followUpEmail'],
+                  properties: {
+                    coldCall: { type: 'string' },
+                    email: {
+                      type: 'object',
+                      additionalProperties: false,
+                      required: ['subject', 'body'],
+                      properties: {
+                        subject: { type: 'string' },
+                        body:    { type: 'string' },
+                      },
+                    },
+                    linkedin: { type: 'string' },
+                    followUpEmail: {
+                      type: 'object',
+                      additionalProperties: false,
+                      required: ['subject', 'body'],
+                      properties: {
+                        subject: { type: 'string' },
+                        body:    { type: 'string' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
           }),
         });
       } catch (e: any) {

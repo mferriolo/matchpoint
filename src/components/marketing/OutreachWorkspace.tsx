@@ -343,16 +343,55 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;');
 }
 
-// Convert plain-text body to HTML: escape, auto-link URLs (and bare
-// linkedin.com / careers pages with the http:// implied), preserve
-// newlines as <br>. Used both for the inline preview pane and for the
-// "Copy as HTML" clipboard write so pasting into Gmail/Outlook keeps
-// the links clickable.
-function bodyToHtml(body: string): string {
+// Convert plain-text body to HTML.
+//
+// When jobTitle + jobUrl are supplied, the FIRST case-insensitive
+// occurrence of jobTitle in the body is wrapped in <a href=jobUrl>.
+// That replaces the older "URL on its own line at the bottom" pattern
+// — by user request, the role title in the opener IS the link.
+//
+// Defensive cleanup: if the model ignored the new prompt and still
+// emitted the URL on its own line, strip that line before wrapping
+// so we don't get a duplicate URL alongside the wrapped title.
+//
+// Newlines → <br>. & < > " ' are escaped before any link substitution
+// so a malformed body can't inject HTML.
+function bodyToHtml(body: string, jobTitle?: string, jobUrl?: string): string {
   if (!body) return '';
-  const escaped = escapeHtml(body);
-  // Match http(s) URLs, ignoring common trailing punctuation that's
-  // almost certainly part of the surrounding sentence.
+  let working = body;
+
+  // Strip standalone URL lines that match jobUrl (user wanted the
+  // title-as-link pattern, not a separate URL). Tolerates trailing
+  // punctuation and surrounding whitespace.
+  if (jobUrl) {
+    const escapedUrl = jobUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const standaloneUrlLine = new RegExp(`^[ \\t]*${escapedUrl}[\\s.,;:!?]*$`, 'gm');
+    working = working.replace(standaloneUrlLine, '');
+    // Collapse any double-blanks introduced by the strip.
+    working = working.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  let escaped = escapeHtml(working);
+
+  // Wrap the first occurrence of jobTitle (case-insensitive) in a
+  // hyperlink. We escape the title before searching so an exotic title
+  // doesn't break the regex.
+  if (jobTitle && jobUrl) {
+    const escapedTitle = escapeHtml(jobTitle);
+    const reTitle = new RegExp(
+      escapedTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+      'i'
+    );
+    escaped = escaped.replace(
+      reTitle,
+      (match) =>
+        `<a href="${jobUrl}" target="_blank" rel="noopener noreferrer" style="color:#911406;text-decoration:underline;font-weight:600;">${match}</a>`
+    );
+  }
+
+  // Remaining bare URLs in the body (rare now, but kept as a fallback)
+  // get auto-linked too. The wrapped title is already an <a> tag, so
+  // the regex skips text inside angle brackets.
   const linked = escaped.replace(
     /(https?:\/\/[^\s<>"']+?)([.,;:!?)\]]?(?=\s|$|<))/g,
     (_, url: string, trail: string) =>
@@ -361,14 +400,14 @@ function bodyToHtml(body: string): string {
   return linked.replace(/\n/g, '<br>');
 }
 
-function CopyHtmlBtn({ subject, body }: { subject: string; body: string }) {
+function CopyHtmlBtn({ subject: _subject, body, jobTitle, jobUrl }: { subject: string; body: string; jobTitle?: string; jobUrl?: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
       type="button"
       title="Copy as HTML — paste into Gmail/Outlook compose to keep clickable links"
       onClick={async () => {
-        const htmlBody = bodyToHtml(body);
+        const htmlBody = bodyToHtml(body, jobTitle, jobUrl);
         const html = `<div>${htmlBody}</div>`;
         // Plain-text fallback for clients that don't honor text/html.
         const text = body;
@@ -1056,6 +1095,8 @@ export function OutreachWorkspace({
                       : ''}
                     sendDetail={selected.email || 'No email on file'}
                     onSend={() => onLaunchEmail(selected)}
+                    jobTitle={job?.job_title || undefined}
+                    jobUrl={job?.job_url || undefined}
                   />
                 )}
 
@@ -1071,6 +1112,8 @@ export function OutreachWorkspace({
                       : ''}
                     sendDetail={selected.email || 'No email on file'}
                     onSend={() => onLaunchEmail(selected)}
+                    jobTitle={job?.job_title || undefined}
+                    jobUrl={job?.job_url || undefined}
                   />
                 )}
 
@@ -1196,7 +1239,7 @@ function FormText({ label, value, onChange }: { label: string; value: string; on
 }
 
 function EmailPanel({
-  label, subject, body, onSubjectChange, onBodyChange, sendHref, sendDetail, onSend,
+  label, subject, body, onSubjectChange, onBodyChange, sendHref, sendDetail, onSend, jobTitle, jobUrl,
 }: {
   label: string;
   subject: string;
@@ -1206,9 +1249,14 @@ function EmailPanel({
   sendHref: string;
   sendDetail: string;
   onSend: () => void;
+  // When both are present the first occurrence of jobTitle in the
+  // body becomes a clickable hyperlink to jobUrl in the HTML preview
+  // and Copy-HTML output. The plain-text body itself is unchanged.
+  jobTitle?: string;
+  jobUrl?: string;
 }) {
   const copyText = `Subject: ${subject}\n\n${body}`;
-  const htmlPreview = bodyToHtml(body);
+  const htmlPreview = bodyToHtml(body, jobTitle, jobUrl);
   return (
     <div className="rounded-md border border-gray-200 bg-white">
       <div className="flex items-center justify-between gap-2 px-3 py-2 border-b bg-gray-50 flex-wrap">
@@ -1217,8 +1265,8 @@ function EmailPanel({
           <CopyBtn text={copyText} label="Copy text" />
           {/* Copy HTML writes both text/html and text/plain to the
               clipboard, so pasting into Gmail/Outlook compose keeps
-              URLs as clickable <a href> links instead of bare text. */}
-          <CopyHtmlBtn subject={subject} body={body} />
+              the title-as-hyperlink and any other links clickable. */}
+          <CopyHtmlBtn subject={subject} body={body} jobTitle={jobTitle} jobUrl={jobUrl} />
           {sendHref ? (
             <a
               href={sendHref}
