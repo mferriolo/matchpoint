@@ -900,13 +900,12 @@ export function OutreachWorkspace({
     // The browser handles the actual mailto navigation via the
     // anchor's href; this side-effect records that we kicked off
     // outreach AND tells the user the HTML body has been queued on
-    // the clipboard. mailto: bodies are plain-text-only across every
-    // major email client, so the compose window will open with our
-    // plain-text body — pasting (Cmd/Ctrl+V) replaces it with the
-    // formatted version that keeps the role-title hyperlink.
+    // the clipboard. The mailto URL deliberately omits the body
+    // (Gmail's compose handler silently fails on long URLs), so
+    // pasting (Cmd/Ctrl+V) is now the way the body lands in compose.
     toast({
-      title: 'Compose opened — paste to keep the link',
-      description: 'The HTML version is on your clipboard. Press Cmd/Ctrl+V inside the compose window to swap in the formatted body with the clickable role title.',
+      title: 'Compose opened — paste the body',
+      description: 'The formatted email is on your clipboard. Click into the compose body and press Cmd/Ctrl+V to drop it in.',
       duration: 6000,
     });
     markContacted(c, 'Cold');
@@ -1219,8 +1218,15 @@ export function OutreachWorkspace({
                     body={editedBody}
                     onSubjectChange={setEditedSubject}
                     onBodyChange={setEditedBody}
+                    /* mailto carries only to + subject. The body goes
+                       in via the Cmd/Ctrl+V paste of the HTML we
+                       already put on the clipboard. Including the
+                       body inline pushes the URL past Gmail's
+                       compose-handler parsing limit, which silently
+                       fails to open compose at all (no error — the
+                       click just appears to do nothing). */
                     sendHref={selected.email
-                      ? `mailto:${encodeURIComponent(selected.email)}?subject=${encodeURIComponent(editedSubject)}&body=${encodeURIComponent(editedBody)}`
+                      ? `mailto:${encodeURIComponent(selected.email)}?subject=${encodeURIComponent(editedSubject)}`
                       : ''}
                     sendDetail={selected.email || 'No email on file'}
                     onSend={() => onLaunchEmail(selected)}
@@ -1237,7 +1243,7 @@ export function OutreachWorkspace({
                     onSubjectChange={setEditedFollowUpSubject}
                     onBodyChange={setEditedFollowUpBody}
                     sendHref={selected.email
-                      ? `mailto:${encodeURIComponent(selected.email)}?subject=${encodeURIComponent(editedFollowUpSubject)}&body=${encodeURIComponent(editedFollowUpBody)}`
+                      ? `mailto:${encodeURIComponent(selected.email)}?subject=${encodeURIComponent(editedFollowUpSubject)}`
                       : ''}
                     sendDetail={selected.email || 'No email on file'}
                     onSend={() => onLaunchEmail(selected)}
