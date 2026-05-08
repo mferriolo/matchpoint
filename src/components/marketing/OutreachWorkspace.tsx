@@ -1218,15 +1218,20 @@ export function OutreachWorkspace({
                     body={editedBody}
                     onSubjectChange={setEditedSubject}
                     onBodyChange={setEditedBody}
-                    /* mailto carries only to + subject. The body goes
-                       in via the Cmd/Ctrl+V paste of the HTML we
-                       already put on the clipboard. Including the
-                       body inline pushes the URL past Gmail's
-                       compose-handler parsing limit, which silently
-                       fails to open compose at all (no error — the
-                       click just appears to do nothing). */
+                    /* Direct Gmail compose URL with target=_blank.
+                       The mailto chain (OS → default handler → Chrome
+                       → Gmail) was silently breaking somewhere for
+                       this user, so we skip it entirely and ask
+                       Gmail to open compose with to + subject in a
+                       new tab. The body lives on the clipboard from
+                       the same click; the user pastes (Cmd/Ctrl+V)
+                       inside compose to land the formatted HTML.
+                       Body is deliberately NOT in this URL — Gmail's
+                       compose URL truncates long bodies the same way
+                       its mailto handler does, so we keep this short
+                       and rely on the paste step. */
                     sendHref={selected.email
-                      ? `mailto:${encodeURIComponent(selected.email)}?subject=${encodeURIComponent(editedSubject)}`
+                      ? `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(selected.email)}&su=${encodeURIComponent(editedSubject)}`
                       : ''}
                     sendDetail={selected.email || 'No email on file'}
                     onSend={() => onLaunchEmail(selected)}
@@ -1243,7 +1248,7 @@ export function OutreachWorkspace({
                     onSubjectChange={setEditedFollowUpSubject}
                     onBodyChange={setEditedFollowUpBody}
                     sendHref={selected.email
-                      ? `mailto:${encodeURIComponent(selected.email)}?subject=${encodeURIComponent(editedFollowUpSubject)}`
+                      ? `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(selected.email)}&su=${encodeURIComponent(editedFollowUpSubject)}`
                       : ''}
                     sendDetail={selected.email || 'No email on file'}
                     onSend={() => onLaunchEmail(selected)}
@@ -1404,16 +1409,15 @@ function EmailPanel({
           {sendHref ? (
             <a
               href={sendHref}
+              target="_blank"
+              rel="noopener noreferrer"
               onClick={async () => {
-                // mailto: bodies are plain-text-only across virtually
-                // every email client, so the Send link strips our
-                // title-as-link formatting on its way to the OS.
-                // Copy the HTML version to the clipboard at the same
-                // moment so the user can paste (Cmd/Ctrl+V) inside
-                // the compose window to land the formatted version
-                // on top of the plain-text body. Best cross-client
-                // option that doesn't require a server-side send
-                // path or Gmail OAuth.
+                // sendHref is a Gmail compose URL with target=_blank,
+                // so Chrome opens it in a new tab regardless of the
+                // OS default-mail-client chain (mailto was silently
+                // breaking for some users). The body lives on the
+                // clipboard from this click — paste with Cmd/Ctrl+V
+                // inside compose to land the formatted HTML.
                 try {
                   const htmlBody = bodyToHtml(body, jobTitle, jobUrl);
                   const html = `<div>${htmlBody}</div>`;
@@ -1428,14 +1432,12 @@ function EmailPanel({
                     await navigator.clipboard.writeText(body);
                   }
                 } catch {
-                  // Don't block the mailto navigation on a clipboard
-                  // failure — user can still send the plain-text
-                  // version manually.
+                  // Don't block the navigation on a clipboard failure.
                 }
                 onSend();
               }}
               className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-[#911406] text-white hover:bg-[#7a1005]"
-              title="Opens your email client and copies the HTML version to the clipboard — paste with Cmd/Ctrl+V inside compose to keep the role title as a clickable link."
+              title="Opens Gmail compose in a new tab and copies the HTML body to the clipboard — paste with Cmd/Ctrl+V inside compose to keep the role title as a clickable link."
             >
               <Mail className="w-3.5 h-3.5" />
               Send
