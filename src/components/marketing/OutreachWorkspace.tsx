@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   X, Loader2, Mail, Phone, Linkedin, Wand2, Copy, Check, Star,
   RotateCw, Send, Info,
@@ -462,6 +462,61 @@ function bodyToHtml(body: string, jobTitle?: string, jobUrl?: string): string {
       `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color:#911406;text-decoration:underline;">${url}</a>${trail}`
   );
   return linked.replace(/\n/g, '<br>');
+}
+
+// Editable, link-aware body field. Replaces the old textarea-plus-
+// preview pair. The contenteditable div is seeded with bodyToHtml()
+// output so the role title shows up as a clickable hyperlink. While
+// the user types we read innerText back into the body string, but
+// we deliberately DO NOT re-set innerHTML on every keystroke — that
+// would yank the cursor on every change. innerHTML is only re-set
+// when body changes for an outside reason (regenerate, tab switch,
+// new contact selected). The lastWritten ref tracks "what we last
+// pushed into the DOM" so the effect can tell self-driven updates
+// from external ones.
+function EditablePreview({
+  body, onChange, jobTitle, jobUrl,
+}: {
+  body: string;
+  onChange: (next: string) => void;
+  jobTitle?: string;
+  jobUrl?: string;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const lastWritten = useRef<string>('');
+
+  useEffect(() => {
+    if (!ref.current) return;
+    if (lastWritten.current === body) return; // user just typed; don't clobber the cursor
+    ref.current.innerHTML = bodyToHtml(body, jobTitle, jobUrl) || '';
+    lastWritten.current = body;
+  }, [body, jobTitle, jobUrl]);
+
+  return (
+    <div
+      ref={ref}
+      contentEditable
+      suppressContentEditableWarning
+      role="textbox"
+      aria-label="Email body"
+      onInput={(e) => {
+        // innerText preserves line breaks across browsers (Chrome <div>,
+        // Firefox <br>) more consistently than textContent, which would
+        // collapse blocks into one line.
+        const text = (e.currentTarget as HTMLDivElement).innerText;
+        lastWritten.current = text;
+        onChange(text);
+      }}
+      // Plain-text paste so a copy from Word/Gmail doesn't bring its
+      // own font/colors and overwhelm the editor.
+      onPaste={(e) => {
+        e.preventDefault();
+        const text = e.clipboardData.getData('text/plain');
+        document.execCommand('insertText', false, text);
+      }}
+      className="mt-1 text-sm leading-relaxed text-gray-800 border border-gray-200 rounded-md p-3 bg-white min-h-[180px] max-h-96 overflow-y-auto whitespace-pre-wrap focus:outline-none focus:ring-2 focus:ring-[#911406]/30 focus:border-[#911406]/40"
+    />
+  );
 }
 
 function CopyHtmlBtn({ subject: _subject, body, jobTitle, jobUrl }: { subject: string; body: string; jobTitle?: string; jobUrl?: string }) {
@@ -1356,21 +1411,21 @@ function EmailPanel({
           <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Subject</Label>
           <Input value={subject} onChange={e => onSubjectChange(e.target.value)} className="mt-1 text-sm" />
         </div>
+        {/* Single editable body field. Contenteditable + bodyToHtml
+            seed renders the title-as-link inline; user can edit any
+            text around it, and the link stays clickable (cmd/ctrl-
+            click opens in a new tab; bare click in-app navigates). */}
         <div>
           <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Body</Label>
-          <Textarea value={body} onChange={e => onBodyChange(e.target.value)} rows={9} className="mt-1 text-sm font-sans" />
-        </div>
-        {/* Live preview. React-rendered (not innerHTML) so Tailwind's
-            anchor reset doesn't kill the underline + click; clicking
-            the title link opens the posting URL in a new tab. The
-            Copy-HTML clipboard path uses bodyToHtml() with inline
-            styles, since pasted-into-Gmail content won't have our
-            Tailwind stylesheet to lean on. */}
-        <div>
-          <Label className="text-[10px] uppercase tracking-wider text-gray-600 font-medium">Preview</Label>
-          <div className="mt-1 text-sm leading-relaxed text-gray-800 border border-gray-200 rounded-md p-3 bg-white max-h-64 overflow-y-auto">
-            {renderBody(body, jobTitle, jobUrl)}
-          </div>
+          <EditablePreview
+            body={body}
+            onChange={onBodyChange}
+            jobTitle={jobTitle}
+            jobUrl={jobUrl}
+          />
+          <p className="mt-1 text-[11px] text-gray-500">
+            Cmd/Ctrl-click the role link to open the posting in a new tab.
+          </p>
         </div>
       </div>
     </div>
