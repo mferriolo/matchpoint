@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   X, Loader2, Mail, Phone, Linkedin, Wand2, Copy, Check, Star,
-  RotateCw, Send, Info,
+  RotateCw, Send, Info, Zap,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -519,6 +519,116 @@ function EditablePreview({
   );
 }
 
+// Send the current email body directly via the connected Gmail
+// account (gmail-send edge fn). The email goes from the user's own
+// inbox with proper HTML so the role-title hyperlink is preserved
+// without a copy-paste step. Disabled until the user has connected
+// Gmail in System Settings; falls back to mailto: in that case.
+function GmailSendBtn({
+  to, subject, body, jobTitle, jobUrl, fromName, replyTo, onSent,
+}: {
+  to: string;
+  subject: string;
+  body: string;
+  jobTitle?: string;
+  jobUrl?: string;
+  fromName?: string;
+  replyTo?: string;
+  onSent: () => void;
+}) {
+  const { toast } = useToast();
+  const [sending, setSending] = useState(false);
+  const [connected, setConnected] = useState<boolean | null>(null);
+
+  // Check connection state lazily on mount so the button can render
+  // disabled with a tooltip explaining what to do.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data, error } = await supabase.functions.invoke('gmail-oauth', {
+          body: { action: 'status' },
+        });
+        if (cancelled) return;
+        if (error) { setConnected(false); return; }
+        setConnected(!!data?.connected);
+      } catch {
+        if (!cancelled) setConnected(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const send = async () => {
+    if (!to) {
+      toast({ title: 'No email on file', variant: 'destructive' });
+      return;
+    }
+    setSending(true);
+    try {
+      const html = `<div style="font-family:system-ui,Arial,sans-serif;line-height:1.5;">${bodyToHtml(body, jobTitle, jobUrl)}</div>`;
+      const { data, error } = await supabase.functions.invoke('gmail-send', {
+        body: {
+          to,
+          subject,
+          html,
+          text: body,
+          from_name: fromName,
+          reply_to: replyTo,
+        },
+      });
+      if (error) {
+        let detail = error.message || 'Send failed';
+        try {
+          const ctx: any = (error as any).context;
+          if (ctx?.text) {
+            const raw = await ctx.text();
+            try { const j = JSON.parse(raw); if (j?.error) detail = j.error; }
+            catch { detail = raw.slice(0, 300); }
+          }
+        } catch {}
+        throw new Error(detail);
+      }
+      if (data?.error) throw new Error(data.error);
+      toast({
+        title: 'Sent via Gmail',
+        description: `Delivered to ${to}${data?.from ? ` from ${data.from}` : ''}`,
+      });
+      onSent();
+    } catch (e: any) {
+      toast({ title: 'Gmail send failed', description: e?.message || String(e), variant: 'destructive' });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const disabled = sending || !to || connected === false;
+  const title = !to
+    ? 'No email on file'
+    : connected === null
+      ? 'Checking Gmail connection…'
+      : connected
+        ? 'Send the formatted HTML email directly from your connected Gmail inbox.'
+        : 'Connect Gmail in System Settings to send directly with HTML preserved.';
+
+  return (
+    <button
+      type="button"
+      onClick={send}
+      disabled={disabled}
+      title={title}
+      className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded text-white ${
+        disabled
+          ? 'bg-gray-300 cursor-not-allowed'
+          : 'bg-emerald-700 hover:bg-emerald-800'
+      }`}
+    >
+      {sending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+      Send via Gmail
+    </button>
+  );
+}
+
 function CopyHtmlBtn({ subject: _subject, body, jobTitle, jobUrl }: { subject: string; body: string; jobTitle?: string; jobUrl?: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -682,6 +792,12 @@ export function OutreachWorkspace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedContactId]);
 
+  // Cached sender identity, populated on mount and reused by generate()
+  // and the Send-via-Gmail panel. The latter just needs a display name
+  // for the From: header; the former needs the full identity to enforce
+  // the sender-block in generated content.
+  const [senderState, setSenderState] = useState<{ first_name?: string; last_name?: string; title?: string; company?: string } | null>(null);
+
   const loadSender = async (): Promise<{ first_name?: string; last_name?: string; title?: string; company?: string }> => {
     // Primary source: admin_users (edited from Admin → Users tab so
     // the operator can update title/company without leaving the app).
@@ -761,6 +877,7 @@ export function OutreachWorkspace({
     setGenerating(true);
     try {
       const sender = await loadSender();
+      setSenderState(sender);
 
       // Build the customize-form payload from controlled state. The
       // form auto-fills audience + hiringManagerName whenever a
@@ -1226,6 +1343,8 @@ export function OutreachWorkspace({
                     onSend={() => onLaunchEmail(selected)}
                     jobTitle={job?.job_title || undefined}
                     jobUrl={job?.job_url || undefined}
+                    recipientEmail={selected.email || ''}
+                    fromName={[senderState?.first_name, senderState?.last_name].filter(Boolean).join(' ') || undefined}
                   />
                 )}
 
@@ -1243,6 +1362,8 @@ export function OutreachWorkspace({
                     onSend={() => onLaunchEmail(selected)}
                     jobTitle={job?.job_title || undefined}
                     jobUrl={job?.job_url || undefined}
+                    recipientEmail={selected.email || ''}
+                    fromName={[senderState?.first_name, senderState?.last_name].filter(Boolean).join(' ') || undefined}
                   />
                 )}
 
@@ -1369,6 +1490,7 @@ function FormText({ label, value, onChange }: { label: string; value: string; on
 
 function EmailPanel({
   label, subject, body, onSubjectChange, onBodyChange, sendHref, sendDetail, onSend, jobTitle, jobUrl,
+  recipientEmail, fromName, replyTo,
 }: {
   label: string;
   subject: string;
@@ -1383,6 +1505,11 @@ function EmailPanel({
   // and Copy-HTML output. The plain-text body itself is unchanged.
   jobTitle?: string;
   jobUrl?: string;
+  // Drives the "Send via Gmail" button: target address, sender display
+  // name, and reply-to (defaults to the connected Gmail address).
+  recipientEmail?: string;
+  fromName?: string;
+  replyTo?: string;
 }) {
   const copyText = `Subject: ${subject}\n\n${body}`;
   return (
@@ -1395,6 +1522,22 @@ function EmailPanel({
               clipboard, so pasting into Gmail/Outlook compose keeps
               the title-as-hyperlink and any other links clickable. */}
           <CopyHtmlBtn subject={subject} body={body} jobTitle={jobTitle} jobUrl={jobUrl} />
+          {/* One-click send via the connected Gmail account. Skips
+              the mailto + paste dance entirely; HTML is preserved
+              end-to-end. Disabled (with tooltip) until Gmail is
+              connected in System Settings. */}
+          {recipientEmail && (
+            <GmailSendBtn
+              to={recipientEmail}
+              subject={subject}
+              body={body}
+              jobTitle={jobTitle}
+              jobUrl={jobUrl}
+              fromName={fromName}
+              replyTo={replyTo}
+              onSent={onSend}
+            />
+          )}
           {sendHref ? (
             <a
               href={sendHref}
