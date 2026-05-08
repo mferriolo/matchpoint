@@ -111,6 +111,10 @@ function buildPrompt(job: JobContext, f: FormInputs, sender: SenderIdentity): st
   if (val(f.specificPain)) known.push(`Specific pain to mention: ${val(f.specificPain)}`);
   if (val(f.notes)) known.push(`Researcher notes: ${val(f.notes)}`);
 
+  const jobTitle = val(job.job_title);
+  const companyName = val(job.company_name);
+  const jobUrl = val(job.job_url);
+
   const constraints: string[] = [
     'Reference the company and the open role specifically — no mass-email language.',
     `Target the actual needs of a ${audience}; a clinical leader has different priorities than HR or TA.`,
@@ -121,6 +125,27 @@ function buildPrompt(job: JobContext, f: FormInputs, sender: SenderIdentity): st
     'Keep tone human, confident, and practical. No buzzwords, no fluff.',
     'If a detail is unknown, do not invent it — leave it out.',
   ];
+
+  // Job-specific opener + posting URL. The user wants every outreach
+  // to name the role verbatim near the start, and to surface the
+  // source URL in the written channels (email, LinkedIn) so the
+  // recipient can confirm we're talking about a real, current
+  // posting. Cold call never carries the URL — it's read aloud and
+  // a URL would be noise.
+  if (jobTitle) {
+    const opener = companyName
+      ? `I am contacting you about the role you have advertised for a ${jobTitle} at ${companyName}.`
+      : `I am contacting you about the role you have advertised for a ${jobTitle}.`;
+    constraints.push(
+      `JOB-SPECIFIC OPENER: every output must reference "${jobTitle}" by name in the FIRST one or two sentences. Use a phrasing close to: "${opener}" — paraphrasing is fine, but the role title must appear verbatim and the open-role context must be explicit.`
+    );
+  }
+  if (jobUrl) {
+    constraints.push(
+      `POSTING URL: include the posting URL ${jobUrl} in the email body, the follow-up email body, and the LinkedIn message — render it on its own line or right after the opener so the recipient can confirm the listing. Do NOT include it in the cold call (spoken). Do NOT use markdown/HTML link syntax; just the raw URL.`
+    );
+  }
+
   if (val(f.customOpener)) constraints.push(`Use this opening line verbatim: "${val(f.customOpener)}"`);
   if (val(f.avoidLanguage)) constraints.push(`Avoid this language: ${val(f.avoidLanguage)}`);
   if (val(f.caseStudy)) constraints.push(`Reference this proof point or case study where it fits: ${val(f.caseStudy)}`);
@@ -156,15 +181,15 @@ ${senderName ? `  - Sign every script (cold call close, email signature, voicema
 
 Return STRICT JSON matching this exact shape, no prose outside the JSON:
 {
-  "coldCall": "string — under 90 seconds spoken, conversational, opens with a hook, names the role and likely problem, ends with the CTA",
+  "coldCall": "string — under 90 seconds spoken, conversational. First sentence must name the open role verbatim. Then the hook, the likely problem, and the CTA. NEVER include a URL in the spoken cold call.",
   "email": {
     "subject": "string — short, specific, no clickbait, ideally references the role or company",
-    "body": "string — 5-9 short lines: opener, problem statement, why-it-matters, solution + proof point, CTA. Plain prose, no greeting like 'Dear' unless a hiring manager name is provided."
+    "body": "string — 5-9 short lines. First line MUST reference the open role verbatim ('I am contacting you about the role you have advertised for a {Role}…' or close paraphrase). Then problem statement, why-it-matters, solution + proof point, CTA. If a posting URL was provided, include it on its own line right after the opener — raw URL, no markdown. Plain prose, no greeting like 'Dear' unless a hiring manager name is provided."
   },
-  "linkedin": "string — 4-7 short lines, more casual than the email, same structure",
+  "linkedin": "string — 4-7 short lines, more casual than the email. Same job-title-in-first-sentence + posting-URL-on-its-own-line rules apply.",
   "followUpEmail": {
     "subject": "string — short, references that this is a follow-up. Examples: 'Following up on the {role} search', 'Re: {Company} {role}'. Avoid 'Just checking in'.",
-    "body": "string — 4-6 short lines: a one-line bump referencing the prior message, one line restating the specific problem the open role likely creates, one line reaffirming the proof point, and the same CTA. Tone is patient, not pushy. No greeting if no hiring manager name is provided."
+    "body": "string — 4-6 short lines: a one-line bump referencing the prior message and naming the role verbatim, one line restating the specific problem the open role likely creates, one line reaffirming the proof point, and the same CTA. If a posting URL was provided, include it on its own line near the top so the recipient can re-locate the listing. Tone is patient, not pushy. No greeting if no hiring manager name is provided."
   }
 }`;
 }
