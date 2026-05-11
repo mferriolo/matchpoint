@@ -690,20 +690,32 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
       const histAvg = historicalStepDurations[stepDef.key];
 
       if (sp.status === 'running') {
-        if (sp.items_total && sp.items_total > 0 && sp.items_processed !== undefined) {
-          const frac = sp.items_processed / sp.items_total;
-          if (frac > 0 && sp.started_at) {
-            const elapsed = Date.now() - new Date(sp.started_at).getTime();
-            const totalEstimate = elapsed / frac;
-            remainingMs += Math.max(totalEstimate - elapsed, 0);
-            hasEstimate = true;
-          } else if (histAvg) {
-            remainingMs += histAvg * 0.7;
-            hasEstimate = true;
+        // Items-based and history-based estimates each lie in different
+        // situations. Items lie when a step has sub-phases that aren't
+        // counted in items_total (Phase D/A inside searching_sources) —
+        // items hit total before the step ends and frac pins to 1.
+        // Items also lie under variance: 80% of SerpAPI calls return in
+        // <1s, the last 20% hit the 18s timeout, so processed sprints
+        // ahead of wall-clock for the bulk and then sits still during
+        // the slow tail. History lies when this run is unusually fast
+        // or slow. Take the max so either signal can keep the ETA
+        // honest about how much time is actually left.
+        const started = sp.started_at ? new Date(sp.started_at).getTime() : null;
+        const elapsed = started ? Date.now() - started : 0;
+        const historyRemaining = histAvg ? Math.max(histAvg - elapsed, 0) : 0;
+        let itemsRemaining = 0;
+        if (sp.items_total && sp.items_total > 0 && sp.items_processed !== undefined && started) {
+          // Cap frac at 0.95 (same cap the progress bar uses): never
+          // claim a running step is 100% items-done, since by definition
+          // it isn't.
+          const frac = Math.min(sp.items_processed / sp.items_total, 0.95);
+          if (frac > 0) {
+            itemsRemaining = Math.max(elapsed / frac - elapsed, 0);
           }
-        } else if (histAvg && sp.started_at) {
-          const elapsed = Date.now() - new Date(sp.started_at).getTime();
-          remainingMs += Math.max(histAvg - elapsed, 0);
+        }
+        const stepRemaining = Math.max(historyRemaining, itemsRemaining);
+        if (stepRemaining > 0 || histAvg || (sp.items_total && sp.items_total > 0)) {
+          remainingMs += stepRemaining;
           hasEstimate = true;
         }
       } else if (sp.status === 'pending') {
