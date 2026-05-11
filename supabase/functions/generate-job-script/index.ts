@@ -321,6 +321,13 @@ function buildPrompt(job: JobContext, f: FormInputs, sender: SenderIdentity, rec
     'Position MedCentric as a specialized healthcare recruiting partner — not a generic staffing agency.',
     `Emphasize this proof point: ${proof}.`,
     `End with this call to action, kept low-friction: ${cta}.`,
+    // Graceful-redirect ask — cold outreach hits the wrong person
+    // routinely, and giving them an easy "not me, but here's who"
+    // path tends to produce a referral instead of a non-reply. ONE
+    // short line, after the CTA, before the signoff. Phrasing must
+    // be deferential, not transactional ("grateful", "appreciate",
+    // never "please forward this").
+    'GRACEFUL REDIRECT: every output must include one short, polite line offering an out for the wrong-person case — e.g. "If you\'re not the right person to speak with about this, I\'d be grateful if you could point me in the right direction." Apply per format: cold call → one spoken sentence after the CTA; email body → one line above the signature; follow-up email body → same; LinkedIn message → one short line after the CTA. Vary the wording across formats so it doesn\'t feel boilerplate. Never use language that suggests we\'ll forward to them again or follow up on the referral chain — the ask ends with them naming someone.',
     'Keep tone human, confident, and practical. No buzzwords, no fluff.',
     'If a detail is unknown, do not invent it — leave it out.',
   ];
