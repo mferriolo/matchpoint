@@ -14,6 +14,14 @@ function fmtMD(iso: string | undefined): string {
   return `${parseInt(m[2], 10)}/${parseInt(m[3], 10)}/${m[1].slice(2)}`;
 }
 
+function todayIso(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 function RangePanel({
   label,
   value,
@@ -24,6 +32,8 @@ function RangePanel({
   onChange: (next: DateRange) => void;
 }) {
   const hasValue = !!(value.from || value.to);
+  const today = todayIso();
+  const isToday = value.from === today && value.to === today;
   return (
     <div className="p-3 space-y-2">
       <div className="flex items-center justify-between text-[11px] text-gray-500">
@@ -38,6 +48,15 @@ function RangePanel({
           </button>
         )}
       </div>
+      <label className="flex items-center gap-2 text-[11px] text-gray-700 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={isToday}
+          onChange={e => onChange(e.target.checked ? { from: today, to: today } : {})}
+          className="h-3.5 w-3.5 rounded border-input text-blue-600 focus:ring-1 focus:ring-ring"
+        />
+        Today
+      </label>
       <label className="block text-[11px] text-gray-600">
         From
         <input
