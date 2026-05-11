@@ -633,6 +633,10 @@ const DesktopMarketingNewJobs: React.FC = () => {
   // Jobs: popover with a Today checkbox + From/To inputs. Matches
   // marketing_companies.created_at.
   const [filterCompanyDateAdded, setFilterCompanyDateAdded] = useState<DateRange>({});
+  // Column-level text filter on Company Name. Composes with (does not
+  // replace) the top-level searchCompanies box — the top search matches
+  // name OR type, this filter is name-only.
+  const [filterCompanyName, setFilterCompanyName] = useState('');
   const [showAutoPrioritizeResults, setShowAutoPrioritizeResults] = useState(false);
   const [autoPrioritizeResults, setAutoPrioritizeResults] = useState<any>(null);
 
@@ -1199,6 +1203,10 @@ const DesktopMarketingNewJobs: React.FC = () => {
         }
         if (filterCompanyCategory.size > 0 && !filterCompanyCategory.has(c.company_type || '')) return false;
         if (!inDateRange(c.created_at, filterCompanyDateAdded)) return false;
+        if (filterCompanyName.trim()) {
+          const needle = filterCompanyName.trim().toLowerCase();
+          if (!c.company_name?.toLowerCase().includes(needle)) return false;
+        }
         if (!searchCompanies) return true;
         const s = searchCompanies.toLowerCase();
         return c.company_name?.toLowerCase().includes(s) ||
@@ -1225,7 +1233,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
         const cmp = aVal.toString().localeCompare(bVal.toString());
         return companySortDir === 'asc' ? cmp : -cmp;
       });
-  }, [companies, searchCompanies, filterHighPriorityCompanies, filterNewCompanies, lastRunStartedAt, filterCompanyCategory, filterCompanyDateAdded, showBlockedCompanies, companySortField, companySortDir]);
+  }, [companies, searchCompanies, filterHighPriorityCompanies, filterNewCompanies, lastRunStartedAt, filterCompanyCategory, filterCompanyDateAdded, filterCompanyName, showBlockedCompanies, companySortField, companySortDir]);
 
   const highPriorityCompanyCount = useMemo(() => companies.filter(c => c.is_high_priority).length, [companies]);
   const newCompanyIds = useMemo(() => {
@@ -2168,10 +2176,55 @@ const DesktopMarketingNewJobs: React.FC = () => {
                           title="Select / deselect all visible"
                         />
                       </th>
-                      <th className="text-left px-4 py-3 font-medium text-gray-600">
-                        <button onClick={() => handleCompanySort('company_name')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors text-xs uppercase tracking-wider font-semibold">
-                          Company <CompanySortIcon field="company_name" />
-                        </button>
+                      <th className="text-left px-4 py-3 font-medium text-gray-600 relative select-none">
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => handleCompanySort('company_name')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors text-xs uppercase tracking-wider font-semibold">
+                            Company <CompanySortIcon field="company_name" />
+                          </button>
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <button
+                                className={`p-0.5 rounded transition-colors ml-0.5 ${filterCompanyName ? 'text-[#911406] bg-red-50' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
+                                title={`Filter by Company${filterCompanyName ? ` ("${filterCompanyName}")` : ''}`}
+                              >
+                                <Filter className="w-3 h-3" />
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent
+                              align="start"
+                              sideOffset={4}
+                              className="p-2 w-[260px] border-gray-200"
+                              onOpenAutoFocus={(e) => e.preventDefault()}
+                            >
+                              <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-1.5">Filter by Company Name</p>
+                              <input
+                                type="text"
+                                autoFocus
+                                value={filterCompanyName}
+                                onChange={e => setFilterCompanyName(e.target.value)}
+                                placeholder="Type to filter…"
+                                className="w-full h-8 text-xs rounded-md border border-input bg-background px-2 focus:outline-none focus:ring-1 focus:ring-ring"
+                              />
+                              {filterCompanyName && (
+                                <button
+                                  onClick={() => setFilterCompanyName('')}
+                                  className="mt-2 text-[11px] text-gray-500 hover:text-[#911406] hover:underline"
+                                >
+                                  Clear
+                                </button>
+                              )}
+                            </PopoverContent>
+                          </Popover>
+                          {filterCompanyName && (
+                            <button
+                              onClick={() => setFilterCompanyName('')}
+                              className="p-0.5 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                              title="Clear filter"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
                       </th>
                       <th className="text-left px-4 py-3 font-medium text-gray-600 relative select-none">
                         <div className="flex items-center gap-1">
@@ -2305,7 +2358,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
                     ) : filteredCompanies.length === 0 ? (
                       <tr><td colSpan={10} className="text-center py-16">
                         <div className="text-gray-400">
-                          {searchCompanies || filterHighPriorityCompanies || filterCompanyCategory.size > 0 || filterCompanyDateAdded.from || filterCompanyDateAdded.to || filterNewCompanies ? (
+                          {searchCompanies || filterHighPriorityCompanies || filterCompanyCategory.size > 0 || filterCompanyDateAdded.from || filterCompanyDateAdded.to || filterNewCompanies || filterCompanyName ? (
                             <>
                               <Search className="w-8 h-8 mx-auto mb-2 opacity-40" />
                               <p className="text-sm font-medium">No companies match your filters</p>
@@ -2316,6 +2369,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
                                   setFilterCompanyCategory(new Set());
                                   setFilterCompanyDateAdded({});
                                   setFilterNewCompanies(false);
+                                  setFilterCompanyName('');
                                 }}
                                 className="text-xs text-[#911406] hover:underline mt-1"
                               >
