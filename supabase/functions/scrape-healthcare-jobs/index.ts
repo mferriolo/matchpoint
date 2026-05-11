@@ -1135,7 +1135,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             }
             processed++;
           }
-          await progress.updateStep('searching_sources', { items_processed: processed, sub_step: `${processed}/${totalUnits} queries, ${foundJobs.length} matching jobs found` });
+          await progress.updateStep('searching_sources', { items_processed: processed, sub_step: `${processed}/${totalUnits} queries, ${foundJobs.length} new jobs found` });
           // Tiny pause between batches as a courtesy to SerpAPI.
           if (i + PHASE_B_CONCURRENCY < targets.length) await new Promise(r2 => setTimeout(r2, 100));
         }
@@ -1155,12 +1155,12 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             for (const sj of r.jobsFound) ingestSerpResult(sj, '', `broad: ${role}`);
           }
           processed++;
-          await progress.updateStep('searching_sources', { items_processed: processed, sub_step: `${processed}/${totalUnits} queries, ${foundJobs.length} matching jobs found` });
+          await progress.updateStep('searching_sources', { items_processed: processed, sub_step: `${processed}/${totalUnits} queries, ${foundJobs.length} new jobs found` });
           await new Promise(r2 => setTimeout(r2, 150));
         }
 
         telem.recordSerpCalls(serpCalls);
-        telem.endStep(foundJobs.length, `${targets.length} companies + ${effectiveRoles.length} broad role searches → ${foundJobs.length} matching jobs found (${serpErrors} SerpAPI errors)`);
+        telem.endStep(foundJobs.length, `${targets.length} companies + ${effectiveRoles.length} broad role searches → ${foundJobs.length} new jobs found (${serpErrors} SerpAPI errors)`);
 
         // ---------- Phase D: Healthcare-specific board queries (v84) ----------
         // For each board domain in HEALTHCARE_BOARDS, run one SerpAPI Google
@@ -1340,11 +1340,11 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           const cpJobsAdded = foundJobs.length - cpJobsBefore;
           const atsBreakdown = Object.entries(atsCounts).map(([k, v]) => `${k}:${v}`).join(' ') || '(none)';
           log('searching_sources',
-            `Phase A complete: ${cpFetched} pages fetched, ${cpJobsAdded} new matching jobs ` +
+            `Phase A complete: ${cpFetched} pages fetched, ${cpJobsAdded} new jobs ` +
             `[${atsBreakdown}], ${cpErrors} errors`
           );
           telem.endStep(cpJobsAdded,
-            `${cpFetched} career pages fetched [${atsBreakdown}], ${cpJobsAdded} new matching jobs ` +
+            `${cpFetched} career pages fetched [${atsBreakdown}], ${cpJobsAdded} new jobs ` +
             `(${cpErrors} errors, ${deepScan ? 'deep' : 'fast'} mode${deepScan ? '' : `, ${skippedQuiet} quiet companies skipped`})`
           );
         } else if (!deepScan && allCareerTargets.length > 0) {
