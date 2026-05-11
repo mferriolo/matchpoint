@@ -598,6 +598,33 @@ const DesktopMarketingNewJobs: React.FC = () => {
     setPendingContactsCompanyFilter(companyName);
     setActiveTab('contacts');
   }, []);
+  // Tracker tile → tab navigation. Each handler also seeds the
+  // appropriate "new since last run" / "show all" filter on arrival.
+  const [pendingJobsClearAll, setPendingJobsClearAll] = useState(false);
+  const [pendingJobsNewLastRun, setPendingJobsNewLastRun] = useState(false);
+  const navigateAllOpenJobs = useCallback(() => {
+    setPendingJobsClearAll(true);
+    setActiveTab('jobs');
+  }, []);
+  const navigateNewJobs = useCallback(() => {
+    setPendingJobsNewLastRun(true);
+    setActiveTab('jobs');
+  }, []);
+  const navigateNewCompanies = useCallback(() => {
+    setFilterCompanyName('');
+    setFilterCompanyCategory(new Set());
+    setFilterCompanyDateAdded({});
+    setFilterHighPriorityCompanies(false);
+    setFilterNewCompanies(true);
+    setActiveTab('companies');
+  }, []);
+  const navigateNewContacts = useCallback(() => {
+    setFilterContactCompany(new Set());
+    setFilterContactTitle(new Set());
+    setFilterContactSource(new Set());
+    setFilterNewContacts(true);
+    setActiveTab('contacts');
+  }, []);
   // Apply the pending contacts-company filter when one is set. Same
   // one-shot pattern as JobsTabContent's pending filter — seed once,
   // clear, let the user mutate freely afterward.
@@ -1973,6 +2000,10 @@ const DesktopMarketingNewJobs: React.FC = () => {
               companies={companies}
               contacts={contacts}
               loading={loading}
+              onNavigateAllOpenJobs={navigateAllOpenJobs}
+              onNavigateNewJobs={navigateNewJobs}
+              onNavigateNewCompanies={navigateNewCompanies}
+              onNavigateNewContacts={navigateNewContacts}
             />
           </TabsContent>
 
@@ -1989,6 +2020,10 @@ const DesktopMarketingNewJobs: React.FC = () => {
               lastRunStartedAt={lastRunStartedAt}
               pendingCompanyFilter={pendingJobsCompanyFilter}
               onPendingCompanyFilterApplied={() => setPendingJobsCompanyFilter(null)}
+              pendingNewLastRunFilter={pendingJobsNewLastRun}
+              onPendingNewLastRunFilterApplied={() => setPendingJobsNewLastRun(false)}
+              pendingClearAllFilters={pendingJobsClearAll}
+              onPendingClearAllFiltersApplied={() => setPendingJobsClearAll(false)}
               onNavigateToCompany={navigateToCompany}
               onNavigateToContactsByCompany={navigateToContactsByCompany}
             />

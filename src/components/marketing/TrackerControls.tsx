@@ -131,6 +131,14 @@ interface TrackerControlsProps {
   companies: any[];
   contacts: any[];
   loading: boolean;
+  // Tile navigation. Each tile click jumps to the appropriate tab,
+  // pre-filtered to match the tile's count (e.g. "New Roles Added"
+  // → Jobs tab with the New-last-run filter on). All optional so
+  // the component still renders standalone if needed.
+  onNavigateAllOpenJobs?: () => void;
+  onNavigateNewJobs?: () => void;
+  onNavigateNewCompanies?: () => void;
+  onNavigateNewContacts?: () => void;
 }
 
 // ============================================================
@@ -245,7 +253,8 @@ const StepProgressRow: React.FC<{
 // MAIN COMPONENT
 // ============================================================
 const TrackerControls: React.FC<TrackerControlsProps> = ({
-  onComplete, onExportMaster, onExportNewData, jobs, companies, contacts, loading
+  onComplete, onExportMaster, onExportNewData, jobs, companies, contacts, loading,
+  onNavigateAllOpenJobs, onNavigateNewJobs, onNavigateNewCompanies, onNavigateNewContacts,
 }) => {
   const { toast } = useToast();
   const [running, setRunning] = useState(false);
@@ -1730,15 +1739,34 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
         </div>
       )}
 
-      {/* Filter Tiles */}
+      {/* Filter Tiles — each tile jumps the user to the matching tab
+          with the relevant filter pre-applied. The in-tracker
+          activeFilter still toggles via the tile click so any code
+          path that reads it (or returns later) stays in sync. */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {filterTiles.map(tile => {
           const isActive = activeFilter === tile.key;
+          const handleNavigate = () => {
+            setActiveFilter(tile.key);
+            switch (tile.key) {
+              case 'all_roles':     onNavigateAllOpenJobs?.();   break;
+              case 'new_roles':     onNavigateNewJobs?.();       break;
+              case 'new_companies': onNavigateNewCompanies?.();  break;
+              case 'contacts_added': onNavigateNewContacts?.();  break;
+            }
+          };
+          const tooltipFor: Record<FilterType, string> = {
+            all_roles: 'Open the Jobs tab with all open roles',
+            new_roles: 'Open the Jobs tab filtered to roles added in the last tracker run',
+            new_companies: 'Open the Companies tab filtered to companies added in the last tracker run',
+            contacts_added: 'Open the Contacts tab filtered to contacts added in the last tracker run',
+          };
           return (
             <button
               key={tile.key}
-              onClick={() => setActiveFilter(tile.key)}
-              className={`relative rounded-xl border-2 p-4 text-left transition-all duration-200 cursor-pointer ${isActive ? tile.activeColor : tile.color}`}
+              onClick={handleNavigate}
+              title={tooltipFor[tile.key]}
+              className={`relative rounded-xl border-2 p-4 text-left transition-all duration-200 cursor-pointer hover:scale-[1.01] ${isActive ? tile.activeColor : tile.color}`}
             >
               <div className="flex items-center justify-between mb-1">
                 <span className={`${isActive ? 'opacity-90' : 'opacity-60'}`}>{tile.icon}</span>

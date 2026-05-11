@@ -65,6 +65,16 @@ interface JobsTabContentProps {
   // tries to change it.
   pendingCompanyFilter?: string | null;
   onPendingCompanyFilterApplied?: () => void;
+  // One-shot trigger to enable the "New (last run)" filter when the
+  // parent navigates from the Tracker's "New Roles Added" tile. Same
+  // pending/applied dance as pendingCompanyFilter.
+  pendingNewLastRunFilter?: boolean;
+  onPendingNewLastRunFilterApplied?: () => void;
+  // One-shot trigger to clear every active filter on this tab.
+  // Used when the parent navigates from "All Open Roles" so the
+  // user lands on an unfiltered list regardless of prior state.
+  pendingClearAllFilters?: boolean;
+  onPendingClearAllFiltersApplied?: () => void;
   // Click handlers for the company cell: jump to Companies tab
   // pre-filtered, or to Contacts tab pre-filtered.
   onNavigateToCompany?: (companyName: string) => void;
@@ -208,7 +218,7 @@ function formatScrubDuration(ms: number): string {
 
 // ---- Main Component ----
 
-const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], contacts = [], loading, onRefresh, lastRunId = null, lastRunStartedAt = null, pendingCompanyFilter = null, onPendingCompanyFilterApplied, onNavigateToCompany, onNavigateToContactsByCompany }) => {
+const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], contacts = [], loading, onRefresh, lastRunId = null, lastRunStartedAt = null, pendingCompanyFilter = null, onPendingCompanyFilterApplied, pendingNewLastRunFilter = false, onPendingNewLastRunFilterApplied, pendingClearAllFilters = false, onPendingClearAllFiltersApplied, onNavigateToCompany, onNavigateToContactsByCompany }) => {
   const { toast } = useToast();
   const [subTab, setSubTab] = useState<'open' | 'closed'>('open');
   const [searchTerm, setSearchTerm] = useState('');
@@ -245,6 +255,43 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingCompanyFilter]);
+
+  // Same one-shot pattern for the Tracker's "New Roles Added" tile.
+  // Force subTab=open + filterNewLastRun=true so the user lands on
+  // the matching set regardless of prior state.
+  useEffect(() => {
+    if (pendingNewLastRunFilter) {
+      setSubTab('open');
+      setFilterNewLastRun(true);
+      onPendingNewLastRunFilterApplied?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingNewLastRunFilter]);
+
+  // And a clear-all for the "All Open Roles" tile so the user lands
+  // on an unfiltered list. Resets every column filter + the high-
+  // priority + new-since toggles. Doesn't touch subTab (stays open).
+  useEffect(() => {
+    if (pendingClearAllFilters) {
+      setSearchTerm('');
+      setFilterPriorityBucket(new Set());
+      setFilterCompanyType(new Set());
+      setFilterJobType(new Set());
+      setFilterJobTitle(new Set());
+      setFilterCompany(new Set());
+      setFilterCity(new Set());
+      setFilterState(new Set());
+      setFilterSource(new Set());
+      setFilterHasDescription(new Set());
+      setFilterDatePosted({});
+      setFilterDateFound({});
+      setFilterHighPriority(false);
+      setFilterNewLastRun(false);
+      setSubTab('open');
+      onPendingClearAllFiltersApplied?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingClearAllFilters]);
 
   // Column filters. Multi-select: empty set == "no filter applied" (all
   // values pass). Any non-empty set restricts the column to the listed
