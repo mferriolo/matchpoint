@@ -577,6 +577,36 @@ const DesktopMarketingNewJobs: React.FC = () => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedContact, setSelectedContact] = useState<any>(null);
   const [activeTab, setActiveTab] = useState('tracker');
+  // Cross-tab navigation. Clicking a company name anywhere should jump
+  // to a relevant tab pre-filtered to that company. The "pending" filter
+  // is consumed by the destination tab on arrival, then cleared so the
+  // user can adjust the filter afterward without it snapping back.
+  const [pendingJobsCompanyFilter, setPendingJobsCompanyFilter] = useState<string | null>(null);
+  const [pendingContactsCompanyFilter, setPendingContactsCompanyFilter] = useState<string | null>(null);
+  const navigateToCompany = useCallback((companyName: string) => {
+    if (!companyName) return;
+    setFilterCompanyName(companyName);
+    setActiveTab('companies');
+  }, []);
+  const navigateToJobsByCompany = useCallback((companyName: string) => {
+    if (!companyName) return;
+    setPendingJobsCompanyFilter(companyName);
+    setActiveTab('jobs');
+  }, []);
+  const navigateToContactsByCompany = useCallback((companyName: string) => {
+    if (!companyName) return;
+    setPendingContactsCompanyFilter(companyName);
+    setActiveTab('contacts');
+  }, []);
+  // Apply the pending contacts-company filter when one is set. Same
+  // one-shot pattern as JobsTabContent's pending filter — seed once,
+  // clear, let the user mutate freely afterward.
+  useEffect(() => {
+    if (pendingContactsCompanyFilter) {
+      setFilterContactCompany(new Set([pendingContactsCompanyFilter]));
+      setPendingContactsCompanyFilter(null);
+    }
+  }, [pendingContactsCompanyFilter]);
   const [showImportTool, setShowImportTool] = useState(false);
   const [showCleanup, setShowCleanup] = useState(false);
   const [showPushToCrelate, setShowPushToCrelate] = useState(false);
@@ -1957,6 +1987,10 @@ const DesktopMarketingNewJobs: React.FC = () => {
               onRefresh={loadData}
               lastRunId={lastRunId}
               lastRunStartedAt={lastRunStartedAt}
+              pendingCompanyFilter={pendingJobsCompanyFilter}
+              onPendingCompanyFilterApplied={() => setPendingJobsCompanyFilter(null)}
+              onNavigateToCompany={navigateToCompany}
+              onNavigateToContactsByCompany={navigateToContactsByCompany}
             />
           </TabsContent>
 
@@ -2403,8 +2437,37 @@ const DesktopMarketingNewJobs: React.FC = () => {
                               className="w-3.5 h-3.5 rounded border-gray-300 text-[#911406] focus:ring-[#911406] cursor-pointer"
                             />
                           </td>
-                          <td className="px-4 py-3">
-                            <div className="font-medium text-gray-900">{c.company_name}</div>
+                          <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
+                            <Popover>
+                              <PopoverTrigger asChild>
+                                <button
+                                  type="button"
+                                  className="font-medium text-gray-900 text-left hover:underline decoration-dotted underline-offset-2"
+                                  title={`Actions for ${c.company_name}`}
+                                >
+                                  {c.company_name}
+                                </button>
+                              </PopoverTrigger>
+                              <PopoverContent align="start" className="w-64 p-1" onOpenAutoFocus={e => e.preventDefault()}>
+                                <div className="px-2 py-1.5 text-[11px] text-gray-500 truncate">{c.company_name}</div>
+                                <button
+                                  type="button"
+                                  onClick={() => navigateToJobsByCompany(c.company_name)}
+                                  className="w-full text-left px-2 py-1.5 rounded text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                                >
+                                  <Briefcase className="w-3.5 h-3.5 flex-shrink-0 text-gray-500" />
+                                  View jobs at this company
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => navigateToContactsByCompany(c.company_name)}
+                                  className="w-full text-left px-2 py-1.5 rounded text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                                >
+                                  <Users className="w-3.5 h-3.5 flex-shrink-0 text-gray-500" />
+                                  View contacts at this company
+                                </button>
+                              </PopoverContent>
+                            </Popover>
                           </td>
                           <td className="px-4 py-3">
                             {editingCompanyTypeId === c.id ? (
@@ -3487,6 +3550,23 @@ const DesktopMarketingNewJobs: React.FC = () => {
                                     <div className="px-2 py-1.5 text-[11px] text-gray-500 truncate">
                                       {c.company_name}
                                     </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => navigateToCompany(c.company_name)}
+                                      className="w-full text-left px-2 py-1.5 rounded text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                                    >
+                                      <Building2 className="w-3.5 h-3.5 flex-shrink-0 text-gray-500" />
+                                      View on Companies tab
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => navigateToJobsByCompany(c.company_name)}
+                                      className="w-full text-left px-2 py-1.5 rounded text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                                    >
+                                      <Briefcase className="w-3.5 h-3.5 flex-shrink-0 text-gray-500" />
+                                      View jobs at this company
+                                    </button>
+                                    <div className="border-t border-gray-100 my-1" />
                                     <button
                                       type="button"
                                       onClick={() => handleFindContacts({ mode: 'company', companyId: c.company_id, companyName: c.company_name })}

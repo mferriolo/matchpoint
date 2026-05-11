@@ -15,6 +15,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter
 } from '@/components/ui/dialog';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { MultiSelectColumnHeader } from './MultiSelectColumnHeader';
 import { sourceLabel, sourceUrl, fmtDateTime, companyTypeBadge, matchJobType } from './TrackerJobsTable';
 import JobPriorityBadge from './JobPriorityBadge';
@@ -56,6 +57,18 @@ interface JobsTabContentProps {
   // quick filter. Both nullable for the no-runs-yet case.
   lastRunId?: string | null;
   lastRunStartedAt?: string | null;
+  // Cross-tab navigation. When the parent flips to the Jobs tab via a
+  // company-name click elsewhere, it sets pendingCompanyFilter to the
+  // target company name. We apply it once on arrival (seeds
+  // filterCompany), then signal back so the parent clears the pending
+  // value — keeping it would re-seed the filter every time the user
+  // tries to change it.
+  pendingCompanyFilter?: string | null;
+  onPendingCompanyFilterApplied?: () => void;
+  // Click handlers for the company cell: jump to Companies tab
+  // pre-filtered, or to Contacts tab pre-filtered.
+  onNavigateToCompany?: (companyName: string) => void;
+  onNavigateToContactsByCompany?: (companyName: string) => void;
 }
 
 // Sort keys mirror the Tracker's jobs table. Legacy keys (job_category,
@@ -195,7 +208,7 @@ function formatScrubDuration(ms: number): string {
 
 // ---- Main Component ----
 
-const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], contacts = [], loading, onRefresh, lastRunId = null, lastRunStartedAt = null }) => {
+const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], contacts = [], loading, onRefresh, lastRunId = null, lastRunStartedAt = null, pendingCompanyFilter = null, onPendingCompanyFilterApplied, onNavigateToCompany, onNavigateToContactsByCompany }) => {
   const { toast } = useToast();
   const [subTab, setSubTab] = useState<'open' | 'closed'>('open');
   const [searchTerm, setSearchTerm] = useState('');
@@ -219,6 +232,19 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
       if (data) setJobTypeOptions(data.map((r: any) => r.name).filter(Boolean));
     });
   }, []);
+
+  // Apply a cross-tab company filter when the parent flips us to this
+  // tab via a company-name click on Jobs / Contacts. Seed filterCompany
+  // exactly once per pending value, then signal back so the parent
+  // clears it — leaving the value pending would re-seed on every
+  // setFilterCompany call and trap the user.
+  useEffect(() => {
+    if (pendingCompanyFilter) {
+      setFilterCompany(new Set([pendingCompanyFilter]));
+      onPendingCompanyFilterApplied?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingCompanyFilter]);
 
   // Column filters. Multi-select: empty set == "no filter applied" (all
   // values pass). Any non-empty set restricts the column to the listed
@@ -1597,11 +1623,49 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
                         ? <span className="text-gray-700">{matchedJobType}</span>
                         : <span className="text-gray-300">—</span>}
                     </td>
-                    {/* Company (with BLOCKED badge when applicable). */}
-                    <td className="px-4 py-3 font-medium text-gray-900 max-w-[200px]">
+                    {/* Company (with BLOCKED badge when applicable).
+                        Clickable: opens a popover with cross-tab nav. */}
+                    <td className="px-4 py-3 font-medium text-gray-900 max-w-[200px]" onClick={e => e.stopPropagation()}>
                       {j.company_name ? (
                         <div className="flex items-center gap-1.5">
-                          <span className={`truncate ${blocked ? 'text-gray-500 line-through' : ''}`}>{j.company_name}</span>
+                          {onNavigateToCompany || onNavigateToContactsByCompany ? (
+                            <Popover>
+                              <PopoverTrigger asChild>
+                                <button
+                                  type="button"
+                                  className={`truncate text-left hover:underline decoration-dotted underline-offset-2 ${blocked ? 'text-gray-500 line-through' : 'text-gray-900'}`}
+                                  title={`Actions for ${j.company_name}`}
+                                >
+                                  {j.company_name}
+                                </button>
+                              </PopoverTrigger>
+                              <PopoverContent align="start" className="w-64 p-1" onOpenAutoFocus={e => e.preventDefault()}>
+                                <div className="px-2 py-1.5 text-[11px] text-gray-500 truncate">{j.company_name}</div>
+                                {onNavigateToCompany && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onNavigateToCompany(j.company_name)}
+                                    className="w-full text-left px-2 py-1.5 rounded text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                                  >
+                                    <Building2 className="w-3.5 h-3.5 flex-shrink-0 text-gray-500" />
+                                    View on Companies tab
+                                  </button>
+                                )}
+                                {onNavigateToContactsByCompany && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onNavigateToContactsByCompany(j.company_name)}
+                                    className="w-full text-left px-2 py-1.5 rounded text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                                  >
+                                    <Search className="w-3.5 h-3.5 flex-shrink-0 text-gray-500" />
+                                    View contacts at this company
+                                  </button>
+                                )}
+                              </PopoverContent>
+                            </Popover>
+                          ) : (
+                            <span className={`truncate ${blocked ? 'text-gray-500 line-through' : ''}`}>{j.company_name}</span>
+                          )}
                           {blocked && (
                             <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold flex-shrink-0">BLOCKED</span>
                           )}
