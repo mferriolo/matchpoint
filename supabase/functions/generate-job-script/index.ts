@@ -147,6 +147,76 @@ function classifyRecipient(rawTitle: string): { bucket: string; framing: string 
   return null;
 }
 
+// Classify the OPEN ROLE (the job being filled) into a tier so the
+// prompt can pick the right "what problem does this vacancy create?"
+// framing. The model's default lean — drawn from generic recruiting
+// prose — is to talk about leadership stability, board confidence,
+// and team morale, which is wrong for a staff Hospice NP or a
+// hospitalist line. This is a separate axis from the recipient
+// classifier (which targets the person we're WRITING TO).
+//
+// Tiers:
+//   - leadership   → C-suite, VP, Director-of-X, Chief-of-X, Medical
+//                    Director, Practice Administrator, Manager,
+//                    Supervisor, Head of X. Leadership-stability
+//                    framing is appropriate.
+//   - physician_staff → MD/DO / Hospitalist / Attending / "Physician"
+//                       with no leadership prefix. Frame around
+//                       patient panel coverage, RVU/productivity loss,
+//                       schedule gaps.
+//   - clinical_staff  → NP, PA, RN, LPN, CRNA, CNM. Frame around
+//                       patient access, timely visits, panel coverage,
+//                       coverage gaps for the existing team.
+//   - allied_staff    → Therapists, technologists, MAs, pharmacists,
+//                       social workers, etc. Frame around
+//                       operational throughput in the relevant
+//                       service line.
+//   - other        → couldn't classify; fall back to a generic
+//                    operational framing (no leadership-stability).
+function classifyJobRoleTier(rawTitle: string): 'leadership' | 'physician_staff' | 'clinical_staff' | 'allied_staff' | 'other' {
+  const t = rawTitle.toLowerCase();
+  if (!t.trim()) return 'other';
+  // ORDER MATTERS: leadership patterns first so a "Director of Nursing"
+  // doesn't slip through into clinical_staff via the "nurse" trigger.
+  // C-suite + executive credentials.
+  if (/\b(cmo|cmio|ceo|cfo|coo|chro|cno|cio|cto|cco)\b/.test(t)) return 'leadership';
+  if (/chief\s+(medical|nursing|operating|executive|financial|human|people|clinical|information|technology|marketing|legal|compliance|growth|strategy|administrative|of\s+staff)/.test(t)) return 'leadership';
+  if (/\bv\.?\s?p\.?\b|\bsvp\b|\bevp\b|vice\s+president/.test(t)) return 'leadership';
+  if (/(senior\s+)?vice\s+president/.test(t)) return 'leadership';
+  // Director / Head / Chief titles.
+  if (/medical\s+director|clinical\s+director|nursing\s+director|executive\s+director/.test(t)) return 'leadership';
+  if (/director\s+of\b/.test(t)) return 'leadership';
+  if (/\bdirector,\s+\w+/.test(t)) return 'leadership';
+  if (/head\s+of\b/.test(t)) return 'leadership';
+  if (/chair(person|man|woman)?\s+of\b|department\s+chair/.test(t)) return 'leadership';
+  if (/chief\s+of\s+(staff|medicine|surgery|pediatrics|cardiology|oncology|psychiatry|radiology|anesthesiology|emergency)/.test(t)) return 'leadership';
+  // Mid-tier leadership / operations.
+  if (/\bpresident\b/.test(t)) return 'leadership';
+  if (/practice\s+(administrator|manager)|\badministrator\b/.test(t)) return 'leadership';
+  if (/\bmanager\b/.test(t)) return 'leadership';
+  if (/\bsupervisor\b/.test(t)) return 'leadership';
+  // "Lead Nurse" / "Lead NP" are clinical, not leadership. Use a
+  // negative lookahead so plain "Lead" still trips leadership tier.
+  if (/\blead\b(?!\s*(nurse|np|pa|physician|technician|technologist|therapist|coordinator))/.test(t)) return 'leadership';
+
+  // Physician staff — MD/DO line clinicians (hospitalist, attending,
+  // generalist physician roles). Catches "Family Medicine Physician",
+  // "Internal Medicine Physician", "Hospitalist", "Attending",
+  // explicit MD/DO credentials.
+  if (/\b(hospitalist|attending|intensivist|laborist|nocturnist|proceduralist|anesthesiologist|radiologist|pathologist|pediatrician|geriatrician|psychiatrist|cardiologist|oncologist|surgeon)\b/.test(t)) return 'physician_staff';
+  if (/\b(physician|m\.?d\.?|d\.?o\.?)\b/.test(t) && !/assistant/.test(t)) return 'physician_staff';
+
+  // Advanced-practice + RN-line clinical staff.
+  if (/nurse\s+practitioner|\bnp\b|np\/pa|\bcrna\b|\bcnm\b|\bcns\b/.test(t)) return 'clinical_staff';
+  if (/physician\s+assistant|\bpa-?c\b|\bpa\b(?!\w)/.test(t)) return 'clinical_staff';
+  if (/registered\s+nurse|\brn\b(?!\w)|\blpn\b|\bcma\b|\bcna\b/.test(t)) return 'clinical_staff';
+
+  // Allied health staff.
+  if (/therap(ist|y)|technologist|technician|medical\s+assistant|\bma\b(?!\w)|pharmacist|dietitian|nutritionist|psychologist|social\s+worker|\bswcm\b|case\s+manager|care\s+manager|navigator/.test(t)) return 'allied_staff';
+
+  return 'other';
+}
+
 // True when the recipient's title indicates an MD / DO physician,
 // who should be addressed as "Dr. {last_name}" rather than by first
 // name. Healthcare-specific: a Chief Medical Officer / Medical
@@ -217,10 +287,37 @@ function buildPrompt(job: JobContext, f: FormInputs, sender: SenderIdentity, rec
   const companyName = val(job.company_name);
   const jobUrl = val(job.job_url);
 
+  // Classify the OPEN ROLE so the framing matches its tier. A staff
+  // Hospice NP doesn't generate "board confidence" or "leadership
+  // stability" problems — it generates patient-access and panel-
+  // coverage problems. Without this, the model defaults to executive-
+  // search prose for every role.
+  const roleTier = jobTitle ? classifyJobRoleTier(jobTitle) : 'other';
+  const roleTierFraming: Record<typeof roleTier, string> = {
+    leadership:
+      'OPEN ROLE TIER: this is a LEADERSHIP / executive role. Leadership-stability framing is appropriate. Lead with the strategic / continuity problem the vacancy creates — credibility with the board and remaining executives, signaling to the broader team, retention risk among reports, cultural cost of a prolonged search, and the operational risk of leaving a leadership seat empty under pressure. Use language like "leadership stability", "executive continuity", "succession", "board-level visibility" as appropriate to the title.',
+    physician_staff:
+      'OPEN ROLE TIER: this is a STAFF PHYSICIAN role (NOT leadership). Frame the unfilled-role problem in OPERATIONAL / clinical-production terms: patient panel coverage, RVU and productivity loss per day of vacancy, schedule gaps, locum/contract-labor burn while the role sits open, access-to-care impact for patients, and the load redistributed onto remaining clinicians. Concrete daily-cost language wins.',
+    clinical_staff:
+      'OPEN ROLE TIER: this is a STAFF CLINICAL role — NP, PA, RN, etc. (NOT leadership). Frame the unfilled-role problem in OPERATIONAL / patient-access terms: making sure patients get seen in a timely way, panel coverage for the existing physicians, visit volume and throughput, the load redistributed onto the rest of the clinical team, and missed visits or longer wait times when the role is empty. For hospice / home-health / SNF contexts, emphasize timely patient visits and continuity of care.',
+    allied_staff:
+      'OPEN ROLE TIER: this is an ALLIED-HEALTH STAFF role — therapist, technologist, MA, social worker, case manager, etc. (NOT leadership). Frame the unfilled-role problem in OPERATIONAL / throughput terms specific to the service line: scheduling bottlenecks, throughput in the relevant department, the impact on the clinicians whose work depends on this role, and the daily cost of leaving the position vacant.',
+    other:
+      'OPEN ROLE TIER: unclassified. Default to OPERATIONAL framing — what daily work is not getting done while this role is vacant, and what that costs the organization. Avoid leadership-stability language unless the title itself is clearly executive.',
+  };
+
   const constraints: string[] = [
     'Reference the company and the open role specifically — no mass-email language.',
     `Target the actual needs of a ${audience}; a clinical leader has different priorities than HR or TA.`,
     'Identify the likely business problem the open role creates, and explain why it matters now.',
+    roleTierFraming[roleTier],
+    // Negative constraint: keep leadership-stability prose contained
+    // to actual leadership roles. The model's default lean is to
+    // sprinkle "board confidence", "team morale", "remaining leaders"
+    // across every script regardless of the role's tier.
+    roleTier === 'leadership'
+      ? 'Leadership-stability language is allowed for this role.'
+      : 'DO NOT write about "leadership stability", "board confidence", "team morale", "remaining leadership", "executive continuity", "credibility with the board", or similar leadership-framing phrases. This is NOT a leadership role. Speculating about board dynamics or team morale you cannot know about will come across as out-of-touch. Stay in operational/clinical-production territory.',
     'Position MedCentric as a specialized healthcare recruiting partner — not a generic staffing agency.',
     `Emphasize this proof point: ${proof}.`,
     `End with this call to action, kept low-friction: ${cta}.`,
