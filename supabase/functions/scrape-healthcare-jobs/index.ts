@@ -1416,10 +1416,20 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           const datePostedIso = parseSerpPostedAt(j._postedAtRaw) || new Date().toISOString();
           // upsert with onConflict='dedup_key' protects against rare
           // races (concurrent runs, dupes that slipped past the in-memory
-          // jKeys check due to whitespace/case oddities). ignoreDuplicates
-          // because the in-run reseenIds path already handles refreshing
-          // last_seen_at on existing rows.
-          const { error } = await supabase.from('marketing_jobs').upsert({
+          // jKeys check due to whitespace/case oddities) and the much-
+          // more-common case post-v153: re-discovering a row already in
+          // the DB that the in-memory map no longer carries because it's
+          // marked closed. ignoreDuplicates=true silently no-ops on
+          // conflict.
+          //
+          // v154: chain .select('id') so we can distinguish a real
+          // insert (data has one row) from a silent dedup skip (data is
+          // empty). The previous version counted `error===null` as a
+          // success, but ignoreDuplicates returns null/null on conflict
+          // too — so once the partial-index/onConflict mismatch was
+          // fixed the counter would over-report by re-counting every
+          // closed-job re-discovery.
+          const { data: insData, error } = await supabase.from('marketing_jobs').upsert({
             company_id: cid, company_name: j.company, job_title: nt, job_type: nt, job_category: cat,
             city: j.city || '', state: j.state || '', location: j.city && j.state ? `${j.city}, ${j.state}` : '',
             job_url: directUrl, indeed_url: buildIndeedUrl(nt, j.company, j.city, j.state),
@@ -1430,15 +1440,21 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
             url_status: 'live',
             url_check_result: (j._verifyReason || '').substring(0, 500),
             last_url_check: new Date().toISOString()
-          }, { onConflict: 'dedup_key', ignoreDuplicates: true });
-          if (!error) {
-            added++;
-            roleB[nt] = (roleB[nt] || 0) + 1;
-          } else {
+          }, { onConflict: 'dedup_key', ignoreDuplicates: true }).select('id');
+          if (error) {
             // v152: previously these were silently dropped (only
             // counted on success). When 52/52 inserts fail the run
             // shows "0 jobs added" with zero diagnosis.
             log('deduplicating', `JOB UPSERT FAILED for "${nt}" at "${j.company}" (${j.city || '?'}, ${j.state || '?'}): ${error.message}${(error as any).code ? ` [${(error as any).code}]` : ''}${(error as any).details ? ` — ${(error as any).details}` : ''}`);
+          } else if (insData && insData.length > 0) {
+            added++;
+            roleB[nt] = (roleB[nt] || 0) + 1;
+          } else {
+            // DB-level dedup hit — row already exists under this
+            // dedup_key (almost always a closed job re-surfacing on a
+            // board). Count it as a duplicate so the run summary is
+            // honest, then move on.
+            dupes++;
           }
           if (processedInsert % 10 === 0) await progress.updateStep('deduplicating', { items_processed: processedInsert, sub_step: `Inserted ${added}/${foundJobs.length} jobs (${coAdded} new companies)` });
         }
