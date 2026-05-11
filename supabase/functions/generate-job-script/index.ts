@@ -300,10 +300,10 @@ ${greeting && useDoctor
   R5. Throughout the body, when re-addressing or referring to the recipient by name, use "${greeting}" — never their first name. Use second-person singular ("you", "your team"), never "you all" or group phrasing.
   R6. Recognize that the recipient is a physician — adjust tone to match (peer-to-peer, clinical respect, never overly familiar).`
         : greeting
-          ? `  R1. The cold call MUST open by addressing the recipient: "Hi ${greeting}, this is ${senderName}${senderTitle ? `, ${senderTitle}` : ''} from ${senderCompany}." — combine with the sender-identity rule above.
-  R2. The email body MUST start with "Hi ${greeting}," on its own line, then a blank line, then the role-reference opener. No "Dear", no "Hello there", no group salutations.
-  R3. The follow-up email body MUST start with "Hi ${greeting}," on its own line, then a blank line, then the follow-up bump.
-  R4. The LinkedIn message MUST start with "Hi ${greeting}," and read like a 1:1 note, not a broadcast.
+          ? `  R1. The cold call MUST open by addressing the recipient: "${greeting}, this is ${senderName}${senderTitle ? `, ${senderTitle}` : ''} from ${senderCompany}." — use the first name directly, NO "Hi"/"Hello"/"Hey" prefix. Combine with the sender-identity rule above.
+  R2. The email body MUST start with "${greeting}," on its own line (the first name alone, NO "Hi"/"Hello"/"Hey"/"Dear" prefix), then a blank line, then the role-reference opener. No group salutations.
+  R3. The follow-up email body MUST start with "${greeting}," on its own line (the first name alone, NO "Hi"/"Hello"/"Hey" prefix), then a blank line, then the follow-up bump.
+  R4. The LinkedIn message MUST start with "${greeting}," (the first name alone, NO "Hi"/"Hello"/"Hey" prefix) and read like a 1:1 note, not a broadcast.
   R5. Use second-person singular throughout ("you", "your team") — never "you all", "your team(s)", or anything that implies a group recipient.`
           : `  R1. With no name on file, open every output with "Hi there," (singular, not "Hi all").
   R2. Use second-person singular throughout — never "you all" or anything that implies a group recipient.
@@ -337,12 +337,12 @@ Return STRICT JSON matching this exact shape, no prose outside the JSON:
   "coldCall": "string — under 90 seconds spoken, conversational. First sentence must name the open role verbatim. Then the hook, the likely problem, and the CTA. NEVER include a URL in the spoken cold call.",
   "email": {
     "subject": "string — short, specific, no clickbait, ideally references the role or company",
-    "body": "string — 5-9 short lines. First line MUST be the recipient greeting per the RECIPIENT FRAMING rules above (e.g. 'Hi {first_name},' on its own line, blank line, then the role-reference opener). Then problem statement, why-it-matters, solution + proof point, CTA. Do NOT include the posting URL anywhere in the body — the client will hyperlink the role title to it."
+    "body": "string — 5-9 short lines. First line MUST be the recipient greeting per the RECIPIENT FRAMING rules above (for non-physicians: '{first_name},' on its own line — first name alone, NO 'Hi'/'Hello'/'Dear' prefix; for physicians: 'Dr. {last_name},'). Blank line, then the role-reference opener. Then problem statement, why-it-matters, solution + proof point, CTA. Do NOT include the posting URL anywhere in the body — the client will hyperlink the role title to it."
   },
-  "linkedin": "string — 4-7 short lines, more casual than the email. Open with 'Hi {first_name},' (singular) per the RECIPIENT FRAMING rules. Name the role verbatim in the first or second sentence. If a posting URL was provided, include it on its own line near the opener (LinkedIn doesn't render HTML hyperlinks).",
+  "linkedin": "string — 4-7 short lines, more casual than the email. Open per the RECIPIENT FRAMING rules (non-physicians: '{first_name},' — first name alone, NO 'Hi' prefix; physicians: 'Dr. {last_name},'). Name the role verbatim in the first or second sentence. If a posting URL was provided, include it on its own line near the opener (LinkedIn doesn't render HTML hyperlinks).",
   "followUpEmail": {
     "subject": "string — short, references that this is a follow-up. Examples: 'Following up on the {role} search', 'Re: {Company} {role}'. Avoid 'Just checking in'.",
-    "body": "string — 4-6 short lines. First line MUST be the recipient greeting per the RECIPIENT FRAMING rules ('Hi {first_name},' on its own line, blank line, then the follow-up bump that names the role verbatim). Then one line restating the specific problem the open role likely creates, one line reaffirming the proof point, and the same CTA. Do NOT include the posting URL — the client will hyperlink the role title to it. Tone is patient, not pushy."
+    "body": "string — 4-6 short lines. First line MUST be the recipient greeting per the RECIPIENT FRAMING rules (non-physicians: '{first_name},' on its own line — first name alone, NO 'Hi' prefix; physicians: 'Dr. {last_name},'). Blank line, then the follow-up bump that names the role verbatim. Then one line restating the specific problem the open role likely creates, one line reaffirming the proof point, and the same CTA. Do NOT include the posting URL — the client will hyperlink the role title to it. Tone is patient, not pushy."
   }
 }`;
 }
