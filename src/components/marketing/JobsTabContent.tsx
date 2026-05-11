@@ -1114,6 +1114,11 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
     [filterPriorityBucket, filterCompanyType, filterJobType, filterJobTitle, filterCompany, filterCity, filterState, filterSource, filterHasDescription].filter(s => s.size > 0).length
     + (filterDatePosted.from || filterDatePosted.to ? 1 : 0)
     + (filterDateFound.from || filterDateFound.to ? 1 : 0);
+  // True when any filter that narrows the visible row set is active.
+  // Drives the sub-tab pill count: when on, the active pill reflects
+  // the filtered slice instead of the full open/closed total.
+  const hasAnyActiveFilter =
+    activeFilterCount > 0 || !!searchTerm.trim() || filterHighPriority || filterNewLastRun;
 
   const clearAllFilters = () => {
     setFilterPriorityBucket(new Set());
@@ -1154,19 +1159,25 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
           <button
             onClick={() => setSubTab('open')}
             className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${subTab === 'open' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+            title={subTab === 'open' && hasAnyActiveFilter ? `Showing ${sortedJobs.length} of ${openJobs.length} open jobs (filter active)` : `${openJobs.length} open jobs`}
           >
-            Open Jobs
-            <span className={`ml-1.5 text-xs px-1.5 py-0.5 rounded-full ${subTab === 'open' ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-500'}`}>
-              {openJobs.length}
+            {subTab === 'open' && hasAnyActiveFilter ? 'Filtered Open' : 'Open Jobs'}
+            <span className={`ml-1.5 text-xs px-1.5 py-0.5 rounded-full ${subTab === 'open' ? (hasAnyActiveFilter ? 'bg-blue-100 text-blue-700' : 'bg-green-100 text-green-700') : 'bg-gray-200 text-gray-500'}`}>
+              {subTab === 'open' && hasAnyActiveFilter
+                ? <>{sortedJobs.length}<span className="opacity-60"> / {openJobs.length}</span></>
+                : openJobs.length}
             </span>
           </button>
           <button
             onClick={() => setSubTab('closed')}
             className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${subTab === 'closed' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+            title={subTab === 'closed' && hasAnyActiveFilter ? `Showing ${sortedJobs.length} of ${closedJobs.length} closed jobs (filter active)` : `${closedJobs.length} closed jobs`}
           >
-            Closed Jobs
-            <span className={`ml-1.5 text-xs px-1.5 py-0.5 rounded-full ${subTab === 'closed' ? 'bg-red-100 text-red-700' : 'bg-gray-200 text-gray-500'}`}>
-              {closedJobs.length}
+            {subTab === 'closed' && hasAnyActiveFilter ? 'Filtered Closed' : 'Closed Jobs'}
+            <span className={`ml-1.5 text-xs px-1.5 py-0.5 rounded-full ${subTab === 'closed' ? (hasAnyActiveFilter ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700') : 'bg-gray-200 text-gray-500'}`}>
+              {subTab === 'closed' && hasAnyActiveFilter
+                ? <>{sortedJobs.length}<span className="opacity-60"> / {closedJobs.length}</span></>
+                : closedJobs.length}
             </span>
           </button>
         </div>

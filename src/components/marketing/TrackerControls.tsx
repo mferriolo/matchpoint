@@ -927,19 +927,27 @@ const TrackerControls: React.FC<TrackerControlsProps> = ({
     return false;
   });
 
+  // Normalize the company_name key (lowercase + trim) so jobs whose
+  // denormalized company_name has whitespace/case drift relative to
+  // the canonical marketing_companies row still land in the right
+  // bucket. Without this, rows like "Centerwell" vs "CenterWell"
+  // are silently dropped from the tile total but counted on the
+  // Jobs tab (which already normalizes). 6-job gap reported in
+  // production was every case exactly this.
+  const normName = (s: string | null | undefined) => String(s || 'Unknown').toLowerCase().trim();
   const companyJobsMap: Record<string, any[]> = {};
   jobs.forEach(j => {
-    const key = j.company_name || 'Unknown';
+    const key = normName(j.company_name);
     if (!companyJobsMap[key]) companyJobsMap[key] = [];
     companyJobsMap[key].push(j);
   });
 
   const enrichedCompanies = companies.map(c => {
-    const cJobs = companyJobsMap[c.company_name] || [];
+    const cJobs = companyJobsMap[normName(c.company_name)] || [];
     const openJobs = cJobs.filter((j: any) => !j.is_closed && j.status !== 'Closed');
     const newJobsForCo = cJobs.filter((j: any) => lastRunId ? j.tracker_run_id === lastRunId : false);
     const isNewCo = lastRunStartedAt ? (c.created_at && c.created_at >= lastRunStartedAt) : false;
-    const cContacts = contacts.filter(ct => ct.company_name === c.company_name);
+    const cContacts = contacts.filter(ct => normName(ct.company_name) === normName(c.company_name));
     const recentCContacts = cContacts.filter(ct => {
       if (ct.tracker_run_id) return ct.tracker_run_id === lastRunId;
       if (lastRunStartedAt) return ct.created_at && ct.created_at >= lastRunStartedAt;
