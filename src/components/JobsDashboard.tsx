@@ -587,7 +587,14 @@ const DesktopJobsDashboard: React.FC<JobsDashboardProps> = ({ onJobSelect, onSta
             {allSelected ? 'Deselect All' : 'Select All'}
           </Button>
           <span className="text-sm text-muted-foreground">
-            {filteredJobs.length} item(s)
+            <span className="font-semibold text-foreground">{filteredJobs.length}</span>
+            {hasActiveFilters ? <> of <span className="font-semibold text-foreground">{jobs.length}</span></> : null}
+            {' '}item{filteredJobs.length === 1 ? '' : 's'}
+            {hasActiveFilters && (
+              <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-semibold uppercase tracking-wider">
+                Filtered
+              </span>
+            )}
           </span>
         </div>
       )}
