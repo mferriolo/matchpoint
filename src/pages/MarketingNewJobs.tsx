@@ -25,6 +25,7 @@ import CrelateSyncStatus from '@/components/marketing/CrelateSyncStatus';
 import MissingTitlesReport from '@/components/marketing/MissingTitlesReport';
 import TitleMapping from '@/components/marketing/TitleMapping';
 import { MultiSelectColumnHeader } from '@/components/marketing/MultiSelectColumnHeader';
+import { DateRangeFilterIcon, DateRange, inDateRange } from '@/components/marketing/DateRangeFilter';
 import { exportMasterSheet, exportNewDataSheet, exportContactsToXlsx } from '@/utils/xlsxExport';
 import { useIsMobile } from '@/hooks/use-mobile';
 import MobileMarketing from '@/components/mobile/MobileMarketing';
@@ -626,8 +627,12 @@ const DesktopMarketingNewJobs: React.FC = () => {
   const [filterHighPriorityCompanies, setFilterHighPriorityCompanies] = useState(false);
   const [togglingCompanyPriorityId, setTogglingCompanyPriorityId] = useState<string | null>(null);
   const [autoPrioritizing, setAutoPrioritizing] = useState(false);
-  const [companySortField, setCompanySortField] = useState<'company_name' | 'company_type' | 'open_roles_count' | 'contact_count' | 'is_high_priority' | 'has_md_cmo'>('open_roles_count');
+  const [companySortField, setCompanySortField] = useState<'company_name' | 'company_type' | 'open_roles_count' | 'contact_count' | 'is_high_priority' | 'has_md_cmo' | 'created_at'>('open_roles_count');
   const [companySortDir, setCompanySortDir] = useState<'asc' | 'desc'>('desc');
+  // Date Added filter on the Companies tab. Same UX as Date Found on
+  // Jobs: popover with a Today checkbox + From/To inputs. Matches
+  // marketing_companies.created_at.
+  const [filterCompanyDateAdded, setFilterCompanyDateAdded] = useState<DateRange>({});
   const [showAutoPrioritizeResults, setShowAutoPrioritizeResults] = useState(false);
   const [autoPrioritizeResults, setAutoPrioritizeResults] = useState<any>(null);
 
@@ -1193,6 +1198,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
           if (!(c.created_at && c.created_at >= lastRunStartedAt)) return false;
         }
         if (filterCompanyCategory.size > 0 && !filterCompanyCategory.has(c.company_type || '')) return false;
+        if (!inDateRange(c.created_at, filterCompanyDateAdded)) return false;
         if (!searchCompanies) return true;
         const s = searchCompanies.toLowerCase();
         return c.company_name?.toLowerCase().includes(s) ||
@@ -1207,6 +1213,10 @@ const DesktopMarketingNewJobs: React.FC = () => {
           case 'contact_count': aVal = a.contact_count || 0; bVal = b.contact_count || 0; break;
           case 'is_high_priority': aVal = a.is_high_priority ? 1 : 0; bVal = b.is_high_priority ? 1 : 0; break;
           case 'has_md_cmo': aVal = a.has_md_cmo ? 1 : 0; bVal = b.has_md_cmo ? 1 : 0; break;
+          case 'created_at':
+            aVal = a.created_at ? new Date(a.created_at).getTime() : 0;
+            bVal = b.created_at ? new Date(b.created_at).getTime() : 0;
+            break;
           default: aVal = ''; bVal = '';
         }
         if (typeof aVal === 'number') {
@@ -1215,7 +1225,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
         const cmp = aVal.toString().localeCompare(bVal.toString());
         return companySortDir === 'asc' ? cmp : -cmp;
       });
-  }, [companies, searchCompanies, filterHighPriorityCompanies, filterNewCompanies, lastRunStartedAt, filterCompanyCategory, showBlockedCompanies, companySortField, companySortDir]);
+  }, [companies, searchCompanies, filterHighPriorityCompanies, filterNewCompanies, lastRunStartedAt, filterCompanyCategory, filterCompanyDateAdded, showBlockedCompanies, companySortField, companySortDir]);
 
   const highPriorityCompanyCount = useMemo(() => companies.filter(c => c.is_high_priority).length, [companies]);
   const newCompanyIds = useMemo(() => {
@@ -2271,23 +2281,46 @@ const DesktopMarketingNewJobs: React.FC = () => {
                           MD/CMO <CompanySortIcon field="has_md_cmo" />
                         </button>
                       </th>
+                      <th className="text-left px-4 py-3 font-medium text-gray-600 w-[110px]">
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => handleCompanySort('created_at')} className="inline-flex items-center gap-0.5 hover:text-gray-900 transition-colors text-xs uppercase tracking-wider font-semibold whitespace-nowrap">
+                            Date Added <CompanySortIcon field="created_at" />
+                          </button>
+                          <DateRangeFilterIcon
+                            label="Date Added"
+                            value={filterCompanyDateAdded}
+                            onChange={setFilterCompanyDateAdded}
+                          />
+                        </div>
+                      </th>
                       <th className="text-center px-4 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider font-semibold w-[140px]">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {loading ? (
-                      <tr><td colSpan={9} className="text-center py-16">
+                      <tr><td colSpan={10} className="text-center py-16">
                         <Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400 mb-2" />
                         <span className="text-sm text-gray-400">Loading companies...</span>
                       </td></tr>
                     ) : filteredCompanies.length === 0 ? (
-                      <tr><td colSpan={9} className="text-center py-16">
+                      <tr><td colSpan={10} className="text-center py-16">
                         <div className="text-gray-400">
-                          {searchCompanies || filterHighPriorityCompanies ? (
+                          {searchCompanies || filterHighPriorityCompanies || filterCompanyCategory.size > 0 || filterCompanyDateAdded.from || filterCompanyDateAdded.to || filterNewCompanies ? (
                             <>
                               <Search className="w-8 h-8 mx-auto mb-2 opacity-40" />
                               <p className="text-sm font-medium">No companies match your filters</p>
-                              <button onClick={() => { setSearchCompanies(''); setFilterHighPriorityCompanies(false); }} className="text-xs text-[#911406] hover:underline mt-1">Clear filters</button>
+                              <button
+                                onClick={() => {
+                                  setSearchCompanies('');
+                                  setFilterHighPriorityCompanies(false);
+                                  setFilterCompanyCategory(new Set());
+                                  setFilterCompanyDateAdded({});
+                                  setFilterNewCompanies(false);
+                                }}
+                                className="text-xs text-[#911406] hover:underline mt-1"
+                              >
+                                Clear filters
+                              </button>
                             </>
                           ) : (
                             <p className="text-sm font-medium">No companies found</p>
@@ -2412,6 +2445,9 @@ const DesktopMarketingNewJobs: React.FC = () => {
                           </td>
                           <td className="text-center px-4 py-3">
                             {c.has_md_cmo ? <CheckCircle className="w-4 h-4 text-green-600 mx-auto" /> : <span className="text-gray-300">-</span>}
+                          </td>
+                          <td className="px-4 py-3 text-xs text-gray-700 tabular-nums whitespace-nowrap">
+                            {c.created_at ? new Date(c.created_at).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric', year: '2-digit' }) : <span className="text-gray-300">—</span>}
                           </td>
                           <td className="text-center px-4 py-3">
                             <div className="inline-flex items-center gap-1">
