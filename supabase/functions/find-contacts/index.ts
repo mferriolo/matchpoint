@@ -65,20 +65,38 @@ function matchesTargetTitle(title: string | null | undefined): boolean {
 
 // ----------------- shared helpers -----------------
 
-async function aiCall(key: string, prompt: string, maxTok = 3000): Promise<string> {
-  const r = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.2,
-      max_tokens: maxTok,
-    }),
-  });
-  if (!r.ok) { console.log(`[aiCall] OpenAI HTTP ${r.status}`); return ''; }
-  const d = await r.json();
-  return d.choices?.[0]?.message?.content || '';
+async function aiCall(key: string, prompt: string, maxTok = 3000, timeoutMs = 10_000): Promise<string> {
+  // AbortController so a stalled OpenAI request actually gets killed
+  // when we hit the per-call ceiling — otherwise the outer
+  // withTimeout wrapper in scrapeAboutPages can fire while the AI
+  // request keeps running, burning tokens whose response we discard.
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.2,
+        max_tokens: maxTok,
+      }),
+      signal: ctrl.signal,
+    });
+    if (!r.ok) { console.log(`[aiCall] OpenAI HTTP ${r.status}`); return ''; }
+    const d = await r.json();
+    return d.choices?.[0]?.message?.content || '';
+  } catch (e: any) {
+    if (e?.name === 'AbortError') {
+      console.log(`[aiCall] aborted after ${timeoutMs}ms`);
+    } else {
+      console.log(`[aiCall] error: ${e?.message || e}`);
+    }
+    return '';
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 function parseArr(text: string): any[] {
@@ -173,13 +191,24 @@ async function scrapeAboutPages(
     : `https://${co.website.replace(/\/+$/, '')}`;
   const out: ContactCandidate[] = [];
   const seen = new Set<string>();
+  // Hard caps so a company with marketing-heavy pages at every
+  // leadership URL can't drain the outer 45s budget. With aiCall now
+  // bounded to 10s, this puts a ceiling of ~40s on the AI portion
+  // alone — leaving room for fetches and other overhead.
+  const MAX_AI_CALLS = 4;
+  let aiCalls = 0;
 
   for (const path of LEADERSHIP_PATHS) {
+    if (aiCalls >= MAX_AI_CALLS) {
+      console.log(`[scrapeAboutPages] ${co.company_name}: hit ${MAX_AI_CALLS}-AI-call cap, stopping`);
+      break;
+    }
     const url = `${base}${path}`;
     const html = await fetchPage(url);
     if (!html || html.length < 500) continue;
     const text = htmlToText(html);
     if (text.length < 200) continue;
+    aiCalls++;
     const prompt =
       `From the About / Leadership / Team page below for "${sanitize(co.company_name)}", extract EVERY named person whose job title contains ANY of these phrases (case-insensitive substring match): ` +
       TARGET_TITLE_KEYWORDS.map(k => `"${k}"`).join(', ') + `.\n` +
