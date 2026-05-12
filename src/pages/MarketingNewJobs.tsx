@@ -26,6 +26,7 @@ import MissingTitlesReport from '@/components/marketing/MissingTitlesReport';
 import TitleMapping from '@/components/marketing/TitleMapping';
 import { MultiSelectColumnHeader } from '@/components/marketing/MultiSelectColumnHeader';
 import { DateRangeFilterIcon, DateRange, inDateRange } from '@/components/marketing/DateRangeFilter';
+import { inferCompanyEmailModel, guessEmail } from '@/lib/emailPatternGuess';
 import { exportMasterSheet, exportNewDataSheet, exportContactsToXlsx } from '@/utils/xlsxExport';
 import { useIsMobile } from '@/hooks/use-mobile';
 import MobileMarketing from '@/components/mobile/MobileMarketing';
@@ -384,6 +385,87 @@ const DesktopMarketingNewJobs: React.FC = () => {
   };
 
   const handleEnrichSelectedContacts = () => enrichContactsById(Array.from(selectedContactIds));
+
+  // ── Guess emails from company patterns ──────────────────────────────
+  // For each selected contact with a blank email, infer the local-part
+  // format used by other contacts at the same company (e.g.
+  // firstname.lastname vs flastname vs firstnamelastname), then fill in
+  // the blank using that pattern. Writes email_guessed=true so the user
+  // can spot guesses in the table later.
+  const [guessingEmails, setGuessingEmails] = useState(false);
+  const handleGuessEmails = async () => {
+    if (guessingEmails) return;
+    // Snapshot selected contacts up-front; the table may rerender
+    // mid-run and we don't want to chase a moving target.
+    const selected = contacts.filter(c => selectedContactIds.has(c.id));
+    const blanks = selected.filter(c => !(c.email && String(c.email).trim()));
+    if (blanks.length === 0) {
+      toast({ title: 'No blank emails in selection', description: 'Every selected contact already has an email on file.' });
+      return;
+    }
+
+    // Group blank contacts by company so we infer once per company.
+    const byCompanyKey = new Map<string, { coId: string | null; coName: string | null; blanks: any[] }>();
+    for (const c of blanks) {
+      const key = c.company_id || `name:${String(c.company_name || '').toLowerCase().trim()}`;
+      if (!byCompanyKey.has(key)) byCompanyKey.set(key, { coId: c.company_id || null, coName: c.company_name || null, blanks: [] });
+      byCompanyKey.get(key)!.blanks.push(c);
+    }
+
+    // Pull samples (existing contacts WITH email) for each company,
+    // one round-trip per company. Could be batched but per-company
+    // queries are bounded and easy to reason about.
+    setGuessingEmails(true);
+    const updates: Array<{ id: string; email: string }> = [];
+    let skippedNoModel = 0;
+    let skippedNoName = 0;
+    try {
+      for (const [, group] of byCompanyKey) {
+        const sampleQuery = group.coId
+          ? supabase.from('marketing_contacts').select('first_name, last_name, email').eq('company_id', group.coId).not('email', 'is', null)
+          : supabase.from('marketing_contacts').select('first_name, last_name, email').ilike('company_name', group.coName || '').not('email', 'is', null);
+        const { data: samples } = await sampleQuery;
+        const model = inferCompanyEmailModel(samples || []);
+        if (!model) { skippedNoModel += group.blanks.length; continue; }
+        for (const c of group.blanks) {
+          if (!c.first_name || !c.last_name) { skippedNoName++; continue; }
+          const guess = guessEmail(model, c.first_name, c.last_name);
+          if (!guess) { skippedNoName++; continue; }
+          updates.push({ id: c.id, email: guess });
+        }
+      }
+
+      if (updates.length === 0) {
+        toast({
+          title: 'No emails guessed',
+          description: skippedNoModel > 0
+            ? `${skippedNoModel} contact${skippedNoModel === 1 ? '' : 's'} skipped — no other contacts with email on file at the company to learn from.`
+            : `${skippedNoName} contact${skippedNoName === 1 ? '' : 's'} skipped — missing first or last name.`,
+        });
+        setGuessingEmails(false);
+        return;
+      }
+
+      // Chunked writes — keep PostgREST URL-length sane.
+      const CHUNK = 50;
+      for (let i = 0; i < updates.length; i += CHUNK) {
+        const slice = updates.slice(i, i + CHUNK);
+        await Promise.all(slice.map(u =>
+          supabase.from('marketing_contacts').update({ email: u.email, email_guessed: true }).eq('id', u.id)
+        ));
+      }
+      toast({
+        title: `Filled ${updates.length} email${updates.length === 1 ? '' : 's'}`,
+        description: `Marked as guesses (italicized in the table). ${skippedNoModel + skippedNoName > 0 ? `${skippedNoModel + skippedNoName} skipped (no pattern to learn from, or missing name).` : ''}`,
+      });
+      await loadData();
+      clearContactSelection();
+    } catch (err: any) {
+      toast({ title: 'Guess emails failed', description: err?.message || String(err), variant: 'destructive', duration: 15_000 });
+    } finally {
+      setGuessingEmails(false);
+    }
+  };
 
   // ── Bulk outreach actions ───────────────────────────────────────────
   // Each handler chunks ids ~500/req for the same PostgREST URL-length
@@ -3047,6 +3129,26 @@ const DesktopMarketingNewJobs: React.FC = () => {
                       Enrich {selectedContactIds.size}
                     </Button>
                     <Button
+                      onClick={() => {
+                        const blanks = contacts
+                          .filter(c => selectedContactIds.has(c.id) && !(c.email && String(c.email).trim()))
+                          .length;
+                        if (blanks === 0) {
+                          toast({ title: 'No blank emails in selection', description: 'Every selected contact already has an email on file.' });
+                          return;
+                        }
+                        if (!window.confirm(`Guess email addresses for ${blanks} contact${blanks === 1 ? '' : 's'} using each company's existing pattern? Guessed emails will be flagged so you can review them later.`)) return;
+                        handleGuessEmails();
+                      }}
+                      disabled={guessingEmails}
+                      variant="outline"
+                      className="text-amber-700 border-amber-300 hover:bg-amber-50"
+                      title="For each selected contact with a blank email, infer the format used by other contacts at the same company (e.g. firstinitiallastname@bloomhealthcare.com) and fill in the blank."
+                    >
+                      {guessingEmails ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <Sparkles className="w-4 h-4 mr-1.5" />}
+                      Guess emails
+                    </Button>
+                    <Button
                       onClick={handleBulkMarkContacted}
                       className="bg-blue-700 hover:bg-blue-800 text-white"
                       title="Stamp last_outreach_at = now for all selected (sets status to Cold for any that have no status yet)"
@@ -3675,8 +3777,9 @@ const DesktopMarketingNewJobs: React.FC = () => {
                               {c.email ? (
                                 <a
                                   href={`mailto:${c.email}`}
-                                  className="text-blue-600 hover:underline text-sm"
+                                  className={`hover:underline text-sm ${c.email_guessed ? 'italic text-amber-700' : 'text-blue-600'}`}
                                   onClick={e => e.stopPropagation()}
+                                  title={c.email_guessed ? 'Guessed from this company\'s email pattern — not verified' : c.email}
                                 >
                                   {c.email}
                                 </a>
