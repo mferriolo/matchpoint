@@ -62,85 +62,29 @@ const MESSAGE_TYPE_LABEL: Record<MessageType, string> = {
 // Customize form — option lists (same set as the legacy script modal)
 // ===========================================================
 
-const AUDIENCE_OPTIONS = [
-  'CEO / Founder',
-  'COO / Chief of Operations',
-  'Chief Medical Officer',
-  'VP of Clinical Operations',
-  'Head of Talent Acquisition',
-  'Recruiting Manager',
-  'Practice Administrator',
-  'Regional Medical Director',
-  'Private Equity Operating Partner',
-  'Other',
-];
-
-const PROBLEM_OPTIONS = [
-  'Role has likely been open too long',
-  'Internal recruiting team may be overwhelmed',
-  'Hard-to-find passive candidate market',
-  'Growth may be delayed by this open role',
-  'Clinical leadership gap',
-  'Bad hire risk is high',
-  'Geographic market is difficult',
-  'Specialty or model-specific experience is hard to find',
-  'Other',
-];
-
-const SERVICE_OPTIONS = [
-  'Direct hire contingency search',
-  'Retained executive search',
-  'RPO / embedded recruiting support',
-  'Market mapping',
-  'Hard-to-fill provider search',
-  'Clinical leadership search',
-  'Other',
-];
-
-const URGENCY_OPTIONS = ['Low urgency', 'Moderate urgency', 'High urgency', 'Very high urgency', 'Unknown'];
-
-const TONE_OPTIONS = [
-  'Direct and bold',
-  'Warm and consultative',
-  'Executive and polished',
-  'Scrappy and entrepreneurial',
-  'Mission-driven healthcare',
-  'MedCentric-branded professional tone',
-];
-
-const PROOF_OPTIONS = [
-  'Experience recruiting clinicians and clinical leaders',
-  'Experience with value-based care organizations',
-  'Experience with PACE / frail elderly care',
-  'Experience helping startups build clinical teams',
-  'Ability to access passive candidates',
-  'Ability to support hard-to-fill searches',
-  'Speed and focus compared with internal recruiting teams',
-  'Other',
-];
-
-const CTA_OPTIONS = [
-  'Schedule a 15-minute introductory call',
-  'Set up a job intake conversation',
-  'Discuss the open role',
-  'Review our search process',
-  'Explore a recruiting partnership',
-  'Permission to send qualified candidates',
-  'Other',
-];
-
-const OBJECTION_OPTIONS = [
-  'We already have an internal recruiting team',
-  'We are not using agencies right now',
-  'We already have vendors',
-  'Send me information',
-  'We are not hiring right now',
-  'Your fee is too high',
-  'We tried recruiters before and it did not work',
-  'We only work retained',
-  'We only work contingency',
-  'Budget is tight',
-];
+// Option lists moved to outreachInputs.ts so BatchOutreachFlow can
+// use the same set. Re-exported below for any local callers that
+// reach into this module by name.
+import {
+  AUDIENCE_OPTIONS,
+  PROBLEM_OPTIONS,
+  SERVICE_OPTIONS,
+  URGENCY_OPTIONS,
+  TONE_OPTIONS,
+  PROOF_OPTIONS,
+  CTA_OPTIONS,
+  OBJECTION_OPTIONS,
+} from './outreachInputs';
+export {
+  AUDIENCE_OPTIONS,
+  PROBLEM_OPTIONS,
+  SERVICE_OPTIONS,
+  URGENCY_OPTIONS,
+  TONE_OPTIONS,
+  PROOF_OPTIONS,
+  CTA_OPTIONS,
+  OBJECTION_OPTIONS,
+};
 
 // ===========================================================
 // Outreach scoring (the recommender)

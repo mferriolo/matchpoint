@@ -19,7 +19,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
-import { Loader2, X, Send, SkipForward, RefreshCw, AlertCircle, CheckCircle, Mail, Users, Search } from 'lucide-react';
+import { Loader2, X, Send, SkipForward, RefreshCw, AlertCircle, CheckCircle, Mail, Users, Search, Settings2 } from 'lucide-react';
 import {
   ContactRow,
   ScoredContact,
@@ -31,6 +31,18 @@ import {
   applyScrubToOutputs,
 } from './OutreachWorkspace';
 import type { ScriptJobInput } from './ScriptGeneratorModal';
+import {
+  OutreachFormInputs,
+  defaultOutreachInputs,
+  AUDIENCE_OPTIONS,
+  PROBLEM_OPTIONS,
+  SERVICE_OPTIONS,
+  URGENCY_OPTIONS,
+  TONE_OPTIONS,
+  PROOF_OPTIONS,
+  CTA_OPTIONS,
+  OBJECTION_OPTIONS,
+} from './outreachInputs';
 
 type Phase = 'picker' | 'queue';
 
@@ -42,6 +54,24 @@ interface QueueRow {
   status: 'pending' | 'generating' | 'ready' | 'sent' | 'skipped' | 'failed';
   scripts: ScriptOutputs | null;
   error?: string;
+  // Per-row form inputs. Initialized from defaultOutreachInputs() at
+  // queue-build time, with companyType / roleCategory /
+  // hiringManagerName filled from the job + recipient. User can edit
+  // via the Customize dialog and regenerate. customized=true once the
+  // user has clicked Save in the dialog (drives the badge on the
+  // Customize button so they can see which rows they've tuned).
+  inputs: OutreachFormInputs;
+  customized: boolean;
+}
+
+function buildInitialInputs(job: ScriptJobInput, recipient: ContactRow): OutreachFormInputs {
+  const base = defaultOutreachInputs();
+  return {
+    ...base,
+    companyType: job.company_type || '',
+    roleCategory: job.job_type || '',
+    hiringManagerName: [recipient.first_name, recipient.last_name].filter(Boolean).join(' ').trim(),
+  };
 }
 
 const BATCH_SOFT_CAP = 25;
@@ -85,6 +115,8 @@ export function BatchOutreachFlow({
   const [focusedRowKey, setFocusedRowKey] = useState<string | null>(null);
   const [activeFormat, setActiveFormat] = useState<MessageType>('email');
   const [sender, setSender] = useState<SenderIdentity>({});
+  // null when closed. Holds the rowKey being customized otherwise.
+  const [customizingRowKey, setCustomizingRowKey] = useState<string | null>(null);
 
   // Load contacts for every distinct company across the selected
   // jobs in a single round-trip. We index by company_id (the canonical
@@ -200,6 +232,8 @@ export function BatchOutreachFlow({
           recipient: c,
           status: 'pending',
           scripts: null,
+          inputs: buildInitialInputs(job, c),
+          customized: false,
         });
       }
     }
@@ -226,36 +260,11 @@ export function BatchOutreachFlow({
         return Math.max(0, Math.floor((Date.now() - t) / 86_400_000));
       })();
 
-      // Defaults for FormInputs — the user can still open the per-job
-      // OutreachWorkspace for full customization. The recipient
-      // classifier inside the edge function uses the recipient's title
-      // to pick persona framing, so the batch picker's top selection
-      // drives the message tone without exposing the legacy audience
-      // dropdown in the batch path.
-      const inputs = {
-        audience: 'Hiring decision-maker',
-        audienceOther: '',
-        problem: 'An unfilled critical role',
-        problemOther: '',
-        service: 'Specialized healthcare recruiting',
-        serviceOther: '',
-        companyType: row.job.company_type || '',
-        roleCategory: row.job.job_type || '',
-        urgency: 'High — recent posting',
-        tone: 'Confident, peer-to-peer',
-        proof: 'Specialized healthcare recruiting expertise',
-        proofOther: '',
-        cta: 'A brief intro call',
-        ctaOther: '',
-        objections: [] as string[],
-        customOpener: '',
-        specificPain: '',
-        companyInsight: '',
-        hiringManagerName: fullName(row.recipient),
-        caseStudy: '',
-        notes: '',
-        avoidLanguage: '',
-      };
+      // Per-row form inputs. Defaults to defaultOutreachInputs() at
+      // queue-build time; the Customize dialog mutates row.inputs and
+      // re-fires generateOne so any per-row tuning takes effect on
+      // the next regeneration.
+      const inputs = row.inputs;
 
       const recipient = {
         title: row.recipient.title || '',
@@ -340,6 +349,26 @@ export function BatchOutreachFlow({
     generateOne({ ...row, status: 'pending', scripts: null, error: undefined });
   };
 
+  // Save handler for the Customize dialog. Updates the row's inputs,
+  // marks it customized (badge on the button), and re-fires generation
+  // with the new inputs in one go. We pass the updated row directly
+  // into generateOne so we don't race the setRows commit.
+  const saveCustomInputs = (rowKey: string, next: OutreachFormInputs) => {
+    const row = rows.find(r => r.key === rowKey);
+    if (!row) return;
+    const updated: QueueRow = {
+      ...row,
+      inputs: next,
+      customized: true,
+      status: 'pending',
+      scripts: null,
+      error: undefined,
+    };
+    setRows(prev => prev.map(r => r.key === rowKey ? updated : r));
+    setCustomizingRowKey(null);
+    generateOne(updated);
+  };
+
   const skipOne = (rowKey: string) => {
     setRows(prev => prev.map(r => r.key === rowKey ? { ...r, status: 'skipped' } : r));
   };
@@ -413,8 +442,21 @@ export function BatchOutreachFlow({
             onSendOne={sendOne}
             onSkipOne={skipOne}
             onRegenerateOne={regenerateOne}
+            onCustomizeOne={setCustomizingRowKey}
           />
         )}
+
+        {customizingRowKey && (() => {
+          const row = rows.find(r => r.key === customizingRowKey);
+          if (!row) return null;
+          return (
+            <CustomizeDialog
+              row={row}
+              onSave={(next) => saveCustomInputs(customizingRowKey, next)}
+              onCancel={() => setCustomizingRowKey(null)}
+            />
+          );
+        })()}
 
         {/* Footer */}
         <div className="px-5 py-3 border-t flex items-center justify-between bg-gray-50">
@@ -588,6 +630,7 @@ function QueueView({
   onSendOne,
   onSkipOne,
   onRegenerateOne,
+  onCustomizeOne,
 }: {
   rows: QueueRow[];
   focusedRowKey: string | null;
@@ -597,6 +640,7 @@ function QueueView({
   onSendOne: (key: string, format: MessageType) => void;
   onSkipOne: (key: string) => void;
   onRegenerateOne: (key: string) => void;
+  onCustomizeOne: (key: string) => void;
 }) {
   const focused = rows.find(r => r.key === focusedRowKey) || rows[0];
 
@@ -640,6 +684,7 @@ function QueueView({
             onSend={() => onSendOne(focused.key, activeFormat)}
             onSkip={() => onSkipOne(focused.key)}
             onRegenerate={() => onRegenerateOne(focused.key)}
+            onCustomize={() => onCustomizeOne(focused.key)}
           />
         )}
       </div>
@@ -663,6 +708,7 @@ function PreviewPane({
   onSend,
   onSkip,
   onRegenerate,
+  onCustomize,
 }: {
   row: QueueRow;
   activeFormat: MessageType;
@@ -670,6 +716,7 @@ function PreviewPane({
   onSend: () => void;
   onSkip: () => void;
   onRegenerate: () => void;
+  onCustomize: () => void;
 }) {
   const formats: { key: MessageType; label: string }[] = [
     { key: 'email',         label: 'Email' },
@@ -691,6 +738,19 @@ function PreviewPane({
           </div>
         </div>
         <div className="flex items-center gap-1">
+          <button
+            onClick={onCustomize}
+            className="px-2 py-1 text-xs rounded text-gray-600 hover:bg-gray-100 inline-flex items-center gap-1"
+            title="Customize audience, problem, tone, proof, CTA, and objections for this row — same criteria as the per-job message creator"
+          >
+            <Settings2 className="w-3 h-3" />
+            Customize
+            {row.customized && (
+              <span className="ml-0.5 text-[9px] uppercase tracking-wider px-1 py-px rounded bg-blue-100 text-blue-700 font-semibold">
+                Tuned
+              </span>
+            )}
+          </button>
           <button
             onClick={onRegenerate}
             disabled={row.status === 'generating' || row.status === 'pending'}
@@ -781,6 +841,193 @@ function FormatBody({ scripts, format }: { scripts: ScriptOutputs; format: Messa
 // ===========================================================
 // Helpers
 // ===========================================================
+
+// ===========================================================
+// Customize dialog — mirrors the criteria from OutreachWorkspace's
+// per-job customize panel. Takes a queue row, lets the user mutate
+// every field of the inputs object, then emits the final
+// OutreachFormInputs to the parent on Save.
+// ===========================================================
+function CustomizeDialog({
+  row,
+  onSave,
+  onCancel,
+}: {
+  row: QueueRow;
+  onSave: (next: OutreachFormInputs) => void;
+  onCancel: () => void;
+}) {
+  // Local draft state so the user can cancel without mutating the row.
+  const [draft, setDraft] = useState<OutreachFormInputs>(row.inputs);
+
+  const update = <K extends keyof OutreachFormInputs>(k: K, v: OutreachFormInputs[K]) => {
+    setDraft(prev => ({ ...prev, [k]: v }));
+  };
+
+  const toggleObjection = (o: string) => {
+    setDraft(prev => {
+      if (prev.objections.includes(o)) {
+        return { ...prev, objections: prev.objections.filter(x => x !== o) };
+      }
+      if (prev.objections.length >= 3) return prev;
+      return { ...prev, objections: [...prev.objections, o] };
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-4" onClick={onCancel}>
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="px-5 py-3 border-b flex items-center justify-between">
+          <div className="min-w-0">
+            <h3 className="text-base font-semibold">Customize message</h3>
+            <p className="text-xs text-gray-500 truncate">
+              {[row.recipient.first_name, row.recipient.last_name].filter(Boolean).join(' ')} · {row.job.job_title} at {row.job.company_name}
+            </p>
+          </div>
+          <button onClick={onCancel} className="p-1.5 rounded hover:bg-gray-100">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 p-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+          <Field label="Audience">
+            <Select value={draft.audience} options={AUDIENCE_OPTIONS} onChange={v => update('audience', v)} />
+            {draft.audience === 'Other' && (
+              <TextInput value={draft.audienceOther} onChange={v => update('audienceOther', v)} placeholder="Specify audience" />
+            )}
+          </Field>
+          <Field label="Hiring manager name">
+            <TextInput value={draft.hiringManagerName} onChange={v => update('hiringManagerName', v)} placeholder="(defaults to recipient name)" />
+          </Field>
+
+          <Field label="Primary problem">
+            <Select value={draft.problem} options={PROBLEM_OPTIONS} onChange={v => update('problem', v)} />
+            {draft.problem === 'Other' && (
+              <TextInput value={draft.problemOther} onChange={v => update('problemOther', v)} placeholder="Specify problem" />
+            )}
+          </Field>
+          <Field label="Service to pitch">
+            <Select value={draft.service} options={SERVICE_OPTIONS} onChange={v => update('service', v)} />
+            {draft.service === 'Other' && (
+              <TextInput value={draft.serviceOther} onChange={v => update('serviceOther', v)} placeholder="Specify service" />
+            )}
+          </Field>
+
+          <Field label="Urgency">
+            <Select value={draft.urgency} options={URGENCY_OPTIONS} onChange={v => update('urgency', v)} />
+          </Field>
+          <Field label="Tone">
+            <Select value={draft.tone} options={TONE_OPTIONS} onChange={v => update('tone', v)} />
+          </Field>
+
+          <Field label="Proof point">
+            <Select value={draft.proof} options={PROOF_OPTIONS} onChange={v => update('proof', v)} />
+            {draft.proof === 'Other' && (
+              <TextInput value={draft.proofOther} onChange={v => update('proofOther', v)} placeholder="Specify proof" />
+            )}
+          </Field>
+          <Field label="Call to action">
+            <Select value={draft.cta} options={CTA_OPTIONS} onChange={v => update('cta', v)} />
+            {draft.cta === 'Other' && (
+              <TextInput value={draft.ctaOther} onChange={v => update('ctaOther', v)} placeholder="Specify CTA" />
+            )}
+          </Field>
+
+          <div className="md:col-span-2">
+            <label className="text-[10px] uppercase tracking-wider text-gray-600 font-semibold">
+              Objections to address (up to 3)
+            </label>
+            <div className="mt-1 grid grid-cols-1 md:grid-cols-2 gap-1">
+              {OBJECTION_OPTIONS.map(o => {
+                const checked = draft.objections.includes(o);
+                const disabled = !checked && draft.objections.length >= 3;
+                return (
+                  <label key={o} className={`flex items-center gap-2 text-xs ${disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={disabled}
+                      onChange={() => toggleObjection(o)}
+                      className="w-3.5 h-3.5 rounded border-gray-300"
+                    />
+                    <span>{o}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          <Field label="Custom opening line (optional)">
+            <TextInput value={draft.customOpener} onChange={v => update('customOpener', v)} />
+          </Field>
+          <Field label="Company insight (optional)">
+            <TextInput value={draft.companyInsight} onChange={v => update('companyInsight', v)} />
+          </Field>
+          <Field label="Notes (optional)">
+            <TextInput value={draft.notes} onChange={v => update('notes', v)} />
+          </Field>
+          <Field label="Language to avoid (optional)">
+            <TextInput value={draft.avoidLanguage} onChange={v => update('avoidLanguage', v)} />
+          </Field>
+        </div>
+
+        <div className="px-5 py-3 border-t flex items-center justify-between bg-gray-50">
+          <p className="text-[11px] text-gray-500">
+            Saving regenerates this row with the inputs above. Other rows are unaffected.
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onCancel}
+              className="px-3 py-1.5 text-sm rounded border hover:bg-white"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => onSave(draft)}
+              className="px-3 py-1.5 text-sm rounded bg-[#911406] text-white hover:bg-[#7a1005] inline-flex items-center gap-1.5"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Save & regenerate
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="text-[10px] uppercase tracking-wider text-gray-600 font-semibold">{label}</label>
+      <div className="mt-1 space-y-1">{children}</div>
+    </div>
+  );
+}
+
+function Select({ value, options, onChange }: { value: string; options: string[]; onChange: (v: string) => void }) {
+  return (
+    <select
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      className="w-full h-8 text-xs rounded-md border border-input bg-background px-2 focus:outline-none focus:ring-1 focus:ring-ring"
+    >
+      {options.map(o => <option key={o} value={o}>{o}</option>)}
+    </select>
+  );
+}
+
+function TextInput({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
+  return (
+    <input
+      type="text"
+      value={value}
+      placeholder={placeholder}
+      onChange={e => onChange(e.target.value)}
+      className="w-full h-8 text-xs rounded-md border border-input bg-background px-2 focus:outline-none focus:ring-1 focus:ring-ring"
+    />
+  );
+}
 
 /** The bucket key under which we store a company's contacts. Prefer
  *  company_id; fall back to a normalized name when the job has no
