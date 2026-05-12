@@ -40,27 +40,106 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const SERP_BASE = "https://serpapi.com/search.json";
 
 // Target-title keywords. A candidate's title is accepted if it
-// case-insensitively contains ANY of these substrings. Ordered so the
-// more-specific phrases appear before the broader ones (purely for
-// readability; matching is order-independent).
+// case-insensitively contains ANY of these substrings. Matching is
+// order-independent — the grouping below is purely for the reader.
+// Updated 2026-05-12 to include the obvious omissions that the
+// previous narrow list silently filtered out (President, VP-level,
+// CHRO, CNO, Chief People Officer, Practice Administrator, Director
+// of Nursing/Clinical, Recruiter/Hiring Manager, Operating Partner,
+// etc.). Net effect: a much higher hit rate on real decision-makers
+// without dragging in unrelated leadership (marketing/IT/finance
+// directors, etc. — those are not in this list).
 const TARGET_TITLE_KEYWORDS = [
+  // C-suite — explicit titles and common credentials.
   'chief medical officer',
+  'chief nursing officer',
+  'chief clinical officer',
+  'chief people officer',
+  'chief human resources officer',
+  'chief executive officer',
+  'chief operating officer',
+  'chief operations officer',
+  'chief of staff',
+  'chief medical information',
+  'chief information officer',
+  'chief growth officer',
+  'chief strategy officer',
+  'chief administrative officer',
+  'chief executive',
+  'chief operating',
+  'chief medical',
+  'chief nursing',
+  'chief clinical',
+  'chief people',
+  'chief human',
+  // Acronyms — matched with word-boundaries to avoid catching
+  // substrings like "chromatic" or "cooperative". 'cco' deliberately
+  // omitted because it's ambiguous (chief clinical vs. chief
+  // compliance vs. chief communications) and short enough to clash.
+  'ceo',
+  'coo',
+  'cmo',
+  'cno',
+  'cmio',
+  'chro',
+  // Founders / owners / presidents.
+  'founder',
+  'co-founder',
+  'cofounder',
+  'owner',
+  'president',
+  // VP-level.
+  'vice president',
+  'vice-president',
+  'vp',
+  'svp',
+  'evp',
+  // Medical leadership.
   'medical director',
+  'clinical director',
+  // Nursing / clinical leadership.
+  'director of nursing',
+  'director of clinical',
+  'nursing director',
+  // Practice / operational management.
+  'practice administrator',
+  'practice manager',
+  'clinic administrator',
+  'clinic manager',
+  // Talent / HR / recruiting.
   'talent acquisition',
   'human resources',
-  'chief of staff',
-  'chief executive',
-  'ceo',
-  'chief operating',
-  'operating officer',
+  'head of talent',
+  'head of people',
+  'head of recruiting',
+  'head of recruitment',
+  'recruiting manager',
+  'recruitment manager',
+  'recruiter',
+  'hiring manager',
+  // PE / investor-side operating roles (relevant on PE-owned platforms).
+  'operating partner',
+  'managing partner',
+  // Generic operations (preserved from previous list — catches
+  // "VP of Operations", "Director of Operations", etc.).
   'operations',
   'operating',
 ];
 
+// Compile each keyword as a word-boundary regex once at module load.
+// Word boundaries protect the short acronyms (ceo, coo, vp, etc.) from
+// matching inside unrelated words ("cooperative", "viper", etc.) while
+// still matching them at the start/middle/end of real titles. Hyphens
+// inside keywords ("co-founder") are kept literally — JS \b sees the
+// hyphen as a boundary so "co-founder" still matches.
+const TARGET_TITLE_REGEXES = TARGET_TITLE_KEYWORDS.map(k => {
+  const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\b${escaped}\\b`, 'i');
+});
+
 function matchesTargetTitle(title: string | null | undefined): boolean {
   if (!title) return false;
-  const t = title.toLowerCase();
-  return TARGET_TITLE_KEYWORDS.some(k => t.includes(k));
+  return TARGET_TITLE_REGEXES.some(re => re.test(title));
 }
 
 // ----------------- shared helpers -----------------
