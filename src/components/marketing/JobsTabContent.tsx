@@ -85,6 +85,10 @@ interface JobsTabContentProps {
   // parent to handleFindContacts({ mode: 'company', ... }); identical
   // call shape to what the Companies tab uses.
   onFindContactsAtCompany?: (companyId: string, companyName: string) => void;
+  // Batch variant — Jobs tab passes the distinct company_ids derived
+  // from the current selection. Parent calls handleFindContacts in
+  // mode='all' with companyIds + forceRestart=true.
+  onBatchFindContactsAtCompanies?: (companyIds: string[]) => void;
   // Global run flag + the company being scanned, mirrored from the
   // parent so the Jobs-tab popover can disable the button while a run
   // is in flight (and show a spinner when *this* company is the one
@@ -230,7 +234,7 @@ function formatScrubDuration(ms: number): string {
 
 // ---- Main Component ----
 
-const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], contacts = [], loading, onRefresh, lastRunId = null, lastRunStartedAt = null, pendingCompanyFilter = null, onPendingCompanyFilterApplied, pendingNewLastRunFilter = false, onPendingNewLastRunFilterApplied, pendingClearAllFilters = false, onPendingClearAllFiltersApplied, onNavigateToCompany, onNavigateToContactsByCompany, onFindContactsAtCompany, contactRunIsActive = false, findingContactsForId = null }) => {
+const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], contacts = [], loading, onRefresh, lastRunId = null, lastRunStartedAt = null, pendingCompanyFilter = null, onPendingCompanyFilterApplied, pendingNewLastRunFilter = false, onPendingNewLastRunFilterApplied, pendingClearAllFilters = false, onPendingClearAllFiltersApplied, onNavigateToCompany, onNavigateToContactsByCompany, onFindContactsAtCompany, onBatchFindContactsAtCompanies, contactRunIsActive = false, findingContactsForId = null }) => {
   const { toast } = useToast();
   const [subTab, setSubTab] = useState<'open' | 'closed'>('open');
   const [searchTerm, setSearchTerm] = useState('');
@@ -1431,6 +1435,34 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
             >
               <Send className="w-3.5 h-3.5" />
               Batch Outreach ({selectedIds.size})
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const distinctIds = Array.from(new Set(
+                  enrichedJobs
+                    .filter(j => selectedIds.has(j.id) && j.company_id)
+                    .map(j => j.company_id as string)
+                ));
+                if (distinctIds.length === 0) return;
+                onBatchFindContactsAtCompanies?.(distinctIds);
+              }}
+              disabled={contactRunIsActive || !onBatchFindContactsAtCompanies}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-emerald-300 bg-white hover:bg-emerald-50 text-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              title={contactRunIsActive
+                ? 'A contact run is already in progress'
+                : 'Search the web for hiring contacts at the companies behind the selected jobs (dedup by company; only companies with open jobs are processed)'}
+            >
+              {contactRunIsActive
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : <Users className="w-3.5 h-3.5" />}
+              Find Contacts
+              {(() => {
+                const distinctCount = new Set(
+                  enrichedJobs.filter(j => selectedIds.has(j.id) && j.company_id).map(j => j.company_id)
+                ).size;
+                return distinctCount > 0 ? ` (${distinctCount} compan${distinctCount === 1 ? 'y' : 'ies'})` : '';
+              })()}
             </button>
             <button
               type="button"

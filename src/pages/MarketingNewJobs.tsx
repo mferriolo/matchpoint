@@ -10,7 +10,7 @@ import {
   Database, Shield, Phone, Send,
   Linkedin, Unlink, Upload, Trash2, Zap,
   ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert, FileText, ArrowRightLeft,
-  Ban, RotateCcw, Eye, EyeOff, Pencil, Filter, X, Copy, GitMerge, Download
+  Ban, RotateCcw, Eye, EyeOff, Pencil, Filter, X, Copy, GitMerge, Download, AlertCircle
 } from 'lucide-react';
 
 import { supabase } from '@/lib/supabase';
@@ -1418,6 +1418,9 @@ const DesktopMarketingNewJobs: React.FC = () => {
 
   const handleConfirmCompanyMerges = async () => {
     setMergingInFlight(true);
+    // Clear stale results from a previous attempt so the inline error
+    // banner only shows the current run's outcome.
+    setMergeResultSummary(null);
     const results: Array<{ group: string; ok: boolean; canonical_name?: string; jobs_moved?: number; contacts_moved?: number; companies_deleted?: number; fields_filled?: string[]; error?: string }> = [];
     for (const g of activeMergeGroups) {
       // Fall back to default selection if state wasn't populated yet
@@ -1446,21 +1449,35 @@ const DesktopMarketingNewJobs: React.FC = () => {
     const totalJobsMoved = okResults.reduce((n, r) => n + (r.jobs_moved || 0), 0);
     const totalContactsMoved = okResults.reduce((n, r) => n + (r.contacts_moved || 0), 0);
     const totalDeleted = okResults.reduce((n, r) => n + (r.companies_deleted || 0), 0);
-    toast({
-      title: failResults.length === 0
-        ? `Merged ${okResults.length} group${okResults.length === 1 ? '' : 's'}`
-        : `Merged ${okResults.length}, ${failResults.length} failed`,
-      description: failResults.length > 0
-        ? failResults.map(r => r.error).join(' · ')
-        : `${totalDeleted} compan${totalDeleted === 1 ? 'y' : 'ies'} deleted · ${totalJobsMoved} job${totalJobsMoved === 1 ? '' : 's'} and ${totalContactsMoved} contact${totalContactsMoved === 1 ? '' : 's'} reassigned${totalFieldsFilled > 0 ? ` · filled ${totalFieldsFilled} empty field${totalFieldsFilled === 1 ? '' : 's'} on canonicals` : ''}`,
-      variant: failResults.length > 0 ? 'destructive' : undefined,
-    });
-    setShowMergeCandidates(false);
-    setMergeSelection({});
-    // Clear any manual selection that fed into this merge so the
-    // bulk bar disappears and the auto-detected list is shown next time.
-    setManualMergeGroup(null);
-    clearCompanySelection();
+
+    if (failResults.length === 0) {
+      // Clean success: close the dialog and show a normal toast.
+      toast({
+        title: `Merged ${okResults.length} group${okResults.length === 1 ? '' : 's'}`,
+        description: `${totalDeleted} compan${totalDeleted === 1 ? 'y' : 'ies'} deleted · ${totalJobsMoved} job${totalJobsMoved === 1 ? '' : 's'} and ${totalContactsMoved} contact${totalContactsMoved === 1 ? '' : 's'} reassigned${totalFieldsFilled > 0 ? ` · filled ${totalFieldsFilled} empty field${totalFieldsFilled === 1 ? '' : 's'} on canonicals` : ''}`,
+      });
+      setShowMergeCandidates(false);
+      setMergeSelection({});
+      // Clear any manual selection that fed into this merge so the
+      // bulk bar disappears and the auto-detected list is shown next time.
+      setManualMergeGroup(null);
+      clearCompanySelection();
+      setMergeResultSummary(null);
+    } else {
+      // Failures: keep the dialog open so the user can read the inline
+      // error banner and decide what to do next. Toast stays visible
+      // for 30s as a secondary signal (default is 3s — too fast to
+      // read a real error message like the merge_companies RPC's
+      // constraint violations).
+      toast({
+        title: okResults.length > 0
+          ? `Merged ${okResults.length}, ${failResults.length} failed`
+          : `${failResults.length} merge${failResults.length === 1 ? '' : 's'} failed`,
+        description: failResults.map(r => r.error).join(' · '),
+        variant: 'destructive',
+        duration: 30_000,
+      });
+    }
     refreshAfterWrite();
   };
 
@@ -2029,6 +2046,10 @@ const DesktopMarketingNewJobs: React.FC = () => {
               onFindContactsAtCompany={(companyId, companyName) =>
                 handleFindContacts({ mode: 'company', companyId, companyName })
               }
+              onBatchFindContactsAtCompanies={(companyIds) => {
+                if (!companyIds || companyIds.length === 0) return;
+                handleFindContacts({ mode: 'all', companyIds, forceRestart: true });
+              }}
               contactRunIsActive={contactRunIsActive}
               findingContactsForId={findingContactsForId}
             />
@@ -2196,6 +2217,24 @@ const DesktopMarketingNewJobs: React.FC = () => {
                       title={selectedCompanyIds.size < 2 ? 'Select at least two companies to merge' : 'Merge the selected companies — pick a canonical; others are merged into it'}
                     >
                       <GitMerge className="w-3.5 h-3.5" /> Merge
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const ids = Array.from(selectedCompanyIds);
+                        if (ids.length === 0) return;
+                        handleFindContacts({ mode: 'all', companyIds: ids, forceRestart: true });
+                      }}
+                      disabled={contactRunIsActive}
+                      className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-emerald-300 bg-white hover:bg-emerald-50 text-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={contactRunIsActive
+                        ? 'A contact run is already in progress'
+                        : `Search the web for hiring contacts at ${selectedCompanyIds.size} selected compan${selectedCompanyIds.size === 1 ? 'y' : 'ies'} (only those with open jobs are processed)`}
+                    >
+                      {contactRunIsActive
+                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : <Users className="w-3.5 h-3.5" />}
+                      Find Contacts ({selectedCompanyIds.size})
                     </button>
                     <button
                       type="button"
@@ -3931,7 +3970,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
           canonical and their company rows deleted via the
           merge_companies RPC (one transaction per group). */}
       {showMergeCandidates && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => !mergingInFlight && (setShowMergeCandidates(false), setManualMergeGroup(null))}>
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => !mergingInFlight && (setShowMergeCandidates(false), setManualMergeGroup(null), setMergeResultSummary(null))}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl overflow-hidden max-h-[88vh] flex flex-col" onClick={e => e.stopPropagation()}>
             <div className="p-5 border-b">
               <div className="flex items-center gap-3">
@@ -3952,13 +3991,43 @@ const DesktopMarketingNewJobs: React.FC = () => {
                   </p>
                 </div>
                 <button
-                  onClick={() => !mergingInFlight && (setShowMergeCandidates(false), setManualMergeGroup(null))}
+                  onClick={() => !mergingInFlight && (setShowMergeCandidates(false), setManualMergeGroup(null), setMergeResultSummary(null))}
                   className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
             </div>
+
+            {mergeResultSummary && mergeResultSummary.some(r => !r.ok) && (
+              <div className="px-5 py-3 border-b bg-red-50 border-red-100">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
+                  <div className="flex-1 text-sm">
+                    <div className="font-semibold text-red-800">
+                      {mergeResultSummary.filter(r => !r.ok).length} merge{mergeResultSummary.filter(r => !r.ok).length === 1 ? '' : 's'} failed{mergeResultSummary.filter(r => r.ok).length > 0 ? `, ${mergeResultSummary.filter(r => r.ok).length} succeeded` : ''}
+                    </div>
+                    <ul className="mt-1 space-y-1">
+                      {mergeResultSummary.filter(r => !r.ok).map((r, i) => (
+                        <li key={i} className="text-red-700 text-xs">
+                          <span className="font-mono whitespace-pre-wrap break-words">{r.error || 'Unknown error'}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-2 text-[11px] text-red-600/80">
+                      Resolve the underlying issue (often a unique-constraint clash on crelate_link or a dependent row the RPC doesn't cascade) and click Confirm again, or Cancel and merge a smaller set.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setMergeResultSummary(null)}
+                    className="text-red-600 hover:text-red-800 p-1 rounded hover:bg-red-100"
+                    title="Dismiss error"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="overflow-y-auto flex-1 p-5 space-y-5 bg-gray-50">
               {activeMergeGroups.map(g => {
@@ -4063,7 +4132,7 @@ const DesktopMarketingNewJobs: React.FC = () => {
                 })()}
               </p>
               <div className="flex items-center gap-2">
-                <Button variant="outline" onClick={() => { setShowMergeCandidates(false); setManualMergeGroup(null); }} disabled={mergingInFlight}>
+                <Button variant="outline" onClick={() => { setShowMergeCandidates(false); setManualMergeGroup(null); setMergeResultSummary(null); }} disabled={mergingInFlight}>
                   Cancel
                 </Button>
                 <Button
