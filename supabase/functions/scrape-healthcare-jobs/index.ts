@@ -23,7 +23,19 @@ const JOB_BOARDS = ["Indeed","LinkedIn Jobs","ZipRecruiter","Google Jobs","Glass
 // default Google Jobs aggregator results, so a targeted site: query
 // surfaces postings the per-company / per-role queries miss.
 // Domains kept tight (no www.) so the site: filter resolves cleanly.
-const HEALTHCARE_BOARDS = [
+// Phase D targets. Each entry is a domain we hit via a SerpAPI
+// `site:` query — SerpAPI's Google Jobs index returns postings on
+// the named domain that match our OR'd role clause. This lets us
+// pull from boards Google Jobs's default aggregation either
+// under-indexes (the healthcare-specific ones) or only sees a
+// fraction of (the generalist ones — Indeed/Monster/etc.).
+//
+// We don't scrape these boards directly — Indeed, ZipRecruiter,
+// CareerBuilder, and Monster all block or throttle direct
+// scrapers. SerpAPI is the right channel because it pulls from
+// Google's index where these boards are crawled.
+const JOB_BOARDS = [
+  // Healthcare-specific.
   'doccafe.com',
   'healthecareers.com',
   'practicelink.com',
@@ -32,6 +44,14 @@ const HEALTHCARE_BOARDS = [
   'practicematch.com',
   'vivian.com',
   'jobs.nurse.com',
+  // Generalist boards. Added 2026-05-12 — direct-scraping these is
+  // a non-starter (they block bots); SerpAPI site: queries catch
+  // postings the default Google Jobs aggregation doesn't surface
+  // because Google ranks them lower vs. ATS direct links.
+  'indeed.com',
+  'monster.com',
+  'careerbuilder.com',
+  'ziprecruiter.com',
 ];
 const PRIORITY_ORGS = ["Agilon Health","Oak Street Health","ChenMed","Iora Health","Aledade","Cityblock Health","Cano Health","Privia Health","Signify Health","Curana Health","VillageMD","Hopscotch Health","Cohere Health","CINQCARE","CenterWell","HarmonyCares","CareMax","P3 Health Partners","Wellvana","Bloom Healthcare","Pair Team","Firefly Health","Vera Whole Health","Everside Health","Marathon Health","Alignment Healthcare","Devoted Health","Clover Health","Bright Health","Carelon","Optum","UnitedHealth Group","InnovAge","Trinity Health PACE","myPlace Health","Element Care","Humana","CVS Health","Aetna","Elevance Health","Cigna","Molina Healthcare","Centene","SCAN Health Plan","Oscar Health","Point32Health","CommonSpirit Health","HCA Healthcare","Ascension","Providence","Trinity Health","Intermountain Health","Kaiser Permanente","Advocate Aurora Health","Atrium Health","Geisinger","Tenet Healthcare","Landmark Health","DispatchHealth","BrightSpring Health","Enhabit Home Health","Compassus","Main Street Health","Strive Health","Crossover Health","Pearl Health","Rush University System for Health","Evolent Health","Lumeris"];
 
@@ -1163,20 +1183,20 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
         telem.endStep(foundJobs.length, `${targets.length} companies + ${effectiveRoles.length} broad role searches → ${foundJobs.length} new jobs found (${serpErrors} SerpAPI errors)`);
 
         // ---------- Phase D: Healthcare-specific board queries (v84) ----------
-        // For each board domain in HEALTHCARE_BOARDS, run one SerpAPI Google
+        // For each board domain in JOB_BOARDS, run one SerpAPI Google
         // Jobs query with all selected role keywords OR'd together and a
         // site: filter. Surfaces postings on physician/nurse-specific boards
         // that the default Google Jobs aggregator under-indexes.
-        if (HEALTHCARE_BOARDS.length > 0 && effectiveRoles.length > 0) {
-          telem.startStep('discover_healthcare_boards', HEALTHCARE_BOARDS.length);
-          log('searching_sources', `Phase D: ${HEALTHCARE_BOARDS.length} healthcare-specific boards via SerpAPI site: queries`);
+        if (JOB_BOARDS.length > 0 && effectiveRoles.length > 0) {
+          telem.startStep('discover_healthcare_boards', JOB_BOARDS.length);
+          log('searching_sources', `Phase D: ${JOB_BOARDS.length} job boards (healthcare-specific + generalist) via SerpAPI site: queries`);
           // v151: flush sub_step + in-memory logs *before* the board loop so
           // the UI shows "Phase D: starting" instead of staying frozen on the
           // last Phase B/C message ("84/84 queries…") for the duration of
           // Phase D. Without this, `progress.updateStep` is never called
           // between Phase C end and Phase A start, and a hang in Phase D
           // looked indistinguishable from "Phase B/C still running."
-          await progress.updateStep('searching_sources', { sub_step: `Phase D: starting ${HEALTHCARE_BOARDS.length} healthcare-board queries...` });
+          await progress.updateStep('searching_sources', { sub_step: `Phase D: starting ${JOB_BOARDS.length} job-board queries...` });
           const foundJobsBefore = foundJobs.length;
           let dCalls = 0, dErrors = 0;
           const perBoardCounts: Record<string, number> = {};
@@ -1192,8 +1212,8 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           const PHASE_D_BUDGET_MS = 3 * 60 * 1000;
           const phaseDStart = Date.now();
           if (roleClause) {
-            for (let bi = 0; bi < HEALTHCARE_BOARDS.length; bi++) {
-              const board = HEALTHCARE_BOARDS[bi];
+            for (let bi = 0; bi < JOB_BOARDS.length; bi++) {
+              const board = JOB_BOARDS[bi];
               if (Date.now() - runStartMs > 25 * 60 * 1000) {
                 log('searching_sources', `Phase D: global time budget exhausted after ${dCalls} board queries`);
                 break;
@@ -1202,7 +1222,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
                 log('searching_sources', `Phase D: phase budget exhausted after ${dCalls} board queries (${(Date.now() - phaseDStart) / 1000}s)`);
                 break;
               }
-              await progress.updateStep('searching_sources', { sub_step: `Phase D: board ${bi + 1}/${HEALTHCARE_BOARDS.length} (${board.split('.')[0]})...` });
+              await progress.updateStep('searching_sources', { sub_step: `Phase D: board ${bi + 1}/${JOB_BOARDS.length} (${board.split('.')[0]})...` });
               const before = foundJobs.length;
               const r = await searchSerpApiBroad(`(${roleClause}) site:${board}`);
               dCalls++;
@@ -1222,7 +1242,7 @@ async function runTrackerProcess(rid: string, action: string, oa: string, jobTit
           serpErrors += dErrors;
           const breakdown = Object.entries(perBoardCounts).filter(([,n]) => n > 0).map(([b,n]) => `${b.split('.')[0]}:${n}`).join(' ') || '(no matches)';
           log('searching_sources', `Phase D complete: ${dAdded} found jobs added from ${dCalls} board queries [${breakdown}], ${dErrors} errors`);
-          telem.endStep(dAdded, `${HEALTHCARE_BOARDS.length} boards × OR'd roles, ${dAdded} found jobs added [${breakdown}], ${dErrors} errors`);
+          telem.endStep(dAdded, `${JOB_BOARDS.length} boards × OR'd roles, ${dAdded} found jobs added [${breakdown}], ${dErrors} errors`);
           await progress.updateStep('searching_sources', { sub_step: `Phase D complete: ${dAdded} jobs from ${dCalls} board queries` });
         }
 
