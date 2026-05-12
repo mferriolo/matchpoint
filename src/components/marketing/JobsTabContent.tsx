@@ -38,6 +38,7 @@ const JOBS_TAB_COLUMNS = [
   { key: 'has_description',defaultWidth: 70,  minWidth: 50 },
   { key: 'job_type',       defaultWidth: 130, minWidth: 80 },
   { key: 'company_name',   defaultWidth: 200, minWidth: 100 },
+  { key: 'contact_count',  defaultWidth: 80,  minWidth: 60 },
   { key: 'company_type',   defaultWidth: 150, minWidth: 90 },
   { key: 'city',           defaultWidth: 130, minWidth: 70 },
   { key: 'state',          defaultWidth: 80,  minWidth: 60 },
@@ -85,7 +86,7 @@ interface JobsTabContentProps {
 // Sort keys mirror the Tracker's jobs table. Legacy keys (job_category,
 // location, job_url, has_description, date_posted, high_priority) have
 // been dropped in favor of the Tracker's column shape.
-type SortField = 'priority_score' | 'job_title' | 'job_type' | 'company_name' | 'company_type' | 'city' | 'state' | 'source' | 'has_description' | 'date_posted' | 'created_at';
+type SortField = 'priority_score' | 'job_title' | 'job_type' | 'company_name' | 'contact_count' | 'company_type' | 'city' | 'state' | 'source' | 'has_description' | 'date_posted' | 'created_at';
 
 type SortDir = 'asc' | 'desc';
 
@@ -416,6 +417,17 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
       if (co?.id) byId.set(co.id, co);
       if (co?.company_name) byName.set(String(co.company_name).toLowerCase().trim(), co);
     }
+    // Count contacts per company, dual-keyed (by id and by normalized
+    // name) so we can resolve regardless of which key the job carries.
+    const contactCountById = new Map<string, number>();
+    const contactCountByName = new Map<string, number>();
+    for (const ct of contacts) {
+      if (ct?.company_id) contactCountById.set(ct.company_id, (contactCountById.get(ct.company_id) || 0) + 1);
+      if (ct?.company_name) {
+        const n = String(ct.company_name).toLowerCase().trim();
+        contactCountByName.set(n, (contactCountByName.get(n) || 0) + 1);
+      }
+    }
     return jobs.map(j => {
       const co = (j.company_id && byId.get(j.company_id)) ||
                  (j.company_name && byName.get(String(j.company_name).toLowerCase().trim())) ||
@@ -426,6 +438,11 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
       const eff = typeof j.priority_score === 'number'
         ? j.priority_score
         : priorityScore({ datePosted: j.date_posted, lastSeenAt: j.last_seen_at, createdAt: j.created_at, jobTitle: j.job_title, companyType, description: j.description }).total;
+      // Prefer id-based count (canonical); fall back to name-based when
+      // the job has no company_id or the contacts row carries name only.
+      const contactCount = (co?.id && contactCountById.get(co.id))
+        ?? (j.company_name && contactCountByName.get(String(j.company_name).toLowerCase().trim()))
+        ?? 0;
       return {
         ...j,
         _hasMatchedCompany: !!co,
@@ -434,9 +451,10 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
         _companyIsHighPriority: !!co?.is_high_priority,
         _matchedJobType: matchJobType(j.job_title, jobTypeOptions),
         _priorityScore: eff,
+        _contactCount: contactCount,
       };
     });
-  }, [jobs, companies, jobTypeOptions]);
+  }, [jobs, companies, contacts, jobTypeOptions]);
 
   // Match the Tracker's job set exactly so both surfaces report the
   // same total. The Tracker iterates `companies` and pulls each
@@ -620,6 +638,11 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
         const aHas = !!(a.description && String(a.description).trim().length > 0);
         const bHas = !!(b.description && String(b.description).trim().length > 0);
         const cmp = (aHas ? 1 : 0) - (bHas ? 1 : 0);
+        return sortDir === 'asc' ? cmp : -cmp;
+      }
+
+      if (sortField === 'contact_count') {
+        const cmp = (a._contactCount || 0) - (b._contactCount || 0);
         return sortDir === 'asc' ? cmp : -cmp;
       }
 
@@ -1583,6 +1606,19 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
               />
               <MultiSelectColumnHeader<SortField> field="job_type" label="Job Type" filterValues={filterJobType} filterOptions={uniqueJobTypes} onFilterChange={setFilterJobType} sortField={sortField} sortDir={sortDir} onSort={handleSort} resizeHandle={<ResizeHandle columnKey="job_type" />} />
               <MultiSelectColumnHeader<SortField> field="company_name" label="Company" filterValues={filterCompany} filterOptions={uniqueCompanies} onFilterChange={setFilterCompany} sortField={sortField} sortDir={sortDir} onSort={handleSort} resizeHandle={<ResizeHandle columnKey="company_name" />} />
+              <th className="text-center px-2 py-3 font-medium text-gray-600 text-xs uppercase tracking-wider relative select-none whitespace-nowrap">
+                <button
+                  onClick={() => handleSort('contact_count')}
+                  className="inline-flex items-center gap-0.5 hover:text-gray-900"
+                  title="Number of marketing_contacts rows at this job's company. Click to sort."
+                >
+                  # Contacts
+                  {sortField === 'contact_count'
+                    ? (sortDir === 'asc' ? <ArrowUp className="w-3 h-3 ml-0.5" /> : <ArrowDown className="w-3 h-3 ml-0.5" />)
+                    : <ArrowUpDown className="w-3 h-3 ml-0.5 text-gray-300" />}
+                </button>
+                <ResizeHandle columnKey="contact_count" />
+              </th>
               <MultiSelectColumnHeader<SortField> field="company_type" label="Company Type" filterValues={filterCompanyType} filterOptions={uniqueCompanyTypes} onFilterChange={setFilterCompanyType} sortField={sortField} sortDir={sortDir} onSort={handleSort} resizeHandle={<ResizeHandle columnKey="company_type" />} />
               <MultiSelectColumnHeader<SortField> field="city" label="City" filterValues={filterCity} filterOptions={uniqueCities} onFilterChange={setFilterCity} sortField={sortField} sortDir={sortDir} onSort={handleSort} resizeHandle={<ResizeHandle columnKey="city" />} />
               <MultiSelectColumnHeader<SortField> field="state" label="State" filterValues={filterState} filterOptions={uniqueStates} onFilterChange={setFilterState} sortField={sortField} sortDir={sortDir} onSort={handleSort} resizeHandle={<ResizeHandle columnKey="state" />} />
@@ -1765,6 +1801,38 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
                           )}
                         </div>
                       ) : <span className="text-gray-300">—</span>}
+                    </td>
+                    {/* # Contacts at this job's company. Clickable —
+                        jumps to Contacts tab pre-filtered to the
+                        company name (reuses onNavigateToContactsByCompany
+                        if the parent wired it). */}
+                    <td className="px-2 py-3 text-center tabular-nums" onClick={e => e.stopPropagation()}>
+                      {(() => {
+                        const n = j._contactCount || 0;
+                        const colorClass = n === 0
+                          ? 'text-gray-300'
+                          : n === 1
+                            ? 'text-amber-700 bg-amber-50'
+                            : 'text-emerald-700 bg-emerald-50';
+                        const inner = (
+                          <span className={`inline-block min-w-[1.75rem] px-1.5 py-0.5 rounded text-xs font-semibold ${colorClass}`}>
+                            {n}
+                          </span>
+                        );
+                        if (n > 0 && j.company_name && onNavigateToContactsByCompany) {
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => onNavigateToContactsByCompany(j.company_name)}
+                              className="hover:opacity-80"
+                              title={`View ${n} contact${n === 1 ? '' : 's'} at ${j.company_name}`}
+                            >
+                              {inner}
+                            </button>
+                          );
+                        }
+                        return inner;
+                      })()}
                     </td>
                     {/* Company Type (from enriched marketing_companies). */}
                     <td className="px-4 py-3">
