@@ -7,7 +7,7 @@ import {
   Download, Loader2, X, Archive, RotateCcw, Filter, ShieldCheck,
   CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Trash2,
   Link2, Star, Zap, Building2, Briefcase, Ban, Eye, EyeOff, Pencil,
-  Calendar, FileText, Minus, Columns3, Send, Sparkles
+  Calendar, FileText, Minus, Columns3, Send, Sparkles, Users
 } from 'lucide-react';
 
 
