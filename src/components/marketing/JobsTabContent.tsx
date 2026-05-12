@@ -81,6 +81,16 @@ interface JobsTabContentProps {
   // pre-filtered, or to Contacts tab pre-filtered.
   onNavigateToCompany?: (companyName: string) => void;
   onNavigateToContactsByCompany?: (companyName: string) => void;
+  // Trigger find-contacts edge function for one company. Wired by the
+  // parent to handleFindContacts({ mode: 'company', ... }); identical
+  // call shape to what the Companies tab uses.
+  onFindContactsAtCompany?: (companyId: string, companyName: string) => void;
+  // Global run flag + the company being scanned, mirrored from the
+  // parent so the Jobs-tab popover can disable the button while a run
+  // is in flight (and show a spinner when *this* company is the one
+  // being scanned).
+  contactRunIsActive?: boolean;
+  findingContactsForId?: string | null;
 }
 
 // Sort keys mirror the Tracker's jobs table. Legacy keys (job_category,
@@ -220,7 +230,7 @@ function formatScrubDuration(ms: number): string {
 
 // ---- Main Component ----
 
-const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], contacts = [], loading, onRefresh, lastRunId = null, lastRunStartedAt = null, pendingCompanyFilter = null, onPendingCompanyFilterApplied, pendingNewLastRunFilter = false, onPendingNewLastRunFilterApplied, pendingClearAllFilters = false, onPendingClearAllFiltersApplied, onNavigateToCompany, onNavigateToContactsByCompany }) => {
+const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], contacts = [], loading, onRefresh, lastRunId = null, lastRunStartedAt = null, pendingCompanyFilter = null, onPendingCompanyFilterApplied, pendingNewLastRunFilter = false, onPendingNewLastRunFilterApplied, pendingClearAllFilters = false, onPendingClearAllFiltersApplied, onNavigateToCompany, onNavigateToContactsByCompany, onFindContactsAtCompany, contactRunIsActive = false, findingContactsForId = null }) => {
   const { toast } = useToast();
   const [subTab, setSubTab] = useState<'open' | 'closed'>('open');
   const [searchTerm, setSearchTerm] = useState('');
@@ -1791,6 +1801,20 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
                                     View contacts at this company
                                   </button>
                                 )}
+                                {onFindContactsAtCompany && j.company_id && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onFindContactsAtCompany(j.company_id, j.company_name)}
+                                    disabled={contactRunIsActive || findingContactsForId === j.company_id}
+                                    className="w-full text-left px-2 py-1.5 rounded text-sm text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 disabled:hover:bg-transparent flex items-center gap-2"
+                                    title={contactRunIsActive ? 'A contact run is already in progress' : `Search the web for hiring contacts at ${j.company_name} (AI + Crelate)`}
+                                  >
+                                    {findingContactsForId === j.company_id
+                                      ? <Loader2 className="w-3.5 h-3.5 flex-shrink-0 animate-spin" />
+                                      : <Users className="w-3.5 h-3.5 flex-shrink-0 text-emerald-600" />}
+                                    Find more contacts here
+                                  </button>
+                                )}
                               </PopoverContent>
                             </Popover>
                           ) : (
@@ -2359,6 +2383,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
         <BatchOutreachFlow
           jobs={batchOutreachJobs}
           onClose={() => { setBatchOutreachJobs(null); onRefresh(); }}
+          onRequestRescanContacts={onFindContactsAtCompany}
         />
       )}
     </div>

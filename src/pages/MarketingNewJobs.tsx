@@ -2026,6 +2026,11 @@ const DesktopMarketingNewJobs: React.FC = () => {
               onPendingClearAllFiltersApplied={() => setPendingJobsClearAll(false)}
               onNavigateToCompany={navigateToCompany}
               onNavigateToContactsByCompany={navigateToContactsByCompany}
+              onFindContactsAtCompany={(companyId, companyName) =>
+                handleFindContacts({ mode: 'company', companyId, companyName })
+              }
+              contactRunIsActive={contactRunIsActive}
+              findingContactsForId={findingContactsForId}
             />
           </TabsContent>
 
