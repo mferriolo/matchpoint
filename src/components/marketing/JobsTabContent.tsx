@@ -24,6 +24,7 @@ import EditJobModal, { EditJobRow } from './EditJobModal';
 import { DateRangeFilterIcon, DateRange, inDateRange } from './DateRangeFilter';
 import type { ScriptJobInput } from './ScriptGeneratorModal';
 import { OutreachWorkspace } from './OutreachWorkspace';
+import { BatchOutreachFlow } from './BatchOutreachFlow';
 import { useResizableColumns } from './useResizableColumns';
 
 // Column keys must match the order of <col> in the table's <colgroup>
@@ -363,6 +364,32 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
   const [viewingJobId, setViewingJobId] = useState<string | null>(null);
   const [editingJob, setEditingJob] = useState<EditJobRow | null>(null);
   const [outreachJob, setOutreachJob] = useState<ScriptJobInput | null>(null);
+  // Batch outreach: array of ScriptJobInput when the modal is open, null when closed.
+  const [batchOutreachJobs, setBatchOutreachJobs] = useState<ScriptJobInput[] | null>(null);
+
+  const buildScriptJobInput = (j: any): ScriptJobInput => ({
+    id: j.id,
+    job_title: j.job_title || null,
+    company_id: j.company_id || null,
+    company_name: j.company_name || null,
+    city: j.city || null,
+    state: j.state || null,
+    job_url: j.job_url || j.website_source || null,
+    date_posted: j.date_posted || null,
+    created_at: j.created_at || null,
+    company_type: j._companyType || j.company_type || null,
+    job_type: j._matchedJobType || j.job_type || null,
+    compensation: j.salary_range || j.compensation || null,
+    priority_score: typeof j._priorityScore === 'number' ? j._priorityScore : (typeof j.priority_score === 'number' ? j.priority_score : null),
+    description: j.description || null,
+    company_description: null,
+  });
+
+  const handleOpenBatchOutreach = () => {
+    const selected = enrichedJobs.filter(j => selectedIds.has(j.id));
+    if (selected.length === 0) return;
+    setBatchOutreachJobs(selected.map(buildScriptJobInput));
+  };
 
   // Resizable columns. Pulls persisted widths from localStorage (or
   // falls back to defaults) and exposes a per-column ResizeHandle that
@@ -1365,6 +1392,15 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
           <div className="ml-auto flex items-center gap-1.5">
             <button
               type="button"
+              onClick={handleOpenBatchOutreach}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-[#911406]/30 bg-[#911406] text-white hover:bg-[#7a1005]"
+              title="Open batch outreach — pick recipients per job and queue messages"
+            >
+              <Send className="w-3.5 h-3.5" />
+              Batch Outreach ({selectedIds.size})
+            </button>
+            <button
+              type="button"
               onClick={handleBulkScrapeDescriptions}
               disabled={scrapingSelected}
               className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded border border-emerald-200 bg-white hover:bg-emerald-50 text-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1808,23 +1844,7 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
                           <Pencil className="w-3.5 h-3.5" />
                         </button>
                         <button
-                          onClick={() => setOutreachJob({
-                            id: j.id,
-                            job_title: j.job_title || null,
-                            company_id: j.company_id || null,
-                            company_name: j.company_name || null,
-                            city: j.city || null,
-                            state: j.state || null,
-                            job_url: j.job_url || j.website_source || null,
-                            date_posted: j.date_posted || null,
-                            created_at: j.created_at || null,
-                            company_type: j._companyType || j.company_type || null,
-                            job_type: j._matchedJobType || j.job_type || null,
-                            compensation: j.salary_range || j.compensation || null,
-                            priority_score: typeof j._priorityScore === 'number' ? j._priorityScore : (typeof j.priority_score === 'number' ? j.priority_score : null),
-                            description: j.description || null,
-                            company_description: null,
-                          })}
+                          onClick={() => setOutreachJob(buildScriptJobInput(j))}
                           className="inline-flex items-center justify-center p-1 rounded text-[#911406] hover:bg-red-50"
                           title="Open outreach — contacts, draft, and send"
                         >
@@ -2266,6 +2286,13 @@ const JobsTabContent: React.FC<JobsTabContentProps> = ({ jobs, companies = [], c
         onClose={() => setEditingJob(null)}
       />
       <OutreachWorkspace job={outreachJob} onClose={() => setOutreachJob(null)} />
+
+      {batchOutreachJobs && (
+        <BatchOutreachFlow
+          jobs={batchOutreachJobs}
+          onClose={() => { setBatchOutreachJobs(null); onRefresh(); }}
+        />
+      )}
     </div>
   );
 };

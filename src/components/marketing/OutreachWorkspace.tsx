@@ -18,7 +18,7 @@ import { ScriptJobInput } from './ScriptGeneratorModal';
 // Types
 // ===========================================================
 
-interface ContactRow {
+export interface ContactRow {
   id: string;
   first_name?: string | null;
   last_name?: string | null;
@@ -36,20 +36,20 @@ interface ContactRow {
   company_name?: string | null;
 }
 
-interface ScoredContact {
+export interface ScoredContact {
   c: ContactRow;
   score: number;
   reasons: string[];
 }
 
-interface ScriptOutputs {
+export interface ScriptOutputs {
   coldCall: string;
   email: { subject: string; body: string };
   linkedin: string;
   followUpEmail: { subject: string; body: string };
 }
 
-type MessageType = 'email' | 'followUpEmail' | 'linkedin' | 'coldCall';
+export type MessageType = 'email' | 'followUpEmail' | 'linkedin' | 'coldCall';
 
 const MESSAGE_TYPE_LABEL: Record<MessageType, string> = {
   email:         'Email',
@@ -558,6 +558,94 @@ function CopyHtmlBtn({ subject: _subject, body, jobTitle, jobUrl }: { subject: s
 }
 
 // ===========================================================
+// Sender identity + placeholder scrubbing — extracted so the
+// batch-outreach flow can reuse the exact same logic.
+// ===========================================================
+
+export interface SenderIdentity {
+  first_name?: string;
+  last_name?: string;
+  title?: string;
+  company?: string;
+}
+
+export async function loadSenderIdentity(): Promise<SenderIdentity> {
+  // Primary source: admin_users (edited from Admin → Users tab so
+  // the operator can update title/company without leaving the app).
+  // Fallback: system_settings legacy keys for installs that haven't
+  // populated admin_users yet.
+  const { data: admins } = await supabase
+    .from('admin_users')
+    .select('first_name, last_name, name, title, company, role, status, last_login, created_at')
+    .eq('status', 'active')
+    .order('role', { ascending: false })
+    .order('last_login', { ascending: false, nullsFirst: false } as any)
+    .order('created_at', { ascending: false })
+    .limit(1);
+  const row: any = (admins && admins[0]) || null;
+  if (row) {
+    const fn = (row.first_name || '').trim() || (row.name ? String(row.name).split(' ')[0] : '');
+    const ln = (row.last_name  || '').trim() || (row.name ? String(row.name).split(' ').slice(1).join(' ') : '');
+    const t  = (row.title   || '').trim();
+    const co = (row.company || '').trim();
+    if (fn || ln || t || co) {
+      return { first_name: fn || undefined, last_name: ln || undefined, title: t || undefined, company: co || undefined };
+    }
+  }
+
+  const { data } = await supabase
+    .from('system_settings')
+    .select('key, value')
+    .in('key', ['outreach.sender_first_name', 'outreach.sender_last_name', 'outreach.sender_title', 'outreach.sender_company']);
+  const out: SenderIdentity = {};
+  for (const r of data || []) {
+    let raw: any = (r as any).value;
+    if (typeof raw === 'string' && raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
+      try { raw = JSON.parse(raw); } catch {}
+    }
+    const v = typeof raw === 'string' ? raw : (raw == null ? '' : String(raw));
+    const key = (r as any).key as string;
+    if (key === 'outreach.sender_first_name') out.first_name = v;
+    else if (key === 'outreach.sender_last_name') out.last_name = v;
+    else if (key === 'outreach.sender_title') out.title = v;
+    else if (key === 'outreach.sender_company') out.company = v;
+  }
+  return out;
+}
+
+/** Belt-and-suspenders scrubber: replace any remaining bracketed
+ *  placeholders with the sender's real values. Runs on every output
+ *  string after the model returns. */
+export function scrubPlaceholders(s: string, sender: SenderIdentity): string {
+  if (!s) return s;
+  const fullName = [sender.first_name, sender.last_name].filter(Boolean).join(' ').trim();
+  const title = (sender.title || '').trim();
+  const company = (sender.company || '').trim();
+  let out = s;
+  if (fullName) {
+    out = out.replace(/\[your name\]/gi, fullName).replace(/\[name\]/gi, fullName);
+  }
+  if (title) {
+    out = out.replace(/\[your title\]/gi, title).replace(/\[title\]/gi, title);
+  }
+  if (company) {
+    out = out.replace(/\[your company\]/gi, company).replace(/\[company\]/gi, company);
+  }
+  return out;
+}
+
+export function applyScrubToOutputs(out: ScriptOutputs, sender: SenderIdentity): ScriptOutputs {
+  return {
+    coldCall: scrubPlaceholders(out.coldCall, sender),
+    email: { subject: scrubPlaceholders(out.email.subject, sender), body: scrubPlaceholders(out.email.body, sender) },
+    linkedin: scrubPlaceholders(out.linkedin, sender),
+    followUpEmail: out.followUpEmail
+      ? { subject: scrubPlaceholders(out.followUpEmail.subject, sender), body: scrubPlaceholders(out.followUpEmail.body, sender) }
+      : { subject: '', body: '' },
+  };
+}
+
+// ===========================================================
 // Main component
 // ===========================================================
 
@@ -682,79 +770,11 @@ export function OutreachWorkspace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedContactId]);
 
-  const loadSender = async (): Promise<{ first_name?: string; last_name?: string; title?: string; company?: string }> => {
-    // Primary source: admin_users (edited from Admin → Users tab so
-    // the operator can update title/company without leaving the app).
-    // Fallback: system_settings legacy keys for installs that haven't
-    // populated admin_users yet.
-    const { data: admins } = await supabase
-      .from('admin_users')
-      .select('first_name, last_name, name, title, company, role, status, last_login, created_at')
-      .eq('status', 'active')
-      .order('role', { ascending: false })
-      .order('last_login', { ascending: false, nullsFirst: false } as any)
-      .order('created_at', { ascending: false })
-      .limit(1);
-    const row: any = (admins && admins[0]) || null;
-    if (row) {
-      const fn = (row.first_name || '').trim() || (row.name ? String(row.name).split(' ')[0] : '');
-      const ln = (row.last_name  || '').trim() || (row.name ? String(row.name).split(' ').slice(1).join(' ') : '');
-      const t  = (row.title   || '').trim();
-      const co = (row.company || '').trim();
-      if (fn || ln || t || co) {
-        return { first_name: fn || undefined, last_name: ln || undefined, title: t || undefined, company: co || undefined };
-      }
-    }
-
-    const { data } = await supabase
-      .from('system_settings')
-      .select('key, value')
-      .in('key', ['outreach.sender_first_name', 'outreach.sender_last_name', 'outreach.sender_title', 'outreach.sender_company']);
-    const out: Record<string, string> = {};
-    for (const r of data || []) {
-      let raw: any = (r as any).value;
-      if (typeof raw === 'string' && raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
-        try { raw = JSON.parse(raw); } catch {}
-      }
-      const v = typeof raw === 'string' ? raw : (raw == null ? '' : String(raw));
-      const key = (r as any).key as string;
-      if (key === 'outreach.sender_first_name') out.first_name = v;
-      else if (key === 'outreach.sender_last_name') out.last_name = v;
-      else if (key === 'outreach.sender_title') out.title = v;
-      else if (key === 'outreach.sender_company') out.company = v;
-    }
-    return out;
-  };
-
-  /** Belt-and-suspenders scrubber: replace any remaining bracketed
-   *  placeholders with the sender's real values. Runs on every output
-   *  string after the model returns. */
-  const scrubPlaceholders = (s: string, sender: { first_name?: string; last_name?: string; title?: string; company?: string }): string => {
-    if (!s) return s;
-    const fullName = [sender.first_name, sender.last_name].filter(Boolean).join(' ').trim();
-    const title = (sender.title || '').trim();
-    const company = (sender.company || '').trim();
-    let out = s;
-    if (fullName) {
-      out = out.replace(/\[your name\]/gi, fullName).replace(/\[name\]/gi, fullName);
-    }
-    if (title) {
-      out = out.replace(/\[your title\]/gi, title).replace(/\[title\]/gi, title);
-    }
-    if (company) {
-      out = out.replace(/\[your company\]/gi, company).replace(/\[company\]/gi, company);
-    }
-    return out;
-  };
-
-  const applyScrub = (out: ScriptOutputs, sender: { first_name?: string; last_name?: string; title?: string; company?: string }): ScriptOutputs => ({
-    coldCall: scrubPlaceholders(out.coldCall, sender),
-    email: { subject: scrubPlaceholders(out.email.subject, sender), body: scrubPlaceholders(out.email.body, sender) },
-    linkedin: scrubPlaceholders(out.linkedin, sender),
-    followUpEmail: out.followUpEmail
-      ? { subject: scrubPlaceholders(out.followUpEmail.subject, sender), body: scrubPlaceholders(out.followUpEmail.body, sender) }
-      : { subject: '', body: '' },
-  });
+  // loadSender / scrubPlaceholders / applyScrub moved to module-level
+  // exports (loadSenderIdentity, scrubPlaceholders, applyScrubToOutputs)
+  // so BatchOutreachFlow can call the same code path.
+  const loadSender = loadSenderIdentity;
+  const applyScrub = applyScrubToOutputs;
 
   const generate = async () => {
     if (!job || !selected) return;
