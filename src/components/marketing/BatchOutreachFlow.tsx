@@ -62,6 +62,18 @@ interface QueueRow {
   // Customize button so they can see which rows they've tuned).
   inputs: OutreachFormInputs;
   customized: boolean;
+  // Per-format in-place edits. Each is undefined when the user
+  // hasn't touched that field yet; the preview pane falls back to
+  // row.scripts.* in that case. On regenerate we clear all edits
+  // since the new generation is the new canonical text.
+  edits: {
+    emailSubject?: string;
+    emailBody?: string;
+    followUpSubject?: string;
+    followUpBody?: string;
+    linkedin?: string;
+    coldCall?: string;
+  };
 }
 
 function buildInitialInputs(job: ScriptJobInput, recipient: ContactRow): OutreachFormInputs {
@@ -76,13 +88,6 @@ function buildInitialInputs(job: ScriptJobInput, recipient: ContactRow): Outreac
 
 const BATCH_SOFT_CAP = 25;
 const GENERATE_CONCURRENCY = 5;
-
-// One Gmail compose tab per row — same encoding as
-// OutreachWorkspace.buildMailtoHref so the existing tested path is
-// reused verbatim.
-function buildMailtoHref(email: string, subject: string, body: string): string {
-  return `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-}
 
 function fullName(c: ContactRow): string {
   return [c.first_name, c.last_name].filter(Boolean).join(' ').trim() || '(unnamed)';
@@ -234,6 +239,7 @@ export function BatchOutreachFlow({
           scripts: null,
           inputs: buildInitialInputs(job, c),
           customized: false,
+          edits: {},
         });
       }
     }
@@ -345,8 +351,16 @@ export function BatchOutreachFlow({
   const regenerateOne = (rowKey: string) => {
     const row = rows.find(r => r.key === rowKey);
     if (!row) return;
-    // Inline trigger — don't wait for an effect to pick this up.
-    generateOne({ ...row, status: 'pending', scripts: null, error: undefined });
+    // Clear in-place edits — a regeneration replaces the canonical
+    // text, so any prior tweaks would otherwise stick to the row in
+    // confusing ways.
+    generateOne({ ...row, status: 'pending', scripts: null, error: undefined, edits: {} });
+  };
+
+  // Field-level edit handler — called from the preview pane when the
+  // user types in the subject / body / linkedin / cold-call textarea.
+  const editField = (rowKey: string, field: keyof QueueRow['edits'], value: string) => {
+    setRows(prev => prev.map(r => r.key === rowKey ? { ...r, edits: { ...r.edits, [field]: value } } : r));
   };
 
   // Save handler for the Customize dialog. Updates the row's inputs,
@@ -363,6 +377,7 @@ export function BatchOutreachFlow({
       status: 'pending',
       scripts: null,
       error: undefined,
+      edits: {},
     };
     setRows(prev => prev.map(r => r.key === rowKey ? updated : r));
     setCustomizingRowKey(null);
@@ -373,6 +388,26 @@ export function BatchOutreachFlow({
     setRows(prev => prev.map(r => r.key === rowKey ? { ...r, status: 'skipped' } : r));
   };
 
+  // Resolve the text the user actually wants sent for a given format,
+  // preferring any in-place edit over the canonical script output.
+  const resolveSendable = (row: QueueRow, format: MessageType): { subject: string; body: string } => {
+    if (!row.scripts) return { subject: '', body: '' };
+    if (format === 'email') {
+      return {
+        subject: row.edits.emailSubject ?? row.scripts.email.subject,
+        body:    row.edits.emailBody    ?? row.scripts.email.body,
+      };
+    }
+    if (format === 'followUpEmail') {
+      return {
+        subject: row.edits.followUpSubject ?? row.scripts.followUpEmail.subject,
+        body:    row.edits.followUpBody    ?? row.scripts.followUpEmail.body,
+      };
+    }
+    if (format === 'linkedin') return { subject: '', body: row.edits.linkedin ?? row.scripts.linkedin };
+    return { subject: '', body: row.edits.coldCall ?? row.scripts.coldCall };
+  };
+
   const sendOne = (rowKey: string, format: MessageType) => {
     const row = rows.find(r => r.key === rowKey);
     if (!row || !row.scripts) return;
@@ -381,18 +416,25 @@ export function BatchOutreachFlow({
       window.alert(`${fullName(row.recipient)} has no email on file. Use LinkedIn or Cold Call instead.`);
       return;
     }
+    const { subject, body } = resolveSendable(row, format);
+
     if (format === 'email' || format === 'followUpEmail') {
-      const block = format === 'email' ? row.scripts.email : row.scripts.followUpEmail;
-      window.open(buildMailtoHref(email, block.subject, block.body), '_blank', 'noopener');
+      // Two-step open matching OutreachWorkspace.tsx (commit c4c2a02):
+      //  1. Copy the body to the clipboard so the user only needs to
+      //     Cmd/Ctrl+V after Gmail opens.
+      //  2. Open Gmail compose with TO + SUBJECT only. Body in the URL
+      //     made Gmail open blank tabs (URL length + encoding limits),
+      //     which is the exact symptom the user reported.
+      navigator.clipboard?.writeText(body).catch(() => {});
+      const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(email)}&su=${encodeURIComponent(subject)}`;
+      window.open(gmailUrl, '_blank', 'noopener,noreferrer');
     } else if (format === 'linkedin') {
-      // LinkedIn doesn't have a compose URL; copy the script + open
-      // the recipient's LinkedIn profile if known.
       const url = (row.recipient.linkedin_url || '').trim();
-      navigator.clipboard?.writeText(row.scripts.linkedin).catch(() => {});
-      if (url) window.open(url, '_blank', 'noopener');
+      navigator.clipboard?.writeText(body).catch(() => {});
+      if (url) window.open(url, '_blank', 'noopener,noreferrer');
       else window.alert('LinkedIn message copied to clipboard. (No LinkedIn URL on file for this contact.)');
     } else if (format === 'coldCall') {
-      navigator.clipboard?.writeText(row.scripts.coldCall).catch(() => {});
+      navigator.clipboard?.writeText(body).catch(() => {});
       window.alert('Cold call script copied to clipboard.');
     }
     // Optimistically mark as sent. (We don't have Gmail-send
@@ -443,6 +485,7 @@ export function BatchOutreachFlow({
             onSkipOne={skipOne}
             onRegenerateOne={regenerateOne}
             onCustomizeOne={setCustomizingRowKey}
+            onEditField={editField}
           />
         )}
 
@@ -631,6 +674,7 @@ function QueueView({
   onSkipOne,
   onRegenerateOne,
   onCustomizeOne,
+  onEditField,
 }: {
   rows: QueueRow[];
   focusedRowKey: string | null;
@@ -641,6 +685,7 @@ function QueueView({
   onSkipOne: (key: string) => void;
   onRegenerateOne: (key: string) => void;
   onCustomizeOne: (key: string) => void;
+  onEditField: (key: string, field: keyof QueueRow['edits'], value: string) => void;
 }) {
   const focused = rows.find(r => r.key === focusedRowKey) || rows[0];
 
@@ -685,6 +730,7 @@ function QueueView({
             onSkip={() => onSkipOne(focused.key)}
             onRegenerate={() => onRegenerateOne(focused.key)}
             onCustomize={() => onCustomizeOne(focused.key)}
+            onEditField={(field, value) => onEditField(focused.key, field, value)}
           />
         )}
       </div>
@@ -709,6 +755,7 @@ function PreviewPane({
   onSkip,
   onRegenerate,
   onCustomize,
+  onEditField,
 }: {
   row: QueueRow;
   activeFormat: MessageType;
@@ -717,6 +764,7 @@ function PreviewPane({
   onSkip: () => void;
   onRegenerate: () => void;
   onCustomize: () => void;
+  onEditField: (field: keyof QueueRow['edits'], value: string) => void;
 }) {
   const formats: { key: MessageType; label: string }[] = [
     { key: 'email',         label: 'Email' },
@@ -808,34 +856,86 @@ function PreviewPane({
           </div>
         )}
         {(row.status === 'ready' || row.status === 'sent' || row.status === 'skipped') && row.scripts && (
-          <FormatBody scripts={row.scripts} format={activeFormat} />
+          <EditableFormatBody row={row} format={activeFormat} onEditField={onEditField} />
         )}
       </div>
     </>
   );
 }
 
-function FormatBody({ scripts, format }: { scripts: ScriptOutputs; format: MessageType }) {
+function EditableFormatBody({
+  row,
+  format,
+  onEditField,
+}: {
+  row: QueueRow;
+  format: MessageType;
+  onEditField: (field: keyof QueueRow['edits'], value: string) => void;
+}) {
+  const scripts = row.scripts;
+  if (!scripts) return null;
+
+  // Disable edits once Send has been clicked — the row is effectively
+  // closed, and editing after the fact would mismatch what was sent.
+  // Skipped rows stay editable in case the user changes their mind.
+  const readOnly = row.status === 'sent';
+
   if (format === 'email') {
+    const subject = row.edits.emailSubject ?? scripts.email.subject;
+    const body    = row.edits.emailBody    ?? scripts.email.body;
     return (
-      <div className="space-y-2 text-sm">
-        <div><span className="text-gray-500 text-xs">Subject:</span> <span className="font-medium">{scripts.email.subject}</span></div>
-        <div className="whitespace-pre-wrap text-gray-800">{scripts.email.body}</div>
+      <div className="space-y-2">
+        <SubjectInput value={subject} onChange={v => onEditField('emailSubject', v)} readOnly={readOnly} />
+        <BodyTextarea value={body} onChange={v => onEditField('emailBody', v)} readOnly={readOnly} />
       </div>
     );
   }
   if (format === 'followUpEmail') {
+    const subject = row.edits.followUpSubject ?? scripts.followUpEmail.subject;
+    const body    = row.edits.followUpBody    ?? scripts.followUpEmail.body;
     return (
-      <div className="space-y-2 text-sm">
-        <div><span className="text-gray-500 text-xs">Subject:</span> <span className="font-medium">{scripts.followUpEmail.subject}</span></div>
-        <div className="whitespace-pre-wrap text-gray-800">{scripts.followUpEmail.body}</div>
+      <div className="space-y-2">
+        <SubjectInput value={subject} onChange={v => onEditField('followUpSubject', v)} readOnly={readOnly} />
+        <BodyTextarea value={body} onChange={v => onEditField('followUpBody', v)} readOnly={readOnly} />
       </div>
     );
   }
   if (format === 'linkedin') {
-    return <div className="whitespace-pre-wrap text-sm text-gray-800">{scripts.linkedin}</div>;
+    const body = row.edits.linkedin ?? scripts.linkedin;
+    return <BodyTextarea value={body} onChange={v => onEditField('linkedin', v)} readOnly={readOnly} />;
   }
-  return <div className="whitespace-pre-wrap text-sm text-gray-800">{scripts.coldCall}</div>;
+  const body = row.edits.coldCall ?? scripts.coldCall;
+  return <BodyTextarea value={body} onChange={v => onEditField('coldCall', v)} readOnly={readOnly} />;
+}
+
+function SubjectInput({ value, onChange, readOnly }: { value: string; onChange: (v: string) => void; readOnly: boolean }) {
+  return (
+    <div>
+      <label className="block text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-1">Subject</label>
+      <input
+        type="text"
+        value={value}
+        readOnly={readOnly}
+        onChange={e => onChange(e.target.value)}
+        className={`w-full text-sm font-medium rounded-md border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-ring ${readOnly ? 'bg-gray-50 text-gray-700' : 'bg-white border-input'}`}
+      />
+    </div>
+  );
+}
+
+function BodyTextarea({ value, onChange, readOnly }: { value: string; onChange: (v: string) => void; readOnly: boolean }) {
+  return (
+    <div>
+      <label className="block text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-1">Body</label>
+      <textarea
+        value={value}
+        readOnly={readOnly}
+        onChange={e => onChange(e.target.value)}
+        rows={Math.max(8, Math.min(28, value.split('\n').length + 2))}
+        className={`w-full text-sm rounded-md border px-2 py-2 leading-relaxed font-mono focus:outline-none focus:ring-1 focus:ring-ring ${readOnly ? 'bg-gray-50 text-gray-700' : 'bg-white border-input'}`}
+      />
+    </div>
+  );
 }
 
 // ===========================================================
